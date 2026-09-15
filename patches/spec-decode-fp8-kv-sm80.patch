@@ -1,0 +1,96 @@
+Add a static-scale FP8 mode to the split-KV speculative verifier.
+
+This patch is intentionally kernel-only. It is applied after
+spec-decode-attn.patch and spec-decode-int8-kv.patch and does not yet hook the
+FlashInfer backend. Keeping the kernel extension separate lets us validate FP8
+math against a dequantized BF16 reference before changing runtime dispatch.
+
+vLLM's normal per-layer FP8 KV cache stores E4M3 values plus one K and one V
+scale for the layer. On SM80 the verifier loads the raw E4M3 cache, converts to
+BF16 for tensor-core dot products, and folds the static scales into the same
+places used by the existing per-token-head int8 path:
+
+    score = (q . k_fp8_as_bf16) * k_scale
+    value = (p * v_scale) . v_fp8_as_bf16
+
+The per-token-head INT8 path remains unchanged. STATIC_QUANT and QUANT are
+mutually exclusive.
+
+Apply after patches/spec-decode-int8-kv.patch:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/spec-decode-fp8-kv-sm80.patch
+
+Written against the repository's vLLM 0.27.1 patch stack.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -57,6 +57,7 @@ def _spec_attn_partial(
+     q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
+     part_o_ptr, part_m_ptr, part_l_ptr,
+     ks_ptr, vs_ptr,
++    static_k_scale, static_v_scale,
+     scale,
+     stride_qt, stride_qh,
+     stride_kb, stride_ks, stride_kh,
+@@ -66,7 +67,7 @@ def _spec_attn_partial(
+     stride_vsb, stride_vss, stride_vsh,
+     G: tl.constexpr, Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr, BLOCK_SIZE: tl.constexpr,
+     BLOCK_M: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr, QT: tl.constexpr,
+-    NTILE: tl.constexpr, QUANT: tl.constexpr,
++    NTILE: tl.constexpr, QUANT: tl.constexpr, STATIC_QUANT: tl.constexpr,
+ ):
+@@ -116,6 +117,12 @@ def _spec_attn_partial(
+                            mask=k_ok, other=0.0)
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_sc[None, :]
++        elif STATIC_QUANT:
++            # Static per-layer FP8 cache (E4M3/E5M2).  Triton converts the
++            # loaded FP8 values to BF16 before the tensor-core dot.  vLLM's
++            # cache writer stored value/scale, so restore the K scale here.
++            k = k.to(tl.bfloat16)
++            v = v.to(tl.bfloat16)
++            s = tl.dot(qs, tl.trans(k)).to(tl.float32) * static_k_scale
+         else:
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32)            # [BLOCK_M, TILE]
+@@ -129,6 +136,10 @@ def _spec_attn_partial(
+         l_i = l_i * alpha + tl.sum(p, 1)
+         if QUANT:
+             acc = acc * alpha[:, None] + tl.dot((p * v_sc[None, :]).to(tl.bfloat16), v).to(tl.float32)
++        elif STATIC_QUANT:
++            acc = acc * alpha[:, None] + tl.dot(
++                (p * static_v_scale).to(tl.bfloat16), v
++            ).to(tl.float32)
+         else:
+             acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+@@ -204,13 +215,20 @@ class SpecDecodeAttention:
+-    def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
+-            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None):
++    def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
++            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None,
++            static_k_scale=None, static_v_scale=None):
+         """key/value_cache: [num_blocks, block_size, Hkv, D] bf16, or [.., D + pad] int8
+-        with k/v_scale_cache [num_blocks, block_size, Hkv] float32 (per-token-head int8)."""
++        with k/v_scale_cache [num_blocks, block_size, Hkv] float32 (per-token-head int8),
++        or FP8 with static_k_scale/static_v_scale (per-layer static scaling)."""
+         Hq, D = q.shape[1], q.shape[2]
+         Hkv = key_cache.shape[2]
+         G = Hq // Hkv
+         quant = k_scale_cache is not None
++        static_quant = static_k_scale is not None
++        assert quant == (v_scale_cache is not None)
++        assert static_quant == (static_v_scale is not None)
++        assert not (quant and static_quant), "per-token and static KV quantization are exclusive"
+         assert max_query_len <= self.qmax, "too many query tokens per request for this kernel"
+@@ -221,6 +239,7 @@ class SpecDecodeAttention:
+             q, key_cache, value_cache, block_table, seqused_k, cu_seqlens_q,
+             self.part_o, self.part_m, self.part_l,
+             k_scale_cache, v_scale_cache,
++            static_k_scale if static_quant else 1.0, static_v_scale if static_quant else 1.0,
+             scale,
+@@ -230,7 +249,8 @@ class SpecDecodeAttention:
+             *(k_scale_cache.stride() if quant else (0, 0, 0)),
+             *(v_scale_cache.stride() if quant else (0, 0, 0)),
+             G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
+-            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
++            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
++            STATIC_QUANT=static_quant,
+             num_warps=warps, num_stages=1,
+         )
