@@ -37,6 +37,9 @@ need_file experimental/cmp170hx-mixed-fp8/patches/flashinfer-sm80-fp8-spec-verif
 need_grep 'to\(tl\.int64\)' patches/spec-decode-attn.patch 'split-KV block ids use int64'
 need_grep 'k_scale_cache' patches/spec-decode-int8-kv.patch 'quantized verifier passes scale metadata'
 need_grep 'SPEC_CFG=' single-user/start_qwen.sh 'DFlash speculative config is launcher-owned'
+need_grep 'DFLASH_ATTN_BACKEND' single-user/start_qwen.sh 'launcher wires draft attention backend'
+need_grep 'DFLASH_KV_CACHE_DTYPE' single-user/start_qwen.sh 'launcher wires draft KV dtype'
+need_grep 'CTX.*cmp-mixed-fp8' single-user/start_qwen.sh 'launcher exposes isolated mixed-FP8 profile'
 
 echo
 echo '== installed vLLM prerequisites =='

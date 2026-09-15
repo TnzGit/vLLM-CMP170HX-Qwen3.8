@@ -87,7 +87,13 @@ CTX=${CTX:-fast}
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
-if [ "$CTX" = "fast" ]; then
+if [ "$CTX" = "cmp-mixed-fp8" ]; then
+  MAX_LEN=${MAX_LEN:-65536}
+  DRAFT_TOKENS=${DFLASH_TOKENS:-7}
+  ATTN_ARGS="--attention-backend ${CMP_TARGET_ATTN_BACKEND:-FLASHINFER} --kv-cache-dtype ${CMP_TARGET_KV_DTYPE:-fp8}"
+  export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+  export VLLM_FP8_SPEC_VERIFY=${VLLM_FP8_SPEC_VERIFY:-1}
+elif [ "$CTX" = "fast" ]; then
   MAX_LEN=${MAX_LEN:-65536}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
   ATTN_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
@@ -120,8 +126,8 @@ elif [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ]; then
   # The split-KV verify attention is bf16-KV only -- the KVarN backend brings
   # its own dequant path, so the env stays off here.
   export VLLM_SPEC_DECODE_ATTN=0
-elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ]; then
-  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k) and CTX=huge (KVarN, 240k; kvarn/install.sh); CTX=$CTX keeps SPEC=mtp" >&2
+elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ] && [ "$CTX" != "cmp-mixed-fp8" ]; then
+  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k), CTX=huge (KVarN, 240k; kvarn/install.sh), and experimental CTX=cmp-mixed-fp8; CTX=$CTX keeps SPEC=mtp" >&2
   SPEC=mtp
 fi
 if [ "$SPEC" = "dflash2" ]; then
@@ -147,7 +153,14 @@ if [ "$SPEC" = "dflash2" ]; then
   # instead of 8 and 56k of context instead of 64k. Worth setting for a coding assistant
   # applying edits or a RAG front-end quoting sources; the default stays 7.
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
-  SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
+  SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS"
+  if [ -n "${DFLASH_ATTN_BACKEND:-}" ]; then
+    SPEC_CFG="$SPEC_CFG,\"attention_backend\":\"$DFLASH_ATTN_BACKEND\""
+  fi
+  if [ -n "${DFLASH_KV_CACHE_DTYPE:-}" ]; then
+    SPEC_CFG="$SPEC_CFG,\"kv_cache_dtype\":\"$DFLASH_KV_CACHE_DTYPE\""
+  fi
+  SPEC_CFG="$SPEC_CFG}"
   # The split-KV verify attention (patches/spec-decode-attn.patch) sizes its partial
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
   # their addresses, so they must not be grown later.
@@ -235,7 +248,14 @@ if [ "$SPEC" = "dflash2" ]; then
   # state page per speculative block. That second term is what scales -- NOT the slot
   # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
   # context. Single-user mode keeps 4 slots when the block is long for the graphs.
-  if [ "$CTX" = "huge" ]; then
+  if [ "$CTX" = "cmp-mixed-fp8" ]; then
+    MAX_SEQS=${MAX_SEQS:-1}
+    MAX_LEN=${DFLASH_MAX_LEN:-$MAX_LEN}
+    # Size from GPU_UTIL during bring-up. A pinned mixed target/draft pool is
+    # qualified only after heterogeneous page geometry is proven.
+    KV_MEM=${KV_MEM-}
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+  elif [ "$CTX" = "huge" ]; then
     # KVarN pool: ~20 KB/token effective. 4.90 GiB pinned -> 268,169 tokens of
     # KV at 245760 max-model-len with 2 slots (single-user long-context; the
     # graphs stay at the k=7 size).
