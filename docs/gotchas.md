@@ -645,3 +645,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     the FULL-model step boundary from 4K through 250K.  This is a small but robust
     win; unlike increasing split count or duplicating query-row kernels, it adds
     no KV scan, reduction work, or CUDA Graph node.
+
+48. **A tiny immutable LUT can still create enormous global-transaction waste.**
+    The SM80 FP8 verifier's 512-byte BF16 decode table was cache-resident, but
+    data-dependent scalar indices made ordinary Triton global loads account for
+    85,998,528 excessive sectors (64% of the total).  In the exact NVIDIA-only
+    q8/GQA6 path, `ld.global.nc.u16` routes those immutable reads through the
+    read-only cache: NCU reported only 76,288 excessive sectors, kernel duration
+    fell from about 2.13 to 1.82 ms, and FULL-graph decode improved 2.3% at 126K
+    and 3.2% at 250K.  Keep the portable load in generic paths; inline PTX is a
+    measured architecture specialization, not a replacement for Triton's normal
+    lowering on other GPUs.

@@ -262,6 +262,36 @@ Paired FULL-graph tests used identical prompts and acceptance in both runs:
 The gain is deliberately small, but it is repeatable, has no new allocation or
 graph node, and removes redundant metadata traffic rather than trading accuracy.
 
+### Read-only cache for the immutable FP8 decode table
+
+Nsight Compute identified the remaining LUT access as the dominant pathological
+memory pattern: ordinary scalar loads generated 85,998,528 excessive global
+sectors, 64% of the kernel's total.  The table contains only 256 immutable BF16
+entries, so the SM80-only q8/GQA6 specialization now loads it with NVIDIA PTX
+`ld.global.nc.u16`.  Portable Triton loads remain in the generic path.
+
+The full explicit-dequantization suite passed 895/896/897-token boundaries,
+mixed request lengths, q=5/8/16/64, 65K context and a high physical block ID;
+maximum absolute error remained 0.00541.  At 250K, NCU measured:
+
+| metric | ordinary LUT load | read-only LUT load |
+|---|---:|---:|
+| excessive global sectors | 85,998,528 (64%) | 76,288 (~0%) |
+| partial-kernel duration | ~2.13 ms | 1.82 ms |
+| no eligible warp cycles | ~63% | 54.75% |
+| memory throughput | ~241 GB/s | 284 GB/s |
+
+Paired FULL-graph model tests used identical prompt salts and acceptance:
+
+| input | page-carry tok/s | read-only tok/s | page-carry ms/pass | read-only ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 156.9 | 157.1 | 22.5 | 22.5 |
+| 126K | 88.0 | 90.0 | 37.2 | 36.3 |
+| 250K | 65.2 | 67.3 | 51.6 | 50.0 |
+
+This is a cache-routing improvement rather than an approximation: the LUT bits,
+attention arithmetic and cache addressing are unchanged.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:
