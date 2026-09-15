@@ -1,17 +1,17 @@
-Add a static-scale FP8 mode to the split-KV speculative verifier.
+Add a static-scale E4M3FN mode to the split-KV speculative verifier.
 
 This patch is intentionally kernel-focused. It is applied after
 spec-decode-attn.patch and spec-decode-int8-kv.patch. The FlashInfer runtime
 dispatch is kept in a separate patch so the FP8 math can be validated against a
 dequantized BF16 reference before changing backend routing.
 
-vLLM's normal per-layer FP8 KV cache stores E4M3 values plus one K and one V
-scale for the layer. On SM80 the verifier loads the raw E4M3 cache, converts to
-BF16 for tensor-core dot products, and folds the static scales into the same
-places used by the existing per-token-head int8 path:
+vLLM's normal per-layer FP8 KV cache stores E4M3FN bytes plus one K and one V
+scale for the layer. Triton on SM80 cannot lower a native NVIDIA fp8e4nv load,
+so the verifier passes a zero-copy uint8 view and explicitly decodes E4M3FN
+bits before BF16 tensor-core dot products:
 
-    score = (q . k_fp8_as_bf16) * k_scale
-    value = (p * v_scale) . v_fp8_as_bf16
+    score = (q . decode_e4m3fn(k_bytes)) * k_scale
+    value = (p * v_scale) . decode_e4m3fn(v_bytes)
 
 The per-token-head INT8 path remains unchanged. STATIC_QUANT and QUANT are
 mutually exclusive.
@@ -71,7 +71,29 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +    )
 --- a/v1/attention/ops/spec_decode_attn.py
 +++ b/v1/attention/ops/spec_decode_attn.py
-@@ -57,6 +57,7 @@
+@@ -53,10 +53,29 @@
+
+
+ @triton.jit
++def _e4m3fn_to_fp32(raw):
++    """Decode NVIDIA E4M3FN bytes on SM80, where Triton cannot load fp8e4nv."""
++    bits = raw.to(tl.uint32)
++    sign = 1.0 - 2.0 * ((bits >> 7) & 1).to(tl.float32)
++    exponent = (bits >> 3) & 0xF
++    mantissa = bits & 0x7
++    normal = (1.0 + mantissa.to(tl.float32) * 0.125) * tl.exp2(
++        exponent.to(tl.float32) - 7.0
++    )
++    subnormal = mantissa.to(tl.float32) * (2.0**-9)
++    value = tl.where(exponent == 0, subnormal, normal) * sign
++    # E4M3FN reserves only exp=15,mantissa=7 for NaN. Cached K/V should be
++    # finite; map any unexpected NaN encoding to zero instead of poisoning a
++    # full attention row.
++    return tl.where((exponent == 0xF) & (mantissa == 0x7), 0.0, value)
++
++
++@triton.jit
+ def _spec_attn_partial(
      q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
      part_o_ptr, part_m_ptr, part_l_ptr,
      ks_ptr, vs_ptr,
@@ -79,7 +101,7 @@ Written against the repository's vLLM 0.27.1 patch stack.
      scale,
      stride_qt, stride_qh,
      stride_kb, stride_ks, stride_kh,
-@@ -66,7 +67,7 @@
+@@ -66,7 +85,7 @@
      stride_vsb, stride_vss, stride_vsh,
      G: tl.constexpr, Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr, BLOCK_SIZE: tl.constexpr,
      BLOCK_M: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr, QT: tl.constexpr,
@@ -88,21 +110,22 @@ Written against the repository's vLLM 0.27.1 patch stack.
  ):
      pid = tl.program_id(0)
      req = pid // NTILE
-@@ -117,6 +118,13 @@
+@@ -117,6 +136,14 @@
              v_sc = tl.load(vs_ptr + blk * stride_vsb + slot * stride_vss + kvh * stride_vsh,
                             mask=k_ok, other=0.0)
              s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_sc[None, :]
 +        elif STATIC_QUANT:
 +            # Static per-layer FP8 cache (E4M3/E5M2). Triton converts loaded
-+            # FP8 values to BF16 before the tensor-core dot. vLLM's cache
-+            # writer stored value/scale, so restore the K scale here.
-+            k = k.to(tl.bfloat16)
-+            v = v.to(tl.bfloat16)
++            # E4M3FN bytes explicitly on SM80 because Triton cannot lower its
++            # native fp8e4nv load for this architecture. vLLM's cache writer
++            # stored value/scale, so restore the K scale here.
++            k = _e4m3fn_to_fp32(k).to(tl.bfloat16)
++            v = _e4m3fn_to_fp32(v).to(tl.bfloat16)
 +            s = tl.dot(qs, tl.trans(k)).to(tl.float32) * static_k_scale
          else:
              s = tl.dot(qs, tl.trans(k)).to(tl.float32)            # [BLOCK_M, TILE]
          allowed = k_ok[None, :] & (pos[None, :] <= q_pos[:, None]) & row_ok[:, None]
-@@ -128,6 +136,10 @@
+@@ -128,6 +155,10 @@
          l_i = l_i * alpha + tl.sum(p, 1)
          if QUANT:
              acc = acc * alpha[:, None] + tl.dot((p * v_sc[None, :]).to(tl.bfloat16), v).to(tl.float32)
@@ -113,7 +136,7 @@ Written against the repository's vLLM 0.27.1 patch stack.
          else:
              acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
          m_i = m_new
-@@ -204,13 +216,19 @@
+@@ -204,13 +235,29 @@
          return block_m, qt, triton.cdiv(q_len, qt), 8 if block_m >= 128 else 4
 
      def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
@@ -132,19 +155,37 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +        assert quant == (v_scale_cache is not None)
 +        assert static_quant == (static_v_scale is not None)
 +        assert not (quant and static_quant), "per-token and static KV quantization are exclusive"
++        if static_quant:
++            assert key_cache.dtype == torch.float8_e4m3fn
++            assert value_cache.dtype == torch.float8_e4m3fn
++            # Passing raw bytes avoids Triton's unsupported fp8e4nv load on
++            # SM80 without allocating or changing cache geometry.
++            kernel_key_cache = key_cache.view(torch.uint8)
++            kernel_value_cache = value_cache.view(torch.uint8)
++        else:
++            kernel_key_cache = key_cache
++            kernel_value_cache = value_cache
          assert max_query_len <= self.qmax, "too many query tokens per request for this kernel"
          assert num_reqs <= self.max_num_reqs
          # shared memory on sm86 is 99 KB: q tile + one K and one V tile + scores must fit
-@@ -221,6 +239,8 @@
-             q, key_cache, value_cache, block_table, seqused_k, cu_seqlens_q,
+@@ -218,18 +265,21 @@
+         tile = 64 if (block_m <= 32 or D <= 128) else 32
+         grid = (num_reqs * ntile, Hkv, self.nseg)
+         _spec_attn_partial[grid](
+-            q, key_cache, value_cache, block_table, seqused_k, cu_seqlens_q,
++            q, kernel_key_cache, kernel_value_cache, block_table, seqused_k, cu_seqlens_q,
              self.part_o, self.part_m, self.part_l,
              k_scale_cache, v_scale_cache,
 +            static_k_scale if static_quant else 1.0,
 +            static_v_scale if static_quant else 1.0,
              scale,
              q.stride(0), q.stride(1),
-             key_cache.stride(0), key_cache.stride(1), key_cache.stride(2),
-@@ -230,6 +250,7 @@
+-            key_cache.stride(0), key_cache.stride(1), key_cache.stride(2),
+-            value_cache.stride(0), value_cache.stride(1), value_cache.stride(2),
++            kernel_key_cache.stride(0), kernel_key_cache.stride(1), kernel_key_cache.stride(2),
++            kernel_value_cache.stride(0), kernel_value_cache.stride(1), kernel_value_cache.stride(2),
+             block_table.stride(0),
+             *(k_scale_cache.stride() if quant else (0, 0, 0)),
              *(v_scale_cache.stride() if quant else (0, 0, 0)),
              G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
              TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,

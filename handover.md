@@ -513,6 +513,12 @@ $PY bench/test_spec_decode_fp8_sm80.py
 $PY bench/test_spec_decode_fp8_sm80.py --high-block-id
 ```
 
+SM80-specific implementation note: Triton cannot compile a native load of
+PyTorch's NVIDIA `float8_e4m3fn` (`fp8e4nv`) on this architecture. The verifier
+therefore takes a zero-copy `uint8` view of the same cache and explicitly
+decodes E4M3FN bits before the BF16 tensor-core dot. This does not allocate a
+second KV cache and does not change block-table or page geometry.
+
 Required result:
 
 ```text
