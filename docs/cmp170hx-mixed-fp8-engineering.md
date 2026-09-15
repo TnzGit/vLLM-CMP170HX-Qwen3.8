@@ -292,13 +292,15 @@ Paired FULL-graph model tests used identical prompt salts and acceptance:
 This is a cache-routing improvement rather than an approximation: the LUT bits,
 attention arithmetic and cache addressing are unchanged.
 
-### One-wave segment alignment for 140 SMs
+### One-wave segment alignment for 70 SMs / 140 resident CTAs
 
 NCU reported only 0.91 waves for the q8 verifier: `32 segments × 4 KV heads =
-128 CTAs` on the CMP 170HX's 140 SMs.  Raising the split count indiscriminately
-is harmful—40, 48 and 64 create a partially occupied second wave—but 35 produces
-exactly 140 CTAs.  The partial kernel keeps the same arithmetic; only the small
-final segment reduction is padded to a legal power-of-two with masked loads.
+128 CTAs`.  The CMP 170HX has 70 SMs, and this kernel can keep two CTAs resident
+per SM, so one full resident wave is 140 CTAs.  Raising the split count
+indiscriminately is harmful—40, 48 and 64 create a partially occupied second
+wave—but 35 produces exactly 140 CTAs.  The partial kernel keeps the same
+arithmetic; only the small final segment reduction is padded to a legal
+power-of-two with masked loads.
 
 Interleaved isolated A/B against NSEG32 measured:
 

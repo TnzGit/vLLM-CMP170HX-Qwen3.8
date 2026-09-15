@@ -1,10 +1,11 @@
-Align the CMP 170HX verifier grid to its 140 streaming multiprocessors.
+Align the CMP 170HX verifier grid to its 140 resident CTA slots.
 
 The production geometry launches one partial CTA per KV head and segment.  With
-four KV heads, NSEG=32 launches only 128 CTAs and leaves twelve of the 140 SMs
-idle.  NSEG=35 launches exactly 140 CTAs, while NSEG=40/48/64 spill into a
-second, poorly occupied wave.  Allow 35 and pad only the tiny final combine
-reduction to Triton's next legal power-of-two arange.
+four KV heads, NSEG=32 launches only 128 CTAs.  CMP 170HX has 70 SMs and this
+kernel can keep two CTAs resident per SM, so a full resident wave is 140 CTAs.
+NSEG=35 fills those 140 slots, while NSEG=40/48/64 spill into a second, poorly
+occupied wave.  Allow 35 and pad only the tiny final combine reduction to
+Triton's next legal power-of-two arange.
 
 The explicit-dequantization suite passed 895/896/897-token boundaries, mixed
 requests, q=5/8/16/64, 65K context and a high physical block ID.  Interleaved
@@ -73,4 +74,3 @@ Apply after spec-decode-segments-sm80.patch.
 +            raise ValueError("VLLM_SPEC_DECODE_ATTN_SEGMENTS must be 8, 16, 32, 35, or 64")
          _SPEC_ATTN_NSEG = value
      return _SPEC_ATTN_NSEG
-

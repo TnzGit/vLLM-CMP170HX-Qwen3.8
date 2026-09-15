@@ -659,10 +659,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 
 49. **Match a one-wave split grid to the GPU; more splits are not monotonic.**
     This verifier launches one CTA per KV head and segment.  With four KV heads,
-    NSEG32 gives 128 CTAs on a 140-SM CMP 170HX (0.91 waves), while NSEG35 gives
-    exactly 140.  NSEG40/48/64 create a second wave tail and were slower.  NSEG35
-    reduced FULL-graph pass time 3-5% at 126K/250K without moving 4K.  Because
-    Triton `arange` requires a power of two, keep logical NSEG=35 for partials but
-    pad/mask only the final combine reduction.  This is hardware-shape tuning:
-    do not copy 35 to a GPU with a different SM or KV-head count without redoing
-    the one-wave calculation and A/B.
+    NSEG32 gives 128 CTAs on a 70-SM CMP 170HX.  At two resident CTAs per SM the
+    one-wave capacity is 140 CTAs, so NCU reports 0.91 waves; NSEG35 fills all 140
+    resident slots.  NSEG40/48/64 create a second-wave tail and were slower.
+    NSEG35 reduced FULL-graph pass time 3-5% at 126K/250K without moving 4K.
+    Because Triton `arange` requires a power of two, keep logical NSEG=35 for
+    partials but pad/mask only the final combine reduction.  This is
+    hardware-shape tuning: do not copy 35 to a GPU with a different SM count,
+    resident-CTA limit or KV-head count without redoing the wave calculation and
+    A/B.
