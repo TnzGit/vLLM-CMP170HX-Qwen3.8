@@ -1,0 +1,34 @@
+[Unit]
+Description=CMP 170HX vLLM Qwen3.8 service on port 8002
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qwen38-vllm
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=MODEL=/models/Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4
+Environment=DRAFT=/models/Qwen3.8-27B-DFlash2-W4A16
+Environment=SPEC=dflash2
+Environment=CTX=huge
+Environment=DFLASH_MAX_LEN=250000
+Environment=MAX_SEQS=4
+Environment=DFLASH_TOKENS=7
+Environment=VISION=1
+Environment=VISION_OFFLOAD=0
+Environment=PORT=8002
+Environment=GPU_UTIL=0.90
+Environment=KV_MEM=
+Environment=VLLM_NO_USAGE_STATS=1
+Environment=DO_NOT_TRACK=1
+Environment=FLASHINFER_DISABLE_VERSION_CHECK=1
+Environment=EXTRA_ARGS=--enable-prompt-tokens-details
+ExecStartPre=/usr/bin/sudo -n /usr/bin/nvidia-smi -i 0 -pl 180
+ExecStart=/bin/bash /opt/qwen38-vllm/single-user/start_qwen.sh
+Restart=no
+TimeoutStopSec=90
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+
