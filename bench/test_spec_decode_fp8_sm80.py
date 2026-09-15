@@ -1,9 +1,9 @@
-"""Correctness test for patches/spec-decode-fp8-kv-sm80.patch.
+"""Correctness test for the experimental mixed-FP8 verifier patch.
 
 Run on the CMP 170HX after applying, in order:
   patches/spec-decode-attn.patch
   patches/spec-decode-int8-kv.patch
-  patches/spec-decode-fp8-kv-sm80.patch
+  experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-kv-sm80.patch
 
 The test intentionally bypasses FlashInfer dispatch. It verifies the kernel math
 first: a raw E4M3 paged cache plus static K/V scales must match an explicitly

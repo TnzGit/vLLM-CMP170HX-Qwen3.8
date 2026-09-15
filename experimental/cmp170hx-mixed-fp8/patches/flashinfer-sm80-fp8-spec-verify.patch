@@ -16,8 +16,7 @@ The common query-start, sequence-length and block-table tensors are retained in
 FlashInferMetadata solely for this verifier. They are GPU tensors already owned
 by the model runner; no new per-step allocation is introduced.
 
-Apply after patches/spec-decode-fp8-kv-sm80.patch:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/flashinfer-sm80-fp8-spec-verify.patch
+Apply with experimental/cmp170hx-mixed-fp8/install.sh after the kernel patch.
 
 Written against vLLM 0.27.1.
 

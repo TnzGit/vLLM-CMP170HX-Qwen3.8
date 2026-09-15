@@ -233,7 +233,10 @@ scripts/audit-mixed-fp8-prereqs.sh
 Purpose:
 
 - verify expected repository patch files exist;
-- verify split-KV block IDs are already promoted to `tl.int64`;
+- verify split-KV block IDs are promoted to `tl.int64` by the normal patch
+  series. The deployed 206 package was found to lack this cast even though the
+  legacy verifier reported the patch as applied, so the repository patch and
+  the dedicated audit are now the source of truth for this prerequisite;
 - verify the installed vLLM exposes draft-specific `attention_backend` and `kv_cache_dtype`;
 - verify the DFlash loader actually consumes those overrides;
 - report whether private-style heterogeneous-page/full-CUDA-graph hooks are already present.
@@ -258,7 +261,7 @@ A `WARN` for unreconstructed private-style hooks is expected at this stage. A `F
 Created:
 
 ```text
-patches/spec-decode-fp8-kv-sm80.patch
+experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-kv-sm80.patch
 ```
 
 Intent:
@@ -281,7 +284,7 @@ The implementation is intentionally kernel-only. It is separated from backend di
 Created:
 
 ```text
-patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/patches/flashinfer-sm80-fp8-spec-verify.patch
 ```
 
 Intent:
@@ -354,7 +357,7 @@ The heterogeneous-page and full-CUDA-graph switches are deliberately recorded as
 Created:
 
 ```text
-patches/cmp170hx-mixed-fp8.series
+experimental/cmp170hx-mixed-fp8/series
 ```
 
 Current experimental order:
@@ -373,11 +376,10 @@ spec-decode-int8-kv.patch
 
 ---
 
-## 6. Critical current caveat: experimental patches are under `patches/`
+## 6. Experimental patch isolation
 
-This must be understood before running normal install verification or Docker builds from the work branch.
-
-`verify.sh` currently loops over:
+The Phase 0 repository-structure problem has been resolved. `verify.sh` still
+loops over only the normal production directory:
 
 ```bash
 for p in patches/*.patch; do
@@ -385,19 +387,16 @@ for p in patches/*.patch; do
 done
 ```
 
-Therefore, simply placing experimental files under `patches/` makes `verify.sh --install` expect them to be applied to the installed vLLM tree.
+The mixed-FP8 files now live under:
 
-The original intent was that the mixed-FP8 files would **not** alter the production/default patch chain before qualification. The current directory placement does not fully honor that isolation contract.
+```text
+experimental/cmp170hx-mixed-fp8/
+```
 
-Before treating this branch as buildable/production-safe, choose one of these designs:
-
-1. move experimental patches under an isolated path, e.g.
-   `experimental/cmp170hx-mixed-fp8/patches/`, and have a dedicated installer; or
-2. teach `verify.sh` and the normal install/build scripts about an explicit experimental series/gate.
-
-Do not merge the current directory layout to `main` without resolving this.
-
-This is the first repository-structure issue the next engineer should address.
+and are handled only by that directory's `install.sh`. Normal Docker builds and
+`verify.sh --install` no longer require or apply them. The installer supports
+`--dry-run`, `--apply`, `--check`, and reverse-order `--reverse` against an
+explicit `--site` path or the vLLM imported by `PY`.
 
 ---
 
@@ -477,15 +476,14 @@ PY="$PY" bash scripts/audit-mixed-fp8-prereqs.sh
 Assuming the normal stack is already installed, dry-run the experimental layers in order:
 
 ```bash
-patch -p1 --dry-run -d "$SP" < patches/spec-decode-fp8-kv-sm80.patch
-patch -p1 --dry-run -d "$SP" < patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/install.sh --dry-run --site "$SP"
 ```
 
 Only if both dry-runs are clean:
 
 ```bash
-patch -p1 -d "$SP" < patches/spec-decode-fp8-kv-sm80.patch
-patch -p1 -d "$SP" < patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/install.sh --apply --site "$SP"
+experimental/cmp170hx-mixed-fp8/install.sh --check --site "$SP"
 ```
 
 If any hunk fails, rebase the patch against the actual installed source. Do not use `--force` and do not manually ignore failed hunks.
@@ -1040,8 +1038,7 @@ venv/bin/python -c 'import torch,vllm; print(torch.__version__, vllm.__version__
 # 3. Audit prerequisites
 PY=$PWD/venv/bin/python bash scripts/audit-mixed-fp8-prereqs.sh
 
-# 4. Resolve/isolate the experimental patches under patches/ before invoking
-#    the normal all-patches verifier/build pipeline.
+# 4. Experimental patches are isolated from the normal build chain.
 
 # 5. Identify installed package path
 PY=$PWD/venv/bin/python
@@ -1052,12 +1049,11 @@ PY
 )
 
 # 6. Dry-run the experimental patches in order
-patch -p1 --dry-run -d "$SP" < patches/spec-decode-fp8-kv-sm80.patch
-patch -p1 --dry-run -d "$SP" < patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/install.sh --dry-run --site "$SP"
 
 # 7. Apply only in a disposable/test environment if the dry-runs are clean
-patch -p1 -d "$SP" < patches/spec-decode-fp8-kv-sm80.patch
-patch -p1 -d "$SP" < patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/install.sh --apply --site "$SP"
+experimental/cmp170hx-mixed-fp8/install.sh --check --site "$SP"
 
 # 8. Run kernel math test BEFORE enabling runtime dispatch
 VLLM_FP8_SPEC_VERIFY=0 $PY bench/test_spec_decode_fp8_sm80.py
@@ -1107,12 +1103,12 @@ verify.sh
 
 patches/spec-decode-attn.patch
 patches/spec-decode-int8-kv.patch
-patches/spec-decode-fp8-kv-sm80.patch
-patches/flashinfer-sm80-fp8-spec-verify.patch
+experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-kv-sm80.patch
+experimental/cmp170hx-mixed-fp8/patches/flashinfer-sm80-fp8-spec-verify.patch
 patches/hybrid-kv-groups-v2-cudagraph.patch
 patches/hybrid-sw-block-promote.patch
 patches/marlin-repack-staged-sm80.patch
-patches/cmp170hx-mixed-fp8.series
+experimental/cmp170hx-mixed-fp8/series
 
 bench/test_spec_decode_attn.py
 bench/test_spec_decode_fp8_sm80.py

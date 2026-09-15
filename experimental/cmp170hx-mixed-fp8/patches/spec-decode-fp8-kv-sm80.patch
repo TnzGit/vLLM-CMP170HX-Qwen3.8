@@ -16,8 +16,8 @@ places used by the existing per-token-head int8 path:
 The per-token-head INT8 path remains unchanged. STATIC_QUANT and QUANT are
 mutually exclusive.
 
-Apply after patches/spec-decode-int8-kv.patch:
-  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/spec-decode-fp8-kv-sm80.patch
+Apply with experimental/cmp170hx-mixed-fp8/install.sh after the normal patch
+stack has been installed.
 
 Written against the repository's vLLM 0.27.1 patch stack.
 
