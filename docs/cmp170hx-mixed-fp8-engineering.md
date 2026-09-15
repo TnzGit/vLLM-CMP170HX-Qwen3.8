@@ -292,6 +292,29 @@ Paired FULL-graph model tests used identical prompt salts and acceptance:
 This is a cache-routing improvement rather than an approximation: the LUT bits,
 attention arithmetic and cache addressing are unchanged.
 
+### One-wave segment alignment for 140 SMs
+
+NCU reported only 0.91 waves for the q8 verifier: `32 segments × 4 KV heads =
+128 CTAs` on the CMP 170HX's 140 SMs.  Raising the split count indiscriminately
+is harmful—40, 48 and 64 create a partially occupied second wave—but 35 produces
+exactly 140 CTAs.  The partial kernel keeps the same arithmetic; only the small
+final segment reduction is padded to a legal power-of-two with masked loads.
+
+Interleaved isolated A/B against NSEG32 measured:
+
+| input | NSEG32 us/layer | NSEG35 us/layer | speedup |
+|---:|---:|---:|---:|
+| 4K | 49.2 | 51.2 | 0.96× |
+| 70K | 502.2 | 458.7 | 1.095× |
+| 126K | 846.9 | 780.6 | 1.085× |
+| 200K | 1312.7 | 1228.8 | 1.068× |
+| 250K | 1667.8 | 1575.8 | 1.058× |
+
+The short-context micro regression is hidden by fixed whole-model work: FULL-graph
+4K remained 22.4 ms/pass.  Repeated model results were 34.7-35.4 ms/pass at
+126K and 47.5-48.1 at 250K, versus 36.3 and 50.0 for NSEG32.  All tests had zero
+preemptions; the full reference suite, including high block IDs, passed.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

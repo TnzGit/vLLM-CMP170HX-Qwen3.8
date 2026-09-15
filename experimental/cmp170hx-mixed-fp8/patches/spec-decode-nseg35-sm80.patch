@@ -1,0 +1,76 @@
+Align the CMP 170HX verifier grid to its 140 streaming multiprocessors.
+
+The production geometry launches one partial CTA per KV head and segment.  With
+four KV heads, NSEG=32 launches only 128 CTAs and leaves twelve of the 140 SMs
+idle.  NSEG=35 launches exactly 140 CTAs, while NSEG=40/48/64 spill into a
+second, poorly occupied wave.  Allow 35 and pad only the tiny final combine
+reduction to Triton's next legal power-of-two arange.
+
+The explicit-dequantization suite passed 895/896/897-token boundaries, mixed
+requests, q=5/8/16/64, 65K context and a high physical block ID.  Interleaved
+isolated tests improved 126K by 8.5% and 250K by 5.8%.  Repeated FULL-graph
+model passes fell from 36.3 to 34.7-35.4 ms at 126K and from 50.0 to 47.5-48.1
+ms at 250K; 4K stayed at 22.4 ms with zero preemptions.
+
+Apply after spec-decode-segments-sm80.patch.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -323,6 +323,7 @@ def _spec_attn_combine(
+     part_o_ptr, part_m_ptr, part_l_ptr, out_ptr, cu_q_ptr,
+     stride_ot, stride_oh,
+     Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr, NSEG: tl.constexpr,
++    SEG_TILE: tl.constexpr,
+ ):
+     req = tl.program_id(0)
+     h = tl.program_id(1)
+@@ -331,15 +332,22 @@ def _spec_attn_combine(
+     q_len = tl.load(cu_q_ptr + req + 1) - q_start
+     if i < q_len:
+         base = ((req * Hq + h) * QMAX + i) * NSEG
+-        segs = tl.arange(0, NSEG)
+-        m = tl.load(part_m_ptr + base + segs)
+-        l = tl.load(part_l_ptr + base + segs)
++        segs = tl.arange(0, SEG_TILE)
++        seg_ok = segs < NSEG
++        m = tl.load(
++            part_m_ptr + base + segs, mask=seg_ok, other=float("-inf")
++        )
++        l = tl.load(part_l_ptr + base + segs, mask=seg_ok, other=0.0)
+         m_max = tl.max(m, 0)
+         m_max = tl.where(m_max == float("-inf"), 0.0, m_max)
+         w = tl.exp(m - m_max)                       # segments with -inf give 0
+         l_tot = tl.sum(l * w, 0)
+         d = tl.arange(0, D)
+-        o = tl.load(part_o_ptr + (base + segs)[:, None] * D + d[None, :])   # [NSEG, D]
++        o = tl.load(
++            part_o_ptr + (base + segs)[:, None] * D + d[None, :],
++            mask=seg_ok[:, None],
++            other=0.0,
++        )
+         o = tl.sum(o * w[:, None], 0) / tl.maximum(l_tot, 1e-30)
+         tl.store(out_ptr + (q_start + i) * stride_ot + h * stride_oh + d, o.to(out_ptr.dtype.element_ty))
+ 
+@@ -458,6 +466,7 @@ class SpecDecodeAttention:
+         _spec_attn_combine[(num_reqs, Hq, max_query_len)](
+             self.part_o, self.part_m, self.part_l, out, cu_seqlens_q,
+             out.stride(0), out.stride(1),
+-            Hq=Hq, QMAX=self.qmax, D=D, NSEG=self.nseg, num_warps=4,
++            Hq=Hq, QMAX=self.qmax, D=D, NSEG=self.nseg,
++            SEG_TILE=triton.next_power_of_2(self.nseg), num_warps=4,
+         )
+         return out
+
+--- a/v1/attention/backends/flash_attn.py
++++ b/v1/attention/backends/flash_attn.py
+@@ -1773,8 +1773,8 @@ def _spec_attn_nseg() -> int:
+         import os
+ 
+         value = int(os.environ.get("VLLM_SPEC_DECODE_ATTN_SEGMENTS", "16"))
+-        if value not in (8, 16, 32, 64):
+-            raise ValueError("VLLM_SPEC_DECODE_ATTN_SEGMENTS must be 8, 16, 32, or 64")
++        if value not in (8, 16, 32, 35, 64):
++            raise ValueError("VLLM_SPEC_DECODE_ATTN_SEGMENTS must be 8, 16, 32, 35, or 64")
+         _SPEC_ATTN_NSEG = value
+     return _SPEC_ATTN_NSEG
+
