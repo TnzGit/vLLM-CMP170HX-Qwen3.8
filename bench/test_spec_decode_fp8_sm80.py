@@ -10,6 +10,7 @@ first: a raw E4M3 paged cache plus static K/V scales must match an explicitly
 dequantized reference built from the exact same FP8 bytes.
 """
 
+import argparse
 import math
 import sys
 
@@ -137,15 +138,80 @@ def run_case(att: SpecDecodeAttention, kv_lens: list[int], q_len: int) -> float:
     return float((out.float() - ref).abs().max().item())
 
 
+def run_high_block_case(att: SpecDecodeAttention) -> float:
+    """Exercise block-id address arithmetic just above the int32 boundary.
+
+    A block contains 65,536 FP8 elements. Block 32,780 therefore begins above
+    2**31 elements. Only that referenced block is initialized; the rest of the
+    allocation exists solely to make the high physical block id valid.
+    """
+    block_id = 32_780
+    kv_len = BLOCK_SIZE
+    q_len = 5
+    shape = (block_id + 1, BLOCK_SIZE, H_KV, D)
+    k_fp8 = torch.empty(shape, device=DEV, dtype=FP8)
+    v_fp8 = torch.empty(shape, device=DEV, dtype=FP8)
+    k_src = torch.randn(1, BLOCK_SIZE, H_KV, D, device=DEV, dtype=torch.bfloat16)
+    v_src = torch.randn_like(k_src)
+    k_block, k_scale = _quantize_static(k_src)
+    v_block, v_scale = _quantize_static(v_src)
+    k_fp8[block_id].copy_(k_block[0])
+    v_fp8[block_id].copy_(v_block[0])
+    block_table = torch.tensor([[block_id]], device=DEV, dtype=torch.int32)
+    q = torch.randn(q_len, H_Q, D, device=DEV, dtype=torch.bfloat16)
+    cu_q = torch.tensor([0, q_len], device=DEV, dtype=torch.int32)
+    seq_lens = torch.tensor([kv_len], device=DEV, dtype=torch.int32)
+    out = torch.empty_like(q)
+    att.run(
+        q,
+        k_fp8,
+        v_fp8,
+        out,
+        cu_q,
+        seq_lens,
+        block_table,
+        SCALE,
+        1,
+        q_len,
+        static_k_scale=k_scale,
+        static_v_scale=v_scale,
+    )
+    ref = reference(
+        q,
+        k_fp8,
+        v_fp8,
+        k_scale,
+        v_scale,
+        block_table,
+        [kv_len],
+        q_len,
+    )
+    return float((out.float() - ref).abs().max().item())
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--allow-skip",
+        action="store_true",
+        help="return success instead of failure when CUDA/sm80 is unavailable",
+    )
+    parser.add_argument(
+        "--high-block-id",
+        action="store_true",
+        help="also run the ~4 GiB high physical block-id regression",
+    )
+    args = parser.parse_args()
+
     if not torch.cuda.is_available():
         print("SKIP: CUDA is required")
-        return 0
+        return 0 if args.allow_skip else 2
 
     cap = torch.cuda.get_device_capability()
     print(f"device={torch.cuda.get_device_name()} capability={cap}")
     if cap != (8, 0):
-        print("WARN: this regression is intended for GA100/sm80")
+        print("SKIP: this regression requires GA100/sm80")
+        return 0 if args.allow_skip else 2
 
     att = SpecDecodeAttention(
         max_num_reqs=16,
@@ -160,6 +226,8 @@ def main() -> int:
         ([8192], 8),
         ([4097, 1300], 5),
         ([32768], 8),
+        ([65536], 16),
+        ([8192, 1500], 64),
     ]
     failed = False
     for kv_lens, q_len in cases:
@@ -171,6 +239,15 @@ def main() -> int:
         print(
             f"kv={kv_lens} q={q_len}: max|kernel-dequant_ref|={err:.5f} "
             f"{'OK' if ok else 'FAIL'}"
+        )
+        failed |= not ok
+
+    if args.high_block_id:
+        err = run_high_block_case(att)
+        ok = err < 0.08
+        print(
+            "high_block_id=32780 q=5: "
+            f"max|kernel-dequant_ref|={err:.5f} {'OK' if ok else 'FAIL'}"
         )
         failed |= not ok
 

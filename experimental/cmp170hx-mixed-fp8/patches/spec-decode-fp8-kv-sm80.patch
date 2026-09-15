@@ -23,29 +23,55 @@ Written against the repository's vLLM 0.27.1 patch stack.
 
 --- a/v1/attention/backends/flash_attn.py
 +++ b/v1/attention/backends/flash_attn.py
-@@ -1757,7 +1757,9 @@ def _spec_attn_qmax(group: int) -> int:
+@@ -1757,7 +1757,21 @@
      return _SPEC_ATTN_QMAX
- 
- 
+
+
 -def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, max_seqlen_q, k_scale_cache=None, v_scale_cache=None):
-+def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k,
-+                   block_table, max_seqlen_q, k_scale_cache=None, v_scale_cache=None,
-+                   static_k_scale=None, static_v_scale=None):
++def _spec_attn_run(
++    impl,
++    q,
++    key_cache,
++    value_cache,
++    out,
++    cu_seqlens_q,
++    seqused_k,
++    block_table,
++    max_seqlen_q,
++    k_scale_cache=None,
++    v_scale_cache=None,
++    static_k_scale=None,
++    static_v_scale=None,
++):
      from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
- 
+
      key = (impl.num_heads, impl.head_size, q.device)
-@@ -1776,5 +1778,7 @@ def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k
+@@ -1775,6 +1789,19 @@
+             qmax=_spec_attn_qmax(impl.num_heads // impl.num_kv_heads),
          )
          _SPEC_ATTN[key] = att
-     att.run(q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, impl.scale,
+-    att.run(q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, impl.scale,
 -            cu_seqlens_q.shape[0] - 1, max_seqlen_q,
 -            k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache)
-+            cu_seqlens_q.shape[0] - 1, max_seqlen_q,
-+            k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache,
-+            static_k_scale=static_k_scale, static_v_scale=static_v_scale)
++    att.run(
++        q,
++        key_cache,
++        value_cache,
++        out,
++        cu_seqlens_q,
++        seqused_k,
++        block_table,
++        impl.scale,
++        cu_seqlens_q.shape[0] - 1,
++        max_seqlen_q,
++        k_scale_cache=k_scale_cache,
++        v_scale_cache=v_scale_cache,
++        static_k_scale=static_k_scale,
++        static_v_scale=static_v_scale,
++    )
 --- a/v1/attention/ops/spec_decode_attn.py
 +++ b/v1/attention/ops/spec_decode_attn.py
-@@ -57,6 +57,7 @@ def _spec_attn_partial(
+@@ -57,6 +57,7 @@
      q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
      part_o_ptr, part_m_ptr, part_l_ptr,
      ks_ptr, vs_ptr,
@@ -53,14 +79,17 @@ Written against the repository's vLLM 0.27.1 patch stack.
      scale,
      stride_qt, stride_qh,
      stride_kb, stride_ks, stride_kh,
-@@ -66,7 +67,7 @@ def _spec_attn_partial(
+@@ -66,7 +67,7 @@
      stride_vsb, stride_vss, stride_vsh,
      G: tl.constexpr, Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr, BLOCK_SIZE: tl.constexpr,
      BLOCK_M: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr, QT: tl.constexpr,
 -    NTILE: tl.constexpr, QUANT: tl.constexpr,
 +    NTILE: tl.constexpr, QUANT: tl.constexpr, STATIC_QUANT: tl.constexpr,
  ):
-@@ -116,6 +117,12 @@ def _spec_attn_partial(
+     pid = tl.program_id(0)
+     req = pid // NTILE
+@@ -117,6 +118,13 @@
+             v_sc = tl.load(vs_ptr + blk * stride_vsb + slot * stride_vss + kvh * stride_vsh,
                             mask=k_ok, other=0.0)
              s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_sc[None, :]
 +        elif STATIC_QUANT:
@@ -72,7 +101,8 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +            s = tl.dot(qs, tl.trans(k)).to(tl.float32) * static_k_scale
          else:
              s = tl.dot(qs, tl.trans(k)).to(tl.float32)            # [BLOCK_M, TILE]
-@@ -129,6 +136,10 @@ def _spec_attn_partial(
+         allowed = k_ok[None, :] & (pos[None, :] <= q_pos[:, None]) & row_ok[:, None]
+@@ -128,6 +136,10 @@
          l_i = l_i * alpha + tl.sum(p, 1)
          if QUANT:
              acc = acc * alpha[:, None] + tl.dot((p * v_sc[None, :]).to(tl.bfloat16), v).to(tl.float32)
@@ -82,10 +112,12 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +            ).to(tl.float32)
          else:
              acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
-@@ -204,13 +215,20 @@ class SpecDecodeAttention:
--    def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
+         m_i = m_new
+@@ -204,13 +216,19 @@
+         return block_m, qt, triton.cdiv(q_len, qt), 8 if block_m >= 128 else 4
+
+     def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
 -            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None):
-+    def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
 +            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None,
 +            static_k_scale=None, static_v_scale=None):
          """key/value_cache: [num_blocks, block_size, Hkv, D] bf16, or [.., D + pad] int8
@@ -101,18 +133,22 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +        assert static_quant == (static_v_scale is not None)
 +        assert not (quant and static_quant), "per-token and static KV quantization are exclusive"
          assert max_query_len <= self.qmax, "too many query tokens per request for this kernel"
-@@ -221,6 +239,7 @@ class SpecDecodeAttention:
+         assert num_reqs <= self.max_num_reqs
+         # shared memory on sm86 is 99 KB: q tile + one K and one V tile + scores must fit
+@@ -221,6 +239,8 @@
              q, key_cache, value_cache, block_table, seqused_k, cu_seqlens_q,
              self.part_o, self.part_m, self.part_l,
              k_scale_cache, v_scale_cache,
-+            static_k_scale if static_quant else 1.0, static_v_scale if static_quant else 1.0,
++            static_k_scale if static_quant else 1.0,
++            static_v_scale if static_quant else 1.0,
              scale,
-@@ -230,7 +249,8 @@ class SpecDecodeAttention:
-             *(k_scale_cache.stride() if quant else (0, 0, 0)),
+             q.stride(0), q.stride(1),
+             key_cache.stride(0), key_cache.stride(1), key_cache.stride(2),
+@@ -230,6 +250,7 @@
              *(v_scale_cache.stride() if quant else (0, 0, 0)),
              G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
--            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
-+            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
+             TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
 +            STATIC_QUANT=static_quant,
              num_warps=warps, num_stages=1,
          )
+         _spec_attn_combine[(num_reqs, Hq, max_query_len)](

@@ -427,6 +427,10 @@ Do not skip phases. The main debugging risk is stacking cache geometry, FP8 dequ
 
 Goal: keep `main`/existing KVarN production semantics untouched.
 
+Status: **complete on `work/cmp170hx-mixed-fp8`**. The experimental series now
+lives under `experimental/cmp170hx-mixed-fp8/`, and the normal wildcard patch
+installer no longer sees it.
+
 Recommended change:
 
 ```text
@@ -450,6 +454,10 @@ Acceptance criteria:
 
 - `bash verify.sh --install` on a normal production tree still passes without applying experimental patches;
 - the experimental installer can independently dry-run/apply/reverse its two patches.
+
+Both experimental patches were also regenerated as valid unified diffs against
+the deployed vLLM 0.27.1 source. The original handoff patches had malformed hunk
+counts and could not be applied by `patch(1)`.
 
 ### Phase 1 — prove patch applicability on the deployment host
 
@@ -488,6 +496,13 @@ experimental/cmp170hx-mixed-fp8/install.sh --check --site "$SP"
 
 If any hunk fails, rebase the patch against the actual installed source. Do not use `--force` and do not manually ignore failed hunks.
 
+The SM80 FlashInfer runtime patch must also opt the FP8 split-KV verifier into
+the builder's speculative-as-decode threshold. With the stock threshold of one,
+DFlash verification queries are classified as prefill and a runtime hook that
+requires a decode-only batch is unreachable. The experimental patch now makes
+that threshold change only when `VLLM_FP8_SPEC_VERIFY=1`, capability is exactly
+SM80, and target KV dtype is FP8.
+
 ### Phase 2 — kernel correctness before model/runtime dispatch
 
 Disable the runtime hook initially. Test only the math:
@@ -495,6 +510,7 @@ Disable the runtime hook initially. Test only the math:
 ```bash
 export VLLM_FP8_SPEC_VERIFY=0
 $PY bench/test_spec_decode_fp8_sm80.py
+$PY bench/test_spec_decode_fp8_sm80.py --high-block-id
 ```
 
 Required result:
@@ -513,7 +529,10 @@ context = 1.5K, 8K, 32K, 65K
 batch = 1 and mixed-length batch
 ```
 
-Then add a high-physical-block-ID case where the referenced KV blocks live near the top of a large block pool. This is required to exercise the `tl.int64` address fix rather than merely checking ordinary low block IDs.
+The `--high-block-id` case allocates a sparse-use FP8 pool and references block
+32,780, whose first element lies above the signed int32 address boundary. This
+is required to exercise the `tl.int64` address fix rather than merely checking
+ordinary low block IDs. It needs about 4 GiB of free device memory.
 
 After each long/high-block run:
 
@@ -782,7 +801,8 @@ Command:
 PY=/path/to/venv/bin/python bash verify.sh --install
 ```
 
-Caveat: resolve the experimental-patch-directory issue described earlier first, otherwise this command will expect every `patches/*.patch` file to be installed.
+The experimental series is isolated and is not included in this normal
+production verification command.
 
 Pass:
 
