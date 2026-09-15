@@ -1,5 +1,5 @@
-Route pure speculative-decode batches on FlashInfer + static FP8 KV through the
-split-KV Triton verifier on SM80.
+Route SM80 speculative verification on FlashInfer + static FP8 KV through the
+split-KV Triton verifier, including mixed decode+prefill scheduler batches.
 
 This patch is opt-in with VLLM_FP8_SPEC_VERIFY=1 and depends on:
 
@@ -7,19 +7,19 @@ This patch is opt-in with VLLM_FP8_SPEC_VERIFY=1 and depends on:
   spec-decode-int8-kv.patch
   spec-decode-fp8-kv-sm80.patch
 
-Normal FlashInfer prefill and single-token decode are unchanged. The opt-in
-builder threshold classifies multi-query speculative verification as decode
-metadata on SM80; the runtime hook then fires only for a pure causal decode
-batch where a request has more than one query, the KV cache is FP8, there is no
-sliding window/softcap/alibi/sink, DCP is off, and the cache layout is NHD.
+Normal FlashInfer prefill and single-token decode are unchanged. The runtime
+hook owns only the speculative decode slice, so trailing prefill rows still use
+the normal path. It requires FP8 KV, no sliding window/softcap/alibi/sink, DCP
+off, and NHD cache layout.
 
-The common query-start, sequence-length and block-table tensors are retained in
-FlashInferMetadata solely for this verifier. They are GPU tensors already owned
-by the model runner; no new per-step allocation is introduced.
+VLLM_FP8_SPEC_FULL_CG=1 is a second explicit qualification gate. On exact SM80
+with E4M3 cache configuration (including uint8 physical storage created by the
+heterogeneous-page layer), it advertises UNIFORM_BATCH graph support. Other
+architectures, cache dtypes, and default launches retain upstream capability
+reporting.
 
-Apply with experimental/cmp170hx-mixed-fp8/install.sh after the kernel patch.
-
-Written against vLLM 0.27.1.
+Written against vLLM 0.27.1. Apply with
+experimental/cmp170hx-mixed-fp8/install.sh after the normal kernel patches.
 
 --- a/v1/attention/backends/flashinfer.py
 +++ b/v1/attention/backends/flashinfer.py
@@ -43,11 +43,10 @@ Written against vLLM 0.27.1.
  from vllm.v1.attention.backends.utils import (
      KVCacheLayoutType,
      get_dcp_local_seq_lens,
-@@ -615,8 +621,19 @@
-     """
+@@ -616,7 +622,22 @@
 
      cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
-+
+
 +    # CMP/SM80 experimental split-KV verifier metadata. Optional so existing
 +    # tests/callers constructing FlashInferMetadata directly remain valid.
 +    spec_query_start_loc: torch.Tensor | None = None
@@ -55,19 +54,22 @@ Written against vLLM 0.27.1.
 +    spec_block_table: torch.Tensor | None = None
 +    spec_max_query_len: int = 0
 
-
++
 +def _fp8_spec_verify_enabled() -> bool:
 +    return os.environ.get("VLLM_FP8_SPEC_VERIFY", "0") == "1"
++
++
++def _fp8_spec_full_cg_enabled() -> bool:
++    return os.environ.get("VLLM_FP8_SPEC_FULL_CG", "0") == "1"
 +
 +
  class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
      kv_cache_spec: AttentionSpec
      reorder_batch_threshold: int = 1
-@@ -772,6 +789,16 @@
-         supports_spec_as_decode = (
+@@ -773,6 +794,16 @@
              self.flashinfer_trtllm_api_decode_kernel
              == FlashInferDecodeKernel.TRTLLM_GEN
-+        )
+         )
 +        # On SM80, the opt-in split-KV verifier below is the decode kernel for
 +        # multi-query speculative verification. Classify those queries as
 +        # decode metadata so the dispatch is reachable; without this, the
@@ -77,13 +79,69 @@ Written against vLLM 0.27.1.
 +            and current_platform.is_device_capability(80)
 +            and self.cache_dtype
 +            in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
-         )
++        )
          self._init_reorder_batch_threshold(
              1,
-@@ -1225,6 +1252,17 @@
-             cascade_wrapper=None,
+             supports_spec_as_decode=supports_spec_as_decode,
+@@ -903,15 +934,49 @@
+         specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
+         specdec mask.
+         """
+-        if current_platform.is_device_capability(90):
+-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+-
+         # For UniformTypeKVCacheSpecs, check all contained specs
+         kv_specs = (
+             kv_cache_spec.kv_cache_specs.values()
+             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+             else [kv_cache_spec]
          )
-
++        # The stock FlashInfer SM80 path supports only single-token graph
++        # decode. The experimental mixed-FP8 verifier replaces its multi-query
++        # speculative step with a fixed-shape split-KV Triton kernel whose
++        # buffers are allocated before capture. Advertise uniform-batch support
++        # only behind the explicit qualification flag and only when every
++        # attention spec in this builder uses E4M3 KV.
++        if (
++            _fp8_spec_verify_enabled()
++            and _fp8_spec_full_cg_enabled()
++            and current_platform.is_device_capability(80)
++        ):
++            attention_specs = [
++                spec for spec in kv_specs if isinstance(spec, AttentionSpec)
++            ]
++            logger.info_once(
++                "Mixed-FP8 FULL CUDA Graph qualification saw cache_dtype=%s, "
++                "KV storage dtypes=%s (attention_specs=%d).",
++                vllm_config.cache_config.cache_dtype,
++                tuple(getattr(spec, "dtype", None) for spec in kv_specs),
++                len(attention_specs),
++            )
++            if (
++                attention_specs
++                and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
++                and all(
++                    spec.dtype in (torch.uint8, torch.float8_e4m3fn)
++                    for spec in attention_specs
++                )
++            ):
++                logger.info_once(
++                    "Mixed-FP8 verifier qualified FlashInfer for FULL CUDA Graph."
++                )
++                return AttentionCGSupport.UNIFORM_BATCH
++
++        if current_platform.is_device_capability(90):
++            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
++
+         num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+             vllm_config.parallel_config
+         )
+@@ -1223,6 +1288,27 @@
+             prefill=None,
+             decode=None,
+             cascade_wrapper=None,
++        )
++
 +        # Keep the GPU tensors needed by the split-KV verifier. The decode
 +        # requests are at the front of the batch after split_decodes_and_prefills.
 +        attn_metadata.spec_query_start_loc = qo_indptr
@@ -94,11 +152,28 @@ Written against vLLM 0.27.1.
 +                qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
 +            )
 +            attn_metadata.spec_max_query_len = int(qlens_decode.max().item())
-+
++        cmp_fp8_spec_verify = (
++            _fp8_spec_verify_enabled()
++            and current_platform.is_device_capability(80)
++            and self.cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
++            and causal and not use_cascade and not self.use_dcp
++            and num_decode_tokens > num_decodes
++            and 1 < attn_metadata.spec_max_query_len <= _spec_attn_qmax(
++                self.num_qo_heads // self.num_kv_heads)
++            and get_kv_cache_layout() == "NHD"
+         )
+
          # Guard access to seq_lens_cpu, which may not always be needed
-         # and can be expensive to retrieve in async mode.
-         # When all attention (both prefill and decode) uses TRTLLM,
-@@ -1624,6 +1662,11 @@
+@@ -1451,7 +1537,7 @@
+                 attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+
+         ## DECODE PATHWAY
+-        if num_decodes > 0:
++        if num_decodes > 0 and not cmp_fp8_spec_verify:
+             if decode_with_flashinfer_trtllm_api:
+                 assert num_decode_tokens % num_decodes == 0, (
+                     "XQA/trtllm-gen decode requires uniform query lengths per request. "
+@@ -1624,6 +1710,11 @@
              self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
          else:
              self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
@@ -110,7 +185,7 @@ Written against vLLM 0.27.1.
 
      def fused_output_quant_supported(self, quant_key: QuantKey):
          # XQA does not support FP8/NVFP4 output, so require trtllm-gen
-@@ -1852,6 +1895,52 @@
+@@ -1852,6 +1943,61 @@
          else:
              kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -119,6 +194,7 @@ Written against vLLM 0.27.1.
 +        # the split-KV Triton kernel so the long KV sequence is distributed
 +        # across SMs. The kernel consumes the same raw E4M3 cache and static
 +        # per-layer K/V scales as FlashInfer.
++        cmp_fp8_spec_decode_done = False
 +        if (
 +            _fp8_spec_verify_enabled()
 +            and _spec_attn_enabled()
@@ -127,7 +203,6 @@ Written against vLLM 0.27.1.
 +            in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
 +            and attn_metadata.causal
 +            and not attn_metadata.use_cascade
-+            and attn_metadata.num_prefill_tokens == 0
 +            and attn_metadata.num_decodes > 0
 +            and attn_metadata.num_decode_tokens > attn_metadata.num_decodes
 +            and 1
@@ -145,6 +220,10 @@ Written against vLLM 0.27.1.
 +            assert attn_metadata.spec_seq_lens is not None
 +            assert attn_metadata.spec_block_table is not None
 +            nreq = attn_metadata.num_decodes
++            logger.info_once(
++                "CMP/SM80 mixed-FP8 speculative verification is using the "
++                "split-KV Triton verifier (target FP8 KV, static K/V scales)."
++            )
 +            _spec_attn_run(
 +                self,
 +                query[: attn_metadata.num_decode_tokens],
@@ -158,8 +237,21 @@ Written against vLLM 0.27.1.
 +                static_k_scale=layer._k_scale_float,
 +                static_v_scale=layer._v_scale_float,
 +            )
-+            return output
++            # A scheduler batch can contain speculative decode requests at
++            # the front and ordinary prefills at the back. The split-KV
++            # verifier owns only the decode slice; keep going so the normal
++            # prefill branch fills the remaining output rows, then suppress
++            # FlashInfer's q_len_per_req=1 decode wrapper for this slice.
++            cmp_fp8_spec_decode_done = True
 +
          use_dcp = self.dcp_world_size > 1
 
          # Regular attention (common case).
+@@ -2047,7 +2193,7 @@
+                         num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                     ].copy_(out[:num_prefill_tokens].to(output.dtype))
+
+-        if num_decode_tokens > 0:
++        if num_decode_tokens > 0 and not cmp_fp8_spec_decode_done:
+             decode_query = query[:num_decode_tokens]
+             assert decode_query.shape[0] == num_decode_tokens
