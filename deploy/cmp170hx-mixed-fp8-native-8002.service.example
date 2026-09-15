@@ -2,7 +2,7 @@
 Description=CMP 170HX mixed target/draft KV with native FlashInfer verify control
 After=network-online.target
 Wants=network-online.target
-Conflicts=cmp170hx-mixed-fp8-8002.service cmp170hx-fp8-baseline-8002.service cmp170hx-mixed-fp8-full-8002.service
+Conflicts=cmp170hx-mixed-fp8-8002.service cmp170hx-fp8-baseline-8002.service cmp170hx-mixed-fp8-full-8002.service cmp170hx-mixed-fp8-full-128k-8002.service cmp170hx-mixed-fp8-full-256k-8002.service
 
 [Service]
 Type=simple
