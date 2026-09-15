@@ -218,6 +218,31 @@ The long-context forward step is therefore 8-11% faster with no preemption and n
 acceptance regression.  BF16 accumulation, FP16 partial scratch, hoisted scale loads,
 and `maxnreg` 160/168/192 variants were all slower and remain rejected experiments.
 
+### Production q=8 / GQA=6 row specialization
+
+The production DFlash2 verify window has at most eight query positions and six query
+heads per KV head: 48 useful rows.  The generic power-of-two `BLOCK_M=64` path still
+updated 16 masked accumulator rows for every KV tile.  A shape-gated SM80 kernel keeps
+one CTA per request/KV-head/segment and therefore still loads each K/V tile only once,
+but computes the 48 rows as 32+16.  It is enabled only for static FP8, `G=6`, `D=256`,
+`q<=8`, and page sizes divisible by 32; every other geometry uses the generic kernel.
+
+Driver resource inspection reports 250 registers/thread, zero local memory, 43,008
+bytes shared memory and the same 12.5% theoretical occupancy.  The isolated scan was
+8.7-11.5% faster from 4K through 250K and bit-identical to the reduced-spill candidate.
+Explicit-reference and 895/896/897 page-boundary suites retained the same maximum
+error.  Stable FULL-graph model results were:
+
+| input | reduced-spill ms/pass | q8/G6 ms/pass | q8/G6 decode tok/s |
+|---:|---:|---:|---:|
+| 4K | 22.5-22.8 | 22.5 | 167.6 |
+| 126K | 38.2-38.6 | 37.1-37.3 | 93-95 |
+| 250K | 54.2 | 51.4-51.5 | 64-66 |
+
+Thus the removed padded rows produce another repeatable 3% at 126K and 5% at 250K
+at the whole-model step boundary.  `maxnreg=168/192` variants again regressed and are
+not shipped.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

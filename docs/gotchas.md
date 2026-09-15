@@ -629,3 +629,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     the local frame to 32 bytes and reduced FULL-graph step time 8-11% at 126K/250K.
     Treat occupancy as a diagnostic, not a target; forcing occupancy by spilling is
     worse than the original kernel.
+
+46. **Power-of-two tiles can hide useful masked work even after spills are gone.**
+    DFlash2 q=8 with six GQA heads has 48 valid rows, while the generic verifier uses
+    `BLOCK_M=64`.  Keeping one CTA per request/KV-head/segment but evaluating 32+16
+    rows removes the 16 padded accumulators without rereading K/V.  On CMP 170HX this
+    left occupancy unchanged and improved FULL-graph step time another 3% at 126K and
+    5% at 250K.  Splitting into separate CTAs per query head is not equivalent: that
+    would reread every K/V tile six times and should remain a rejected design.
