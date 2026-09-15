@@ -402,6 +402,10 @@ explicit `--site` path or the vLLM imported by `PY`.
 
 ## 7. What has **not** been completed or proven
 
+This section is the branch-creation snapshot and is preserved to show the
+original risk register. Most 27B/SM80 items below were subsequently completed;
+the authoritative current status is section 17.
+
 The following are still open:
 
 - the two new FP8 patches have not been applied and executed on the actual CMP 170HX host;
@@ -1271,15 +1275,36 @@ Additional FULL_AND_PIECEWISE results:
 API smoke: 12/12
 ```
 
-The host is currently left on the guarded FULL qualification service on port
-8002. It is healthy and exposes model id `qwen3.8-27b` without an API key.
+The same guarded path also passed the next context tiers:
+
+```text
+85,514/512 C1: 74.8 decode tok/s; 3.72 tok/step; 49.5 ms/pass;
+                 TTFT 65.17 s; KV peak 19.1%; 0 preemptions
+126K/512 C1:    54.1 decode tok/s; 3.41 tok/step; 62.9 ms/pass;
+                 TTFT 110.32 s; KV peak 27.1%; 0 preemptions
+120K prefix:    119,168 cached; parity true; TTFT 103.38/1.51 s; 68.59x
+250K/512 C1:    31.5 decode tok/s; 3.27 tok/step; 103.3 ms/pass;
+                 TTFT 310.59 s; KV peak 51.6%; 0 preemptions
+240K prefix:    239,232 cached; parity true; TTFT 290.89/2.54 s; 114.36x
+```
+
+The 256K profile allocated 1,126,218 KV tokens and reported theoretical 4.30x
+concurrency at 262,144 tokens per request. These are capacity-planning numbers,
+not a claim that four simultaneous 256K requests have completed a soak.
+
+After every tier the service remained healthy and the kernel log contained no
+Xid or illegal-memory-access report. The host is currently left on the guarded
+256K FULL qualification service on port 8002. It exposes model id
+`qwen3.8-27b` without an API key.
 
 ### 17.5 Remaining Draft blockers
 
 Before declaring production-ready or removing Draft status:
 
-1. qualify exact 85,514, 128K and 256K profiles rather than extrapolating 64K;
-2. run longer multi-request soak and deliberate high-block-ID runtime traffic;
+1. run longer multi-request soak at the 128K/256K profiles and deliberate
+   high-block-ID runtime traffic;
+2. repeat exact 85,514 enough times to cover the original intermittent-fault
+   history rather than treating one clean run as a soak;
 3. verify the normal BF16 and KVarN profiles after this experimental series;
 4. preserve and publish raw benchmark/log artifacts for the longer tiers;
 5. decide whether the explicit FULL graph flag should remain experimental by
