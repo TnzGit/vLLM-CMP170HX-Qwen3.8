@@ -1,0 +1,119 @@
+Route pure speculative-decode batches on FlashInfer + static FP8 KV through the
+split-KV Triton verifier on SM80.
+
+This patch is opt-in with VLLM_FP8_SPEC_VERIFY=1 and depends on:
+
+  spec-decode-attn.patch
+  spec-decode-int8-kv.patch
+  spec-decode-fp8-kv-sm80.patch
+
+Normal FlashInfer prefill and single-token decode are unchanged. The hook only
+fires for a pure causal decode batch where a request has more than one query
+(the speculative verify shape), the KV cache is FP8, there is no sliding
+window/softcap/alibi/sink, DCP is off, and the cache layout is NHD.
+
+The common query-start, sequence-length and block-table tensors are retained in
+FlashInferMetadata solely for this verifier. They are GPU tensors already owned
+by the model runner; no new per-step allocation is introduced.
+
+Apply after patches/spec-decode-fp8-kv-sm80.patch:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/flashinfer-sm80-fp8-spec-verify.patch
+
+Written against vLLM 0.27.1.
+
+--- a/v1/attention/backends/flashinfer.py
++++ b/v1/attention/backends/flashinfer.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Attention layer with FlashInfer."""
+ 
++import os
+ from dataclasses import dataclass
+ from enum import Enum
+ from functools import partial
+@@ -55,6 +56,11 @@ from vllm.v1.attention.backend import (
+     CommonAttentionMetadata,
+     MultipleOf,
+ )
++from vllm.v1.attention.backends.flash_attn import (
++    _spec_attn_enabled,
++    _spec_attn_qmax,
++    _spec_attn_run,
++)
+ from vllm.v1.attention.backends.utils import (
+@@ -565,6 +571,15 @@ class FlashInferMetadata:
+     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
++
++    # CMP/SM80 experimental split-KV verifier metadata. Optional so existing
++    # tests/callers constructing FlashInferMetadata directly remain valid.
++    spec_query_start_loc: torch.Tensor | None = None
++    spec_seq_lens: torch.Tensor | None = None
++    spec_block_table: torch.Tensor | None = None
++    spec_max_query_len: int = 0
++
++
++def _fp8_spec_verify_enabled() -> bool:
++    return os.environ.get("VLLM_FP8_SPEC_VERIFY", "0") == "1"
+@@ -1169,6 +1184,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
+             cascade_wrapper=None,
+         )
++
++        # Keep the GPU tensors needed by the split-KV verifier. The decode
++        # requests are at the front of the batch after split_decodes_and_prefills.
++        attn_metadata.spec_query_start_loc = qo_indptr
++        attn_metadata.spec_seq_lens = seq_lens
++        attn_metadata.spec_block_table = block_table_tensor
++        if num_decodes > 0:
++            qlens_decode = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
++            attn_metadata.spec_max_query_len = int(qlens_decode.max().item())
+ 
+         # Guard access to seq_lens_cpu, which may not always be needed
+@@ -1777,6 +1800,49 @@ class FlashInferImpl(AttentionImpl):
+         else:
+             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
+ 
++        # CMP/GA100: FlashInfer's normal FP8 path is retained for prefill and
++        # single-token decode. For multi-query speculative verification, use
++        # the split-KV Triton kernel so the long KV sequence is distributed
++        # across SMs. The kernel consumes the same raw E4M3 cache and static
++        # per-layer K/V scales as FlashInfer.
++        if (
++            _fp8_spec_verify_enabled()
++            and _spec_attn_enabled()
++            and current_platform.is_device_capability(80)
++            and self.kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
++            and attn_metadata.causal
++            and not attn_metadata.use_cascade
++            and attn_metadata.num_prefill_tokens == 0
++            and attn_metadata.num_decodes > 0
++            and attn_metadata.num_decode_tokens > attn_metadata.num_decodes
++            and 1 < attn_metadata.spec_max_query_len
++            <= _spec_attn_qmax(self.num_heads // self.num_kv_heads)
++            and self.sliding_window == (-1, -1)
++            and not self.logits_soft_cap
++            and self.alibi_slopes is None
++            and self.sinks is None
++            and self.dcp_combine is not None
++            and get_kv_cache_layout() == "NHD"
++            and output_scale is None
++        ):
++            assert attn_metadata.spec_query_start_loc is not None
++            assert attn_metadata.spec_seq_lens is not None
++            assert attn_metadata.spec_block_table is not None
++            nreq = attn_metadata.num_decodes
++            _spec_attn_run(
++                self,
++                query[: attn_metadata.num_decode_tokens],
++                kv_cache_tuple[0],
++                kv_cache_tuple[1],
++                output[: attn_metadata.num_decode_tokens],
++                attn_metadata.spec_query_start_loc[: nreq + 1],
++                attn_metadata.spec_seq_lens[:nreq],
++                attn_metadata.spec_block_table[:nreq],
++                attn_metadata.spec_max_query_len,
++                static_k_scale=layer._k_scale_float,
++                static_v_scale=layer._v_scale_float,
++            )
++            return output
++
+         use_dcp = self.dcp_world_size > 1
