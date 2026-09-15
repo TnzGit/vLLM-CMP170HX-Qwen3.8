@@ -1157,3 +1157,130 @@ single-user/start_qwen.sh
 ```
 
 When there is a disagreement between an old performance note and a fresh reproducible test on the actual CMP host, preserve the raw evidence and update this handover rather than silently changing the target.
+
+---
+
+## 17. 2026-09-15 CMP 170HX qualification update
+
+This branch has now crossed the 64K correctness and CUDA Graph qualification
+boundary on the real CMP 170HX host. It is still a Draft because 85K/128K/256K
+and rollback-profile regressions remain outstanding.
+
+### 17.1 Runtime and geometry now validated
+
+```text
+target model: Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4
+draft model:  Qwen3.8-27B-DFlash2-W4A16
+target attention/KV: FlashInfer / FP8 E4M3
+draft attention/KV:  FlashAttention / BF16
+speculation: DFlash2, 7 draft tokens
+GPU: CMP 170HX 64GB, exact SM80, 180W limit
+context: 65,536
+max sequences: 4
+prefix caching: enabled
+API key: none
+```
+
+The heterogeneous-page fixed point is:
+
+```text
+target full attention: 896 tokens, 1,835,008 bytes
+draft attention:       448 tokens, 1,835,008 bytes
+Mamba align interval:  896 tokens
+prefix hash unit:       448 tokens
+```
+
+The Mamba promotion changes the logical checkpoint interval only. Its physical
+state storage size is unchanged. The complete experimental series applies
+cleanly to the pinned normal-patch baseline; a disposable applied tree passed
+`py_compile`, and `bench/test_mixed_fp8_page_alignment.py` directly verified
+target=896, draft=448, Mamba=896 and equal attention page bytes.
+
+### 17.2 Prefix-cache qualification
+
+The original target=896/draft=448/Mamba=880 geometry either asserted during
+hash resolution or produced no reusable common prefix. Promoting aligned Mamba
+checkpoints to 896 and hashing at 448 fixes the geometry without changing KV
+storage.
+
+Measured A -> B -> A results:
+
+```text
+10K salted: cache hit 8,960; parity true; cold/warm TTFT 5.782/0.778 s; 7.44x
+30K salted: cache hit 29,568; parity true; cold/warm TTFT 17.702/0.445 s; 39.74x
+60K salted: cache hit 59,136; parity true; cold/warm TTFT 43.205/1.177 s; 36.69x
+```
+
+`bench/test_mixed_fp8_prefix_reuse.py` is the reproducible regression client.
+
+### 17.3 Concurrency and long-context correctness
+
+API behavior passed 12/12 smoke cases with the mixed verifier enabled. Eager
+and graph runs completed mixed decode+prefill batches without output corruption,
+preemption, CUDA illegal-memory access or new Xid.
+
+Representative eager measurements:
+
+```text
+4K C1: decode 46.5 tok/s; 3.66 tok/step; 78.4 ms/pass
+4K C2: decode 91.0 tok/s; 3.60 tok/step; 78.7 ms/pass
+4K C4: decode 186.9 tok/s; 3.74 tok/step; 78.6 ms/pass
+32K/512 C1: decode 45.7 tok/s; 0 preemptions
+64K/512 C1: decode 44.8 tok/s; 0 preemptions
+```
+
+The direct static-FP8 split-KV verifier passed all GPU cases, including 65,536
+KV tokens and multi-request/query shapes, with maximum absolute error <=0.00076.
+
+### 17.4 CUDA Graph qualification
+
+PIECEWISE captured seven graph sizes and passed API, prefix, C1/C4 and 32K/60K
+tests. The guarded FULL capability advertisement is enabled only when all of
+the following are true:
+
+```text
+VLLM_FP8_SPEC_VERIFY=1
+VLLM_FP8_SPEC_FULL_CG=1
+exact SM80
+cache configuration is fp8/fp8_e4m3
+attention storage is uint8 or float8_e4m3fn
+```
+
+Because the GDN backend advertises `UNIFORM_BATCH`, the final engine mode is
+`FULL_AND_PIECEWISE`, not unconditional FULL. Startup captured both graph sets.
+With a fixed prompt salt, identical sampling and identical acceptance, the
+measured graph A/B was:
+
+```text
+                 PIECEWISE   FULL_AND_PIECEWISE   delta
+4K C1 decode       118.1            127.8         +8.2%
+4K C1 ms/pass       25.4             23.5         -7.5%
+4K C4 decode       350.9            364.9         +4.0%
+4K C4 ms/pass       38.5             37.0         -3.9%
+```
+
+`bench/conc_ladder.py --salt ...` now provides fixed-content A/B prompts so
+proposal acceptance cannot silently invalidate graph comparisons.
+
+Additional FULL_AND_PIECEWISE results:
+
+```text
+32K/512 C1: 104.1 decode tok/s; 3.38 tok/step; 32.3 ms/pass; TTFT 19.08 s
+60K/512 C1:  87.9 decode tok/s; 3.66 tok/step; 41.2 ms/pass; TTFT 40.76 s
+30K prefix: parity true; 29,568 cached; 39.74x TTFT speedup
+API smoke: 12/12
+```
+
+The host is currently left on the guarded FULL qualification service on port
+8002. It is healthy and exposes model id `qwen3.8-27b` without an API key.
+
+### 17.5 Remaining Draft blockers
+
+Before declaring production-ready or removing Draft status:
+
+1. qualify exact 85,514, 128K and 256K profiles rather than extrapolating 64K;
+2. run longer multi-request soak and deliberate high-block-ID runtime traffic;
+3. verify the normal BF16 and KVarN profiles after this experimental series;
+4. preserve and publish raw benchmark/log artifacts for the longer tiers;
+5. decide whether the explicit FULL graph flag should remain experimental by
+   default (recommended) or graduate into a shipped CMP profile.
