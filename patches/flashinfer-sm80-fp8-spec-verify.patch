@@ -68,7 +68,17 @@ Written against vLLM 0.27.1.
 +            attn_metadata.spec_max_query_len = int(qlens_decode.max().item())
  
          # Guard access to seq_lens_cpu, which may not always be needed
-@@ -1777,6 +1800,49 @@ class FlashInferImpl(AttentionImpl):
+@@ -1628,6 +1651,11 @@ class FlashInferImpl(AttentionImpl):
+         else:
+             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
++
++        try:
++            self._cmp_dcp_world_size = get_dcp_group().world_size
++        except AssertionError:
++            self._cmp_dcp_world_size = 1
+ 
+     def fused_output_quant_supported(self, quant_key: QuantKey):
+@@ -1777,6 +1805,49 @@ class FlashInferImpl(AttentionImpl):
          else:
              kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
  
@@ -93,7 +103,7 @@ Written against vLLM 0.27.1.
 +            and not self.logits_soft_cap
 +            and self.alibi_slopes is None
 +            and self.sinks is None
-+            and self.dcp_combine is not None
++            and self._cmp_dcp_world_size == 1
 +            and get_kv_cache_layout() == "NHD"
 +            and output_scale is None
 +        ):
