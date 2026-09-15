@@ -129,6 +129,39 @@ Performance work starts only after correctness gates pass. Record at least:
 
 The current 180 W BF16 baseline in this repository is the first negative-control target: ~133.8 tok/s decode256, ~126.8 tok/s decode900 and ~1,869 tok/s prefill on the recorded host.
 
+### Qualified split-KV tuning (CMP 170HX, 180 W)
+
+The static-FP8 verifier was measured with the production geometry (24 query heads,
+4 KV heads, head size 256 and 896-token target pages).  Increasing the split count
+from 16 to 32 is the best balanced setting.  The 64-split kernel saved less than 2%
+at 126K/250K in the isolated kernel scan and regressed short-context latency, so the
+FULL mixed-FP8 service profiles explicitly select 32 while the generic code default
+remains 16.
+
+The whole-model A/B used the same fixed prompts, DFlash2 `k=7`, 512 generated tokens,
+FULL CUDA Graph, FP8 target KV, BF16 draft KV and no preemptions:
+
+| input | segments | decode tok/s | accepted tok/step | verifier ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 16 | 144.8 | 3.37 | 23.1 |
+| 4K | 32 | 158-161 | 3.66-3.70 | 23.0 |
+| 126K | 16 | 54.2 | 3.42 | 62.8 |
+| 126K | 32 | 68.2 | 3.41 | 50.0 |
+| 250K | 16 | 32.5 | 3.38 | 103.3 |
+| 250K | 32 | 42.2 | 3.28 | 77.5 |
+
+The long-context gain is not an acceptance artifact: acceptance stayed effectively
+flat while verifier latency fell 20-25%.  TTFT was unchanged within noise because
+ordinary target prefill does not use this verifier kernel.  Prefix-cache reuse and
+FULL-graph concurrency were also checked at C1/C2/C4; a 70K C2 run reached 112.6
+aggregate decode tok/s with zero preemptions.
+
+`VLLM_SPEC_DECODE_ATTN_SEGMENTS` is immutable after the first verifier workspace is
+created.  Changing it requires a process restart because CUDA Graphs capture those
+workspace addresses.  `bench/spec_attn_fp8_ctx_scan.py` is the matching isolated
+kernel scan; run it only with the API service stopped so another CUDA context cannot
+pollute timings.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

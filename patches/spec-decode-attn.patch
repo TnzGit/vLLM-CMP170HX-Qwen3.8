@@ -103,7 +103,15 @@ Apply from the repo root:
 +        n = 0
 +        try:
 +            spec = get_current_vllm_config().speculative_config
-+            n = 1 + (spec.num_speculative_tokens if spec is not None else 0)
++            # Keep this capacity in lockstep with
++            # AttentionMetadataBuilder._init_reorder_batch_threshold().
++            # Parallel drafting may produce an uneven path whose verifier
++            # query is as large as 1 + 2 * num_speculative_tokens; sizing for
++            # only 1 + k leaves those valid batches to fall through to a
++            # FlashInfer decode wrapper planned for q_len_per_req=1.
++            if spec is not None:
++                multiplier = 2 if spec.parallel_drafting else 1
++                n = 1 + multiplier * spec.num_speculative_tokens
 +        except Exception:
 +            n = 0
 +        n = int(os.environ.get("VLLM_SPEC_DECODE_ATTN_QMAX", n or 0)) or n

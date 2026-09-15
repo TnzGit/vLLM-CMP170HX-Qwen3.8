@@ -164,8 +164,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     chunk could land on the same kernel — that "longest so far" changed mid-run, the buffers
     were reallocated, and the captured decode graph went on reading the freed ones:
     `CUDA error: an illegal memory access was encountered`, a few hundred tokens into the
-    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` (set by `single-user/start_qwen.sh` from
-    `DFLASH_TOKENS`) fixes the size at startup instead.
+    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` fixes the size at startup instead. For
+    DFlash parallel drafting, `single-user/start_qwen.sh` sets it to `1 + 2 *
+    DFLASH_TOKENS`, matching vLLM's scheduler reorder threshold; `1 + DFLASH_TOKENS`
+    is insufficient for valid uneven paths and for the scheduler-realistic warmup.
 21. **Async scheduling pins the number of speculative tokens.** vLLM only feeds draft token
     ids — and therefore the *count* the worker wants verified — back to the scheduler on the
     synchronous path (`EngineCore.post_step`). With async scheduling on, every decode step is
@@ -599,3 +601,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     And when eviction probing, keep the resend prompt BYTE-identical: a
     two-token label difference shifts every block hash and manufactures a
     convincing, fake "per-request hash instability" (ask how we know).
+
+43. **The split-KV segment count is a graph-time tuning parameter, not a live
+    knob.** The verifier's partial-output workspace is captured by FULL CUDA
+    Graph, so `VLLM_SPEC_DECODE_ATTN_SEGMENTS` is read once and must not change
+    until process restart. The generic default stays 16. On CMP 170HX with the
+    896-token static-FP8 target geometry, 32 segments reduced verifier pass time
+    from 62.8 to 50.0 ms at 126K and from 103.3 to 77.5 ms at 250K. 64 segments
+    bought less than 2% more in the isolated long-context kernel scan and hurt
+    short-context latency. The FULL mixed-FP8 service profiles therefore pin 32.

@@ -4,3 +4,4 @@
 heterogeneous-attn-pages-sm80.patch
 spec-decode-fp8-kv-sm80.patch
 flashinfer-sm80-fp8-spec-verify.patch
+spec-decode-segments-sm80.patch
