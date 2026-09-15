@@ -637,3 +637,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     left occupancy unchanged and improved FULL-graph step time another 3% at 126K and
     5% at 250K.  Splitting into separate CTAs per query head is not equivalent: that
     would reread every K/V tile six times and should remain a rejected design.
+
+47. **Page-table metadata should follow page lifetime, not tile lifetime.**  The
+    q8 verifier uses 32-token tiles inside 896-token pages, so one physical block
+    ID is valid for 28 consecutive loop iterations.  Carrying that scalar and
+    reloading it only at a page boundary was bit-identical and saved 0.4-0.5% at
+    the FULL-model step boundary from 4K through 250K.  This is a small but robust
+    win; unlike increasing split count or duplicating query-row kernels, it adds
+    no KV scan, reduction work, or CUDA Graph node.

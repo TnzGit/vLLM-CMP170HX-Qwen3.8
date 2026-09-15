@@ -243,6 +243,25 @@ Thus the removed padded rows produce another repeatable 3% at 126K and 5% at 250
 at the whole-model step boundary.  `maxnreg=168/192` variants again regressed and are
 not shipped.
 
+### Page-local block-table carry
+
+The production 896-token page contains exactly 28 verifier tiles of 32 tokens.
+The q8 specialization used to reload the same block-table entry for every tile.
+It now carries the physical block ID through the loop and refreshes it only when
+crossing a page boundary.  This is arithmetic- and layout-neutral: five isolated
+rounds were bit-identical and improved the 250K kernel by 0.7-1.3% every time.
+
+Paired FULL-graph tests used identical prompts and acceptance in both runs:
+
+| input | baseline tok/s | page-carry tok/s | baseline ms/pass | page-carry ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 156.1 | 156.9 | 22.6 | 22.5 |
+| 126K | 87.7 | 88.0 | 37.4 | 37.2 |
+| 250K | 65.0 | 65.2 | 51.8 | 51.6 |
+
+The gain is deliberately small, but it is repeatable, has no new allocation or
+graph node, and removes redundant metadata traffic rather than trading accuracy.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:
