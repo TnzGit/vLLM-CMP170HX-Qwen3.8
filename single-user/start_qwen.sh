@@ -57,6 +57,7 @@ if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
 fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
+VENV=${VENV:-$REPO/venv}
 
 if [ -z "$MODEL" ] && [ -d "$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then
   MODEL=$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast
@@ -136,7 +137,7 @@ if [ "$SPEC" = "dflash2" ]; then
       [ -f "$REPO/models/$d/model.safetensors" ] && DRAFT=$REPO/models/$d && break
     done
   fi
-  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
+  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: $VENV/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
   # Lookup-augmented drafting: when the model is reproducing something from its context,
   # draft from the context instead of from the drafter
   # (patches/dflash2-lookup-drafting.patch).
@@ -558,7 +559,7 @@ case " ${EXTRA_ARGS:-} " in
     fi ;;
 esac
 
-export PATH="$REPO/venv/bin:$PATH"
+export PATH="$VENV/bin:$PATH"
 # expandable_segments needs CUDA VMM, which WSL2's paravirt driver rejects during
 # Marlin repack. It is the single most reported failure on Windows (#2, #26) and it
 # does not announce itself as an allocator problem -- the same VMM rejection surfaces
@@ -583,7 +584,7 @@ if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
   export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
 fi
 
-exec venv/bin/vllm serve "$MODEL" \
+exec "$VENV/bin/vllm" serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
   --gpu-memory-utilization $GPU_UTIL \
