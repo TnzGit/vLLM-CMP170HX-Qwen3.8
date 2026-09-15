@@ -610,3 +610,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     from 62.8 to 50.0 ms at 126K and from 103.3 to 77.5 ms at 250K. 64 segments
     bought less than 2% more in the isolated long-context kernel scan and hurt
     short-context latency. The FULL mixed-FP8 service profiles therefore pin 32.
+
+44. **SM80 FP8 verifier decoding belongs in a BF16 LUT, not in per-element
+    arithmetic.** Triton cannot lower native E4M3FN loads on SM80, but every
+    finite E4M3FN value is exactly representable in BF16. A 256-entry BF16 LUT
+    removes masks, `tl.exp2`, and FP32-to-BF16 conversion from the hottest
+    split-KV loop while preserving the previous NaN-to-zero behavior. On the
+    CMP 170HX this raised C1 decode from 68.2 to 81.8 tok/s at 126K and from
+    42.2 to 53.8 tok/s at 250K with unchanged acceptance and zero preemptions.

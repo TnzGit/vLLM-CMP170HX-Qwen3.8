@@ -162,6 +162,31 @@ workspace addresses.  `bench/spec_attn_fp8_ctx_scan.py` is the matching isolated
 kernel scan; run it only with the API service stopped so another CUDA context cannot
 pollute timings.
 
+### Exact BF16 E4M3FN decode table
+
+On SM80, Triton cannot lower a native E4M3FN load.  Reconstructing every cache
+byte with masks and `tl.exp2` inside the long-context loop was therefore a major
+hidden cost.  The mixed-FP8 series now builds a 256-entry BF16 table once per
+verifier workspace.  Every finite E4M3FN value is exactly representable in BF16;
+the two NaN encodings retain the old fail-closed mapping to zero.  The 512-byte
+table has a CUDA-Graph-stable address and remains hot in cache.
+
+The controlled whole-model A/B used the same prompt salts and settings as the
+segment scan: C1, DFlash2 `k=7`, 512 output tokens, 32 segments, FULL CUDA Graph,
+180 W, FP8 target KV and BF16 draft KV.  Acceptance and TTFT stayed unchanged:
+
+| input | bitwise decode tok/s | BF16 LUT tok/s | bitwise ms/pass | BF16 LUT ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 158-161 | 164.1 | 23.0 | 22.5 |
+| 126K | 68.2 | 81.8 | 50.0 | 41.7 |
+| 250K | 42.2 | 53.8 | 77.5 | 61.2 |
+
+The standalone kernel/reference suite passed contexts through 65K, mixed request
+lengths and verify lengths through 64 tokens with the same maximum error as the
+old decoder.  `bench/test_spec_decode_fp8_lut.py` exhaustively checks all 256
+codes; `bench/spec_attn_fp8_ctx_scan.py --module ...` supports isolated candidate
+A/B without modifying the installed runtime.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

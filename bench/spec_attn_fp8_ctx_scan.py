@@ -14,11 +14,13 @@ Run with the API service stopped so another CUDA context does not perturb timing
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import math
+import sys
 
 import torch
 
-from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
+from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention as DefaultAttention
 
 
 H_Q, H_KV, HEAD_DIM, BLOCK_SIZE = 24, 4, 256, 896
@@ -70,7 +72,24 @@ def main() -> None:
     parser.add_argument("--segments", type=csv_ints, default=[8, 16, 32, 64])
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=30)
+    parser.add_argument(
+        "--module",
+        default="",
+        help="optional standalone spec_decode_attn.py candidate to benchmark",
+    )
     args = parser.parse_args()
+
+    attention_cls = DefaultAttention
+    if args.module:
+        module_spec = importlib.util.spec_from_file_location(
+            "spec_decode_attn_candidate", args.module
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise SystemExit(f"cannot load candidate module: {args.module}")
+        candidate = importlib.util.module_from_spec(module_spec)
+        sys.modules[module_spec.name] = candidate
+        module_spec.loader.exec_module(candidate)
+        attention_cls = candidate.SpecDecodeAttention
 
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0):
         raise SystemExit("This benchmark requires an exact SM80 CUDA GPU")
@@ -80,7 +99,7 @@ def main() -> None:
         f"device={torch.cuda.get_device_name()} block={BLOCK_SIZE} "
         f"Hq/Hkv/D={H_Q}/{H_KV}/{HEAD_DIM}"
     )
-    print("context query nseg us/layer ms/16layers maxdiff-vs-nseg16")
+    print("context query nseg us/layer ms/16layers maxdiff-vs-reference")
 
     for context in args.contexts:
         key, value, ks, vs, block_table = quantized_cache(context)
@@ -93,7 +112,7 @@ def main() -> None:
             latencies: dict[int, float] = {}
 
             for nseg in args.segments:
-                attn = SpecDecodeAttention(
+                attn = attention_cls(
                     max_num_reqs=1,
                     num_heads=H_Q,
                     head_dim=HEAD_DIM,
@@ -124,7 +143,8 @@ def main() -> None:
                 outputs[nseg] = out.float().clone()
                 del attn
 
-            reference = outputs[16]
+            reference_segment = 16 if 16 in outputs else args.segments[0]
+            reference = outputs[reference_segment]
             for nseg in args.segments:
                 diff = float((outputs[nseg] - reference).abs().max())
                 usec = latencies[nseg]
