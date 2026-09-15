@@ -187,6 +187,37 @@ old decoder.  `bench/test_spec_decode_fp8_lut.py` exhaustively checks all 256
 codes; `bench/spec_attn_fp8_ctx_scan.py --module ...` supports isolated candidate
 A/B without modifying the installed runtime.
 
+### Reduced verifier spill traffic
+
+CUDA Driver resource queries identified the next bottleneck instead of inferring it
+from throughput: the production q=8 partial kernel used 255 registers/thread and a
+96-byte local frame, which held occupancy to 12.5%.  Artificial register caps raised
+local traffic further and were 37-50% slower, so this is not an occupancy problem that
+can be fixed by spilling more aggressively.
+
+For the static-FP8 path only, scores, running maxima and normalizers remain FP32 while
+the per-tile running output is rounded to FP16.  The production 896-token page is also
+an exact multiple of the 32-token kernel tile, so its block ID is loaded once per tile
+instead of materializing 32 identical IDs.  Other KV modes and page geometries retain
+the original path.  The q=8 kernel's local frame fell from 96 to 32 bytes without
+changing its 12.5% occupancy.
+
+The explicit dequantized-reference suite covered q=5/8/16/64, mixed request lengths,
+895/896/897-token page boundaries and a high physical block ID.  Maximum absolute
+error was 0.00541 against the existing 0.08 budget.  In the same FULL-graph C1 model
+test used above, stable forward-pass latency changed as follows (decode tok/s is also
+shown, but varies with DFlash2 acceptance):
+
+| input | BF16 LUT ms/pass | reduced-spill ms/pass | reduced-spill decode tok/s |
+|---:|---:|---:|---:|
+| 4K | 22.5 | 22.5-22.8 | 163-167 |
+| 126K | 41.7 | 38.2-38.6 | 89-90 |
+| 250K | 61.2 | 54.2 | 61-65 |
+
+The long-context forward step is therefore 8-11% faster with no preemption and no
+acceptance regression.  BF16 accumulation, FP16 partial scratch, hoisted scale loads,
+and `maxnreg` 160/168/192 variants were all slower and remain rejected experiments.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

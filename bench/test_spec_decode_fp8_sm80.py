@@ -190,6 +190,7 @@ def run_high_block_case(att: SpecDecodeAttention) -> float:
 
 
 def main() -> int:
+    global BLOCK_SIZE
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--allow-skip",
@@ -201,7 +202,22 @@ def main() -> int:
         action="store_true",
         help="also run the ~4 GiB high physical block-id regression",
     )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=BLOCK_SIZE,
+        help="paged-KV block size used by the synthetic cache",
+    )
+    parser.add_argument(
+        "--production-page-boundaries",
+        action="store_true",
+        help="exercise the 895/896/897-token boundaries used by the CMP profile",
+    )
     args = parser.parse_args()
+
+    BLOCK_SIZE = args.block_size
+    if args.high_block_id and BLOCK_SIZE != 64:
+        parser.error("--high-block-id currently requires --block-size 64")
 
     if not torch.cuda.is_available():
         print("SKIP: CUDA is required")
@@ -229,6 +245,14 @@ def main() -> int:
         ([65536], 16),
         ([8192, 1500], 64),
     ]
+    if args.production_page_boundaries:
+        cases = [
+            ([895], 5),
+            ([896], 8),
+            ([897], 8),
+            ([4097], 8),
+            ([4097, 1300], 5),
+        ] + cases
     failed = False
     for kv_lens, q_len in cases:
         err = run_case(att, kv_lens, q_len)

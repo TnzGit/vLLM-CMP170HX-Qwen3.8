@@ -618,3 +618,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     split-KV loop while preserving the previous NaN-to-zero behavior. On the
     CMP 170HX this raised C1 decode from 68.2 to 81.8 tok/s at 126K and from
     42.2 to 53.8 tok/s at 250K with unchanged acceptance and zero preemptions.
+
+45. **A 255-register verifier is not automatically fixed by a lower register cap.**
+    The production q=8 static-FP8 partial kernel reported 255 registers/thread,
+    96 bytes of local memory/thread and 12.5% theoretical occupancy.  Compiling it
+    with `maxnreg` 192, 168 or 160 increased local memory to 320, 512 and 632 bytes
+    and slowed it by 37-50%.  The useful fix was to shorten live ranges: keep scores,
+    maxima and normalizers in FP32, round only the per-tile running output to FP16,
+    and scalarize the block ID for the integral 896/32 page/tile geometry.  This cut
+    the local frame to 32 bytes and reduced FULL-graph step time 8-11% at 126K/250K.
+    Treat occupancy as a diagnostic, not a target; forcing occupancy by spilling is
+    worse than the original kernel.
