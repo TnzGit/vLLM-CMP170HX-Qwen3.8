@@ -1,9 +1,9 @@
 Add a static-scale FP8 mode to the split-KV speculative verifier.
 
-This patch is intentionally kernel-only. It is applied after
-spec-decode-attn.patch and spec-decode-int8-kv.patch and does not yet hook the
-FlashInfer backend. Keeping the kernel extension separate lets us validate FP8
-math against a dequantized BF16 reference before changing runtime dispatch.
+This patch is intentionally kernel-focused. It is applied after
+spec-decode-attn.patch and spec-decode-int8-kv.patch. The FlashInfer runtime
+dispatch is kept in a separate patch so the FP8 math can be validated against a
+dequantized BF16 reference before changing backend routing.
 
 vLLM's normal per-layer FP8 KV cache stores E4M3 values plus one K and one V
 scale for the layer. On SM80 the verifier loads the raw E4M3 cache, converts to
@@ -21,6 +21,28 @@ Apply after patches/spec-decode-int8-kv.patch:
 
 Written against the repository's vLLM 0.27.1 patch stack.
 
+--- a/v1/attention/backends/flash_attn.py
++++ b/v1/attention/backends/flash_attn.py
+@@ -1757,7 +1757,9 @@ def _spec_attn_qmax(group: int) -> int:
+     return _SPEC_ATTN_QMAX
+ 
+ 
+-def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, max_seqlen_q, k_scale_cache=None, v_scale_cache=None):
++def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k,
++                   block_table, max_seqlen_q, k_scale_cache=None, v_scale_cache=None,
++                   static_k_scale=None, static_v_scale=None):
+     from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
+ 
+     key = (impl.num_heads, impl.head_size, q.device)
+@@ -1776,5 +1778,7 @@ def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k
+         )
+         _SPEC_ATTN[key] = att
+     att.run(q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, impl.scale,
+-            cu_seqlens_q.shape[0] - 1, max_seqlen_q,
+-            k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache)
++            cu_seqlens_q.shape[0] - 1, max_seqlen_q,
++            k_scale_cache=k_scale_cache, v_scale_cache=v_scale_cache,
++            static_k_scale=static_k_scale, static_v_scale=static_v_scale)
 --- a/v1/attention/ops/spec_decode_attn.py
 +++ b/v1/attention/ops/spec_decode_attn.py
 @@ -57,6 +57,7 @@ def _spec_attn_partial(
@@ -42,9 +64,9 @@ Written against the repository's vLLM 0.27.1 patch stack.
                             mask=k_ok, other=0.0)
              s = tl.dot(qs, tl.trans(k)).to(tl.float32) * k_sc[None, :]
 +        elif STATIC_QUANT:
-+            # Static per-layer FP8 cache (E4M3/E5M2).  Triton converts the
-+            # loaded FP8 values to BF16 before the tensor-core dot.  vLLM's
-+            # cache writer stored value/scale, so restore the K scale here.
++            # Static per-layer FP8 cache (E4M3/E5M2). Triton converts loaded
++            # FP8 values to BF16 before the tensor-core dot. vLLM's cache
++            # writer stored value/scale, so restore the K scale here.
 +            k = k.to(tl.bfloat16)
 +            v = v.to(tl.bfloat16)
 +            s = tl.dot(qs, tl.trans(k)).to(tl.float32) * static_k_scale
