@@ -1,8 +1,8 @@
 [Unit]
-Description=CMP 170HX mixed-FP8 qualification service on port 8002
+Description=CMP 170HX mixed target/draft KV with native FlashInfer verify control
 After=network-online.target
 Wants=network-online.target
-Conflicts=cmp170hx-fp8-baseline-8002.service cmp170hx-mixed-fp8-native-8002.service cmp170hx-mixed-fp8-full-8002.service
+Conflicts=cmp170hx-mixed-fp8-8002.service cmp170hx-fp8-baseline-8002.service cmp170hx-mixed-fp8-full-8002.service
 
 [Service]
 Type=simple
@@ -18,16 +18,15 @@ Environment=SPEC=dflash2
 Environment=CTX=cmp-mixed-fp8
 Environment=MAX_LEN=65536
 Environment=DFLASH_MAX_LEN=65536
-Environment=MAX_SEQS=4
+Environment=MAX_SEQS=1
 Environment=DFLASH_TOKENS=7
 Environment=LOOKUP=0
-Environment=PREFIX_CACHE=1
+Environment=PREFIX_CACHE=0
 Environment=VISION=0
 Environment=SPEC_ATTN=1
-Environment=VLLM_FP8_SPEC_VERIFY=1
+Environment=VLLM_FP8_SPEC_VERIFY=0
 Environment=VLLM_FP8_SPEC_FULL_CG=0
 Environment=VLLM_ALIGN_HETEROGENEOUS_ATTN_PAGES=1
-Environment=CUDAGRAPH_MODE=PIECEWISE
 Environment=CMP_TARGET_ATTN_BACKEND=FLASHINFER
 Environment=CMP_TARGET_KV_DTYPE=fp8
 Environment=DFLASH_ATTN_BACKEND=FLASH_ATTN
@@ -39,15 +38,15 @@ Environment=VLLM_API_KEY=
 Environment=VLLM_NO_USAGE_STATS=1
 Environment=DO_NOT_TRACK=1
 Environment=FLASHINFER_DISABLE_VERSION_CHECK=1
-Environment="EXTRA_ARGS=--enable-prompt-tokens-details"
+Environment="EXTRA_ARGS=--enforce-eager --enable-prompt-tokens-details"
 ExecStartPre=/usr/bin/sudo -n /usr/bin/nvidia-smi -i 0 -pl 180
 ExecStartPre=/home/base-node/.codex_tasks/pixelml-cmp170hx/setup_pixelml_cuda_links.sh
 ExecStart=/bin/bash /home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-repo/single-user/start_qwen.sh
 Restart=no
 TimeoutStopSec=90
 KillMode=control-group
-StandardOutput=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-8002.log
-StandardError=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-8002.log
+StandardOutput=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-native-8002.log
+StandardError=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-native-8002.log
 
 [Install]
 WantedBy=default.target

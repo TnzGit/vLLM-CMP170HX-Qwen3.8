@@ -8,9 +8,10 @@ from vllm.v1.core.kv_cache_utils import (
     _align_heterogeneous_attention_page_sizes,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
-def _specs() -> dict[str, FullAttentionSpec]:
+def _specs() -> dict[str, KVCacheSpec]:
     return {
         "target": FullAttentionSpec(
             block_size=880,
@@ -26,6 +27,12 @@ def _specs() -> dict[str, FullAttentionSpec]:
             dtype=torch.bfloat16,
             indexes_kv_by_block_stride=True,
         ),
+        "mamba": MambaSpec(
+            block_size=880,
+            shapes=((1, 64),),
+            dtypes=(torch.float16,),
+            mamba_cache_mode="align",
+        ),
     }
 
 
@@ -39,11 +46,16 @@ def main() -> int:
     aligned = _align_heterogeneous_attention_page_sizes(specs)
     assert aligned["target"].block_size == 896
     assert aligned["draft"].block_size == 448
+    assert aligned["mamba"].block_size == 896
     assert aligned["target"].page_size_padded is None
     assert aligned["draft"].page_size_padded is None
     assert aligned["target"].page_size_bytes == 1_835_008
     assert aligned["draft"].page_size_bytes == 1_835_008
-    print("mixed-FP8 page alignment: target=896 draft=448 page=1835008 OK")
+    assert aligned["mamba"].page_size_bytes == specs["mamba"].page_size_bytes
+    print(
+        "mixed-FP8 page alignment: target=896 draft=448 mamba=896 "
+        "attention_page=1835008 OK"
+    )
     return 0
 
 

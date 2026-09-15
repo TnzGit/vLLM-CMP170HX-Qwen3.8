@@ -1,9 +1,10 @@
-Align mixed target/draft attention pages by logical block size.
+Align mixed target/draft attention pages and recurrent prefix boundaries.
 
 This patch is opt-in with VLLM_ALIGN_HETEROGENEOUS_ATTN_PAGES=1. It runs before
 the normal one-pass page unifier and grows natural attention pages to a fixed
-point in their shared kernel-block granularity. It does not change KV storage,
-block tables, scheduler semantics, or Mamba padding.
+point in their shared kernel-block granularity. It does not change KV storage or
+block tables. In mamba_cache_mode=align it also keeps the target Mamba
+checkpoint interval aligned with the promoted target-attention block.
 
 On the CMP 170HX Qwen3.8 target-FP8/draft-BF16 configuration, the stock path
 first creates target=880 and draft=448 token blocks, then pads the target's
@@ -11,7 +12,9 @@ first creates target=880 and draft=448 token blocks, then pads the target's
 represent the periodic padding gap with one affine virtual-block stride. The
 fixed-point alignment instead produces target=896 and draft=448, whose natural
 pages are both exactly 1,835,008 bytes, so backend 16-token blocks remain
-contiguous and no Worker reshape shim is required.
+contiguous and no Worker reshape shim is required. The Mamba interval is then
+promoted from 880 to 896, allowing prefix hashes at the common 448-token
+target/Mamba/draft boundary.
 
 Apply before spec-decode-fp8-kv-sm80.patch.
 
@@ -19,12 +22,13 @@ Written against the repository's vLLM 0.27.1 patch stack.
 
 --- a/v1/core/kv_cache_utils.py
 +++ b/v1/core/kv_cache_utils.py
-@@ -1077,8 +1077,79 @@
-
+@@ -1078,7 +1078,109 @@
      page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
      return len(page_sizes) == 1
+-
+-
 +
-
++
 +def _align_heterogeneous_attention_page_sizes(
 +    kv_cache_spec: dict[str, KVCacheSpec],
 +) -> dict[str, KVCacheSpec]:
@@ -35,12 +39,15 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +    ordinary one-pass unifier pads the target's physical page but keeps its
 +    smaller logical block, which cannot be represented as one affine
 +    ``as_strided`` view after splitting it into backend kernel blocks.
-
++
 +    Grow attention block sizes in their shared kernel granularity until every
 +    natural attention page covers the current maximum. For the CMP mixed-FP8
 +    profile this converges from target=880/draft=16 to target=896/draft=448,
-+    both exactly 1,835,008 bytes. Mamba pages are padded later by the normal
-+    unifier. The behavior is strictly opt-in while being qualified.
++    both exactly 1,835,008 bytes. In ``mamba_cache_mode=align``, promote the
++    target Mamba checkpoint interval to the resulting full-attention block as
++    well; otherwise prefix caching has three incompatible boundaries
++    (880/896/448) and cannot safely resume a shared prefix. The behavior is
++    strictly opt-in while being qualified.
 +    """
 +    if os.environ.get("VLLM_ALIGN_HETEROGENEOUS_ATTN_PAGES", "0") != "1":
 +        return kv_cache_spec
@@ -91,6 +98,34 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +            updated[layer_name] = new_spec
 +            changed = True
 +        if not changed:
++            # ``align`` establishes a shared replay boundary between target
++            # full-attention KV and recurrent state. The target attention page
++            # may have grown during the fixed-point pass above, so propagate
++            # that final logical block size to Mamba. DFlash sliding-window
++            # pages intentionally remain smaller and use the common prefix
++            # hash unit selected by the launcher.
++            target_block_size = max(
++                spec.block_size
++                for spec in updated.values()
++                if isinstance(spec, AttentionSpec)
++                and not isinstance(spec, SlidingWindowSpec)
++            )
++            for layer_name, spec in tuple(updated.items()):
++                if (
++                    isinstance(spec, MambaSpec)
++                    and spec.mamba_cache_mode == "align"
++                    and spec.block_size != target_block_size
++                ):
++                    logger.info(
++                        "Mixed-FP8 prefix alignment raised %s from %d to %d "
++                        "tokens to match target attention.",
++                        layer_name,
++                        spec.block_size,
++                        target_block_size,
++                    )
++                    updated[layer_name] = replace(
++                        spec, block_size=target_block_size
++                    )
 +            return updated
 +
 +    raise RuntimeError("Mixed-FP8 attention page alignment did not converge")
@@ -99,10 +134,7 @@ Written against the repository's vLLM 0.27.1 patch stack.
  def _promote_indivisible_block_sizes(
      kv_cache_spec: dict[str, KVCacheSpec], max_page_size: int
  ) -> tuple[dict[str, KVCacheSpec], int]:
-@@ -1192,6 +1263,10 @@
-         # All layers have the same page size, no need to unify.
-         return kv_cache_spec
-
+@@ -1195,3 +1297,7 @@
 +    kv_cache_spec = _align_heterogeneous_attention_page_sizes(kv_cache_spec)
 +    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
 +    if len(page_sizes) <= 1:
@@ -110,4 +142,3 @@ Written against the repository's vLLM 0.27.1 patch stack.
      max_page_size = max(page_sizes)
      # (syv) see _promote_indivisible_block_sizes: a draft layer whose page does not
      # divide the maximum would otherwise keep its 16-token block and pad its page to
-

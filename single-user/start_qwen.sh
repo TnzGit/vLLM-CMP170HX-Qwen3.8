@@ -131,6 +131,7 @@ elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ] && [ "$CTX" != "cmp-mixed-f
   echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k), CTX=huge (KVarN, 240k; kvarn/install.sh), and experimental CTX=cmp-mixed-fp8; CTX=$CTX keeps SPEC=mtp" >&2
   SPEC=mtp
 fi
+SPEC_ARGS=()
 if [ "$SPEC" = "dflash2" ]; then
   if [ -z "$DRAFT" ]; then
     for d in Qwen3.8-27B-DFlash2-W4A16 Qwen3.8-27B-DFlash2; do
@@ -375,10 +376,20 @@ if [ "$SPEC" = "dflash2" ]; then
          "5-10x slower. Ladder 4k/16k TTFT against known-good rates before trusting it." >&2
   fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
+elif [ "$SPEC" = "none" ]; then
+  # Correctness/performance control: run the target model without a proposer.
+  # Keep the selected CTX backend and KV dtype unchanged so this is a true A/B.
+  MAX_SEQS=${MAX_SEQS:-1}
+  CG=${CG:-32}
+  SPEC_CFG=
 else
   MAX_SEQS=${MAX_SEQS:-8}
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}
+fi
+
+if [ -n "$SPEC_CFG" ]; then
+  SPEC_ARGS=(--speculative-config "$SPEC_CFG")
 fi
 
 # PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
@@ -390,6 +401,11 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # KVarN runs --block-size 128; match the prefix hash unit to its tile so cache
   # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
   [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
+  # The CMP mixed-FP8 page-alignment patch promotes target attention and its
+  # aligned Mamba checkpoints to 896 tokens while the draft uses 448-token
+  # pages. Hash at their common boundary so all three groups can resume the
+  # same cached prefix.
+  [ "$CTX" = "cmp-mixed-fp8" ] && EXTRA_ARGS="--prefix-match-unit 448 ${EXTRA_ARGS}"
   # DFlash2 only: prefix caching and a CAPTURED (FULL) verify step do not mix on
   # that path. It is the capture, not the drafter: eager is clean, and so is
   # PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
@@ -596,7 +612,7 @@ exec "$VENV/bin/vllm" serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
-  --speculative-config "$SPEC_CFG" \
+  "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   ${TOOL_ARGS} \
