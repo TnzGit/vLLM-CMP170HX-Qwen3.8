@@ -409,7 +409,8 @@ The following are still open:
 - FP8 kernel correctness has not yet passed `bench/test_spec_decode_fp8_sm80.py` on SM80;
 - FlashInfer runtime dispatch has not been exercised end-to-end;
 - `single-user/start_qwen.sh` does not yet wire `DFLASH_ATTN_BACKEND` and `DFLASH_KV_CACHE_DTYPE` into `SPEC_CFG`;
-- the target/draft 896/448 logical geometry is not implemented;
+- the target/draft 896/448 logical geometry is implemented behind an opt-in
+  environment gate and still requires end-to-end qualification;
 - Mamba checkpoint geometry is not yet aligned to the target 896-token unit;
 - complete 448-token DFlash prefix pages are not yet qualified in common-prefix reconciliation;
 - the equivalent of the reported `VLLM_FP8_SPEC_FULL_CG` behavior is not implemented/qualified;
@@ -436,6 +437,7 @@ Recommended change:
 ```text
 experimental/cmp170hx-mixed-fp8/
   patches/
+    heterogeneous-attn-pages-sm80.patch
     spec-decode-fp8-kv-sm80.patch
     flashinfer-sm80-fp8-spec-verify.patch
   series
@@ -453,9 +455,9 @@ that controls whether the extra patches are installed/verified.
 Acceptance criteria:
 
 - `bash verify.sh --install` on a normal production tree still passes without applying experimental patches;
-- the experimental installer can independently dry-run/apply/reverse its two patches.
+- the experimental installer can independently dry-run/apply/reverse its three patches.
 
-Both experimental patches were also regenerated as valid unified diffs against
+The two original FP8 verifier patches were also regenerated as valid unified diffs against
 the deployed vLLM 0.27.1 source. The original handoff patches had malformed hunk
 counts and could not be applied by `patch(1)`.
 
@@ -633,6 +635,17 @@ physical draft page       = 1,835,008 bytes
 Do not force a global 896 block size.
 
 Implement this through KV-cache specs/group geometry, following the existing mixed-page/unification machinery and upstream PR #45181 as the design reference.
+
+The experimental `heterogeneous-attn-pages-sm80.patch` now implements this as
+a fixed-point logical block-size alignment before the normal page unifier. It
+corrects the observed 880/448 startup failure without a Worker `as_strided`
+shim: target becomes 896, draft remains 448, and neither attention page needs
+physical padding. Validate the pure geometry first with:
+
+```bash
+VLLM_ALIGN_HETEROGENEOUS_ATTN_PAGES=1 \
+  $PY bench/test_mixed_fp8_page_alignment.py
+```
 
 Add explicit startup logging or a diagnostic test that prints, per KV group:
 

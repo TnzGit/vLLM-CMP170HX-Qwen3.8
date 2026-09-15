@@ -32,6 +32,7 @@ need_file patches/hybrid-sw-block-promote.patch
 need_file patches/marlin-repack-staged-sm80.patch
 need_file experimental/cmp170hx-mixed-fp8/series
 need_file experimental/cmp170hx-mixed-fp8/install.sh
+need_file experimental/cmp170hx-mixed-fp8/patches/heterogeneous-attn-pages-sm80.patch
 need_file experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-kv-sm80.patch
 need_file experimental/cmp170hx-mixed-fp8/patches/flashinfer-sm80-fp8-spec-verify.patch
 need_grep 'to\(tl\.int64\)' patches/spec-decode-attn.patch 'split-KV block ids use int64'
