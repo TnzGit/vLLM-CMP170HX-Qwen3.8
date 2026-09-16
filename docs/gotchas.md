@@ -937,3 +937,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     unchanged DRAM traffic, registers and occupancy. Keep exact LUT semantics
     (including fail-closed NaN codes) and measure end-to-end latency; do not
     reject a lookup path solely because shared transaction counters rise.
+
+80. **Pairing LUT decode accesses is a separate win from choosing the LUT.**
+    V7-E19 loads two adjacent raw FP8 bytes as `uint16_t`, performs two exact
+    shared-LUT reads and stores two BF16 values as one `uint32_t`. The mapping
+    is even-aligned for the 256-wide tile, so no byte-order or tail special
+    case is needed. At locked 1350MHz it cut E18 latency another 4.4-9.4%
+    (up to 29% versus E17) with unchanged 132 registers, 81,856B shared and
+    two-CTA occupancy. Keep alignment assertions; do not generalize the pair
+    mapping to odd-width or unaligned cache geometries without a new gate.

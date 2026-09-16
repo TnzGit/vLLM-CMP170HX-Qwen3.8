@@ -129,6 +129,23 @@ shared conflicts rise to about 38.42M because of the LUT loads, but DRAM stays
 258.21MB and wall time improves substantially. E18 is accepted as the current
 isolated scaffold, still disconnected from production dispatch.
 
+## V7-E19 paired shared-LUT decode (accepted)
+
+E19 keeps E18's exact shared LUT but decodes two adjacent FP8 bytes per loop:
+one aligned 16-bit raw-stage load, two LUT reads and one aligned 32-bit BF16
+store. The even element mapping is compile-time aligned, so cache bytes, LUT
+semantics, scales, geometry, synchronization and ABI remain unchanged.
+
+Resources remain 132 registers/thread, zero local bytes/spills, 81,856 B
+dynamic shared and two active CTAs/SM. Full decoder/boundary/high-ID
+correctness passes. Locked-1350MHz query-8 medians (us/layer) are
+190.2/516.5/1,260.3/2,464.7/3,822.9/4,745.7 at
+4K/20K/60K/126K/200K/250K, 4.4-9.4% below E18. NCU at 126K reports 12.50%
+barrier, 17.70% long-scoreboard and 18.75% short-scoreboard stalls, about
+38.40M shared conflicts and 258.21MB DRAM reads. The extra LUT traffic is
+outweighed by fewer decode-loop/address instructions. E19 is the current
+isolated scaffold, not production dispatch.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

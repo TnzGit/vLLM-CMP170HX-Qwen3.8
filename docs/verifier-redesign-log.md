@@ -1453,3 +1453,46 @@ count and end-to-end time.
 about 21% over E17 and about 38% over the pre-E16 E14 baseline at 250K. It is
 still disconnected from vLLM; next gates are multi-request stress, CUDA Graph
 capture compatibility and an end-to-end dispatch A/B.
+
+## Milestone V7-E19 — paired shared-LUT decode (accepted)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `a2dba6b`
+
+E19 keeps E18's exact shared LUT but processes two adjacent FP8 bytes per
+ iteration: one aligned 16-bit raw-stage load, two LUT reads and one aligned
+ 32-bit BF16 store. The element mapping is even-aligned by construction, so
+ no cache bytes, LUT values, scales, block geometry, synchronization or ABI
+ change. This isolates loop/address overhead from E18's lookup choice.
+
+The candidate compiles with 132 registers/thread, zero local bytes/spills,
+81,856 B dynamic shared and two active CTAs/SM. Exhaustive E4M3FN decoding,
+ordinary/mixed boundaries, int32/int64 indices and the 4-GiB high-block-ID
+case all pass; maximum errors remain within the existing FP16 accumulation
+tolerance.
+
+Three locked-1350MHz scans (query length 8, 300 timed iterations) produced
+these medians in us/layer:
+
+| context | E18 | E19 | change |
+|---:|---:|---:|---:|
+| 4K | 198.9 | 190.2 | -4.4% |
+| 20K | 558.1 | 516.5 | -7.5% |
+| 60K | 1,378.2 | 1,260.3 | -8.6% |
+| 126K | 2,709.1 | 2,464.7 | -9.0% |
+| 200K | 4,202.8 | 3,822.9 | -9.0% |
+| 250K | 5,239.6 | 4,745.7 | -9.4% |
+
+At 126K, NCU reports 12.50% barrier, 17.70% long-scoreboard and 18.75%
+short-scoreboard stalls, about 38.40 M aggregate shared-bank conflicts,
+258.21 MB DRAM reads and the same 132-register/81,856-B launch geometry as
+E18. Shared conflicts and scoreboard percentages rise slightly because each
+pair adds two LUT accesses, but the halved decode-loop iterations and address
+work reduce wall latency. This is another case where end-to-end timing and
+resource/traffic invariants are more informative than one counter.
+
+**Accepted as the current isolated V7 scaffold.** E19 is about 29% faster than
+E17 and about 38% faster than the E14 baseline at 250K in this microbenchmark.
+It remains disconnected from vLLM; multi-request stress, CUDA Graph capture
+and end-to-end dispatch A/B are still required before integration.

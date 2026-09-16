@@ -1,12 +1,11 @@
 # V7 prototype handoff
 
-Status: V7-E18 shared-LUT FP8 decode is the current accepted isolated scaffold
-on top of E17/E16. It preserves the E17 disjoint score tail and barrier
-reduction plus E16's half2 accumulator merge, then replaces per-element FP8
-integer conversion with the already-copied exact shared LUT. A locked-clock
-A/B improved query-8 latency 11.6-21.8% over E17 from 4K through 250K;
-correctness, zero-spill and two-CTA gates pass. E18 is not connected to
-production dispatch.
+Status: V7-E19 paired shared-LUT decode is the current accepted isolated
+scaffold on top of E18/E17/E16. It preserves the exact shared LUT and decodes
+two FP8 bytes per loop with one aligned halfword load and one aligned 32-bit
+store. A locked-clock A/B improved query-8 latency 4.4-9.4% over E18 from 4K
+through 250K; correctness, zero-spill and two-CTA gates pass. E19 is not
+connected to production dispatch.
 
 Files:
 
@@ -17,6 +16,22 @@ Files:
   int32/int64 index variants.
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
+
+## V7-E19 paired shared-LUT decode (accepted isolated scaffold)
+
+Two adjacent raw FP8 bytes are loaded as one aligned `uint16_t`; their two
+BF16 LUT values are packed into one aligned `uint32_t` shared store. The even
+mapping is compile-time aligned and preserves cache bytes, LUT semantics,
+scales, geometry, synchronization and ABI. Resources remain 132
+registers/thread, zero local bytes/spills, 81,856B dynamic shared and two
+active CTAs/SM; exhaustive, mixed-boundary and high-block-ID correctness pass.
+
+Locked-1350MHz query-8 medians (us/layer) are 190.2/516.5/1,260.3/2,464.7/
+3,822.9/4,745.7 at 4K/20K/60K/126K/200K/250K, 4.4-9.4% below E18. NCU at
+126K reports 12.50% barrier, 17.70% long-scoreboard and 18.75%
+short-scoreboard stalls, about 38.40M aggregate shared conflicts and
+258.21MB DRAM reads. It remains an isolated scaffold pending multi-request
+and end-to-end vLLM A/B.
 
 ## V7-E18 shared-LUT FP8 decode (accepted isolated scaffold)
 
