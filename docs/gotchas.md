@@ -808,3 +808,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     indexed through the shared LUT before WMMA. Distinguish vector transport
     from vector conversion; stage compact raw bytes separately if the goal is
     to break the global-load/decode dependency chain.
+
+65. **Separating transport from decode does not remove decode cost.** V7-E5
+    staged each compact 8-KiB raw K/V matrix in an otherwise idle shared Q/P
+    buffer before decoding it to padded BF16. It passed all gates and improved
+    4K/70K by 1.2%/2.9%, but 126K-250K latency and every important NCU counter
+    were flat. The remaining per-byte random shared-LUT read still dominates
+    the feed path. After validating all encodings, direct E4M3FN bit conversion
+    is a better next test than adding more transport stages.

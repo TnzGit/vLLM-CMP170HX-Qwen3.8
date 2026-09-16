@@ -1345,20 +1345,20 @@ Completed milestones:
 | V7-E3a padded WMMA | `62d0375` | conflicts -3x; rejected, occupancy fell to 1 CTA |
 | V7-E3b two-phase PV | `6e0d464` | correct, 2 CTA restored; ~5% long gain, still rejected |
 | V7-E4a shared decode LUT | `0e09a1d` | correct, 2 CTA; 5.6-6.1% vs E2 long, scoreboard unchanged |
-| V7-E4b direct vector load | current milestone | correct; rejected, +13% at 4K and flat long-context |
+| V7-E4b direct vector load | `4c83b37` | correct; rejected, +13% at 4K and flat long-context |
+| V7-E5 compact raw staging | current milestone | correct; -1.2/-2.9% at 4K/70K, flat long-context |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should branch from standalone E4a or carefully undo E4b's
-direct vector/unpack loop; do not touch production dispatch. E4b preserved
-resources and correctness but regressed 4K 13% and left long-context latency,
-instruction count and stalls unchanged. The next candidate should reuse the
-8,448-B Q/P buffer before Q staging as an 8,192-B compact raw matrix buffer:
-coalesced-load K, decode into padded BF16 K, then repeat for V. This separates
-global fetch from decode without increasing shared allocation, but the extra
-barriers require the same resource/correctness/five-tier/NCU gates. Admission
-remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K
-regression before full-model/CUDA Graph A/B.
+The next owner should continue from the standalone prototype only. E5 proved
+compact raw staging is safe and gives a small short/mid gain, but 126K-250K
+and NCU counters stayed flat because the per-byte shared LUT lookup remains.
+The next candidate should implement exact E4M3FN-to-BF16 bit conversion,
+first exhaustively verified for all 256 codes against PyTorch, then remove the
+decode LUT access from the hot loop while preserving the same geometry. Repeat
+resource/correctness/five-tier/NCU gates. Admission remains zero spill, two
+CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K regression before any
+full-model/CUDA Graph A/B.

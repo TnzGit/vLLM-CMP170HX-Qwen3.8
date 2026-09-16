@@ -854,3 +854,35 @@ matrix in the otherwise-not-yet-used Q/P buffer, then decode from shared to
 the padded BF16 K/V matrix. This separates/coalesces global fetch from decode
 without increasing the 81,664-B allocation. It must be measured because the
 extra phase barriers may erase the latency benefit.
+
+## Milestone V7-E5 — compact raw shared staging (short-only gain; rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `4c83b37`
+
+E5 reused the 8,448-B Q/P buffer before Q loading as an 8,192-B compact raw
+matrix. K and V each follow an explicit stage -> barrier -> shared-LUT decode
+sequence. This removes register-side `uint4` unpack and cleanly separates the
+global fetch dependency from decode without increasing shared allocation.
+
+Resources remained 79 registers/thread, zero spill, 81,664 B and two CTAs/SM.
+The complete correctness/high-block-ID gate passed at 0.0625 max error.
+
+| context | E4a direct scalar | E5 compact staging | change |
+|---:|---:|---:|---:|
+| 4K | 479.3 | 473.4 | -1.2% |
+| 70K | 8,222.1 | 7,984.3 | -2.9% |
+| 126K | 14,338.5 | 14,355.3 | +0.1% |
+| 200K | 22,858.5 | 22,863.6 | +0.02% |
+| 250K | 28,522.1 | 28,509.2 | -0.05% |
+
+NCU remained 1.093 B executed instructions, 51.99% long-scoreboard stalls,
+0.88% tensor activity, 72.22 M shared-load and 31.15 M shared-store conflicts.
+The dependency separation helps short/mid scheduling slightly, but every raw
+byte still performs a random shared LUT access.
+
+**Rejected for the long-context objective.** The next experiment should
+exhaustively validate and then substitute exact E4M3FN-to-BF16 bit conversion
+for the per-byte LUT lookup. This directly targets the unchanged conflict and
+instruction counters.
