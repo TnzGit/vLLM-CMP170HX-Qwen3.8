@@ -663,3 +663,14 @@ It violates the zero-spill resource gate and is not qualified.
 Four D16 tiles in registers passed correctness with 168 registers/thread and
 zero spills, but improved locked-clock latency by only 1.8%/1.1%/1.2% at
 4K/126K/250K. Below the 2% gate; not qualified.
+
+## V7-E35 cooperative half-warp softmax (accepted isolated candidate)
+
+The E35 prototype uses the WMMA-compatible mapping `local_row = lane & 15`,
+`half = lane >> 4`, and XOR-16 peer exchange to reduce two 16-column halves
+of each 32-column softmax row. It passed reference-based correctness,
+including mixed int32/int64 and high block IDs (0.000977 standard max error,
+0.062500 high-ID max error), with 164 registers/thread and zero spills.
+Locked 1350MHz q=8/NSEG=35 medians improved 3.2%/6.6%/6.4% at
+4K/126K/250K. This is an isolated candidate only; matched API, multi-request
+and CUDA-Graph validation are required before dispatch integration.

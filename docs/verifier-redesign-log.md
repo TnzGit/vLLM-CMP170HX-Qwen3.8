@@ -1835,3 +1835,24 @@ locked-1350MHz scans measured 186.5/183.2 us at 4K, 2207.5/2183.3 us at
 126K and 4224.0/4174.7 us at 250K (baseline/candidate): 1.8%, 1.1% and 1.2%
 lower latency. These deltas are below the 2% gate, so the candidate is
 rejected and the qualified E21 source remains unchanged.
+
+## Milestone V7-E35 — cooperative half-warp softmax (accepted isolated candidate)
+
+**Date:** 2026-09-16
+
+E35 split each 32-column owner-row softmax into two 16-column halves. The
+correct mapping is `local_row = lane & 15`, `half = lane >> 4`, with the peer
+exchanged by `__shfl_xor_sync(..., 16)`; the lower half owns the final
+alpha/m/l publication. Reference-based correctness passed for standard,
+mixed int32/int64 and high block-ID cases (max absolute error 0.000977 in
+standard cases and 0.062500 for the high-ID case). ptxas used 164
+registers/thread with zero spills; shared-memory and two-CTA geometry were
+unchanged.
+
+At locked 1350MHz, q=8/NSEG=35 interleaved medians (E21/E35, us/layer) were
+185.8/179.8 at 4K, 2,209.5/2,064.0 at 126K and 4,220.9/3,952.6 at 250K,
+corresponding to 3.2%, 6.6% and 6.4% lower latency. E35 clears the 2%
+isolated gate and is retained as a candidate, not yet as vLLM or production
+dispatch. Reduction-order differences require reference-based tolerances.
+The next gate is matched NCU attribution plus real API, two-request and
+CUDA-Graph A/B validation.

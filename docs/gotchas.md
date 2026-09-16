@@ -1047,3 +1047,12 @@ any registerization result.
 kept four D16 accumulator tiles in registers (168 registers/thread, zero
 spills) but improved locked-clock latency by only 1.8%/1.1%/1.2% at
 4K/126K/250K. Apply the measurement gate before retaining a hybrid path.
+
+96. **Softmax lane pairing must follow the half-warp row layout.** V7-E35
+    correctly maps `local_row = lane & 15` and `half = lane >> 4`, then
+    exchanges peers with XOR-16; adjacent-lane pairing (`lane >> 1`,
+    `lane & 1`) is wrong for this WMMA layout. E35 used 164 registers/thread
+    with zero spills and improved locked-clock verifier latency
+    3.2%/6.6%/6.4% at 4K/126K/250K, so it is an accepted isolated candidate.
+    Its reduction order differs slightly from E21; validate against the
+    reference and still require API/multi-request/graph gates before dispatch.

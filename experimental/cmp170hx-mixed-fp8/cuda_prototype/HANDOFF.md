@@ -528,3 +528,16 @@ Registerizing only four of the sixteen D16 output tiles passed correctness
 and used 168 registers/thread with zero spills. Locked-1350MHz latency was
 only 1.8%/1.1%/1.2% lower at 4K/126K/250K, below the 2% gate; no source
 change was kept.
+
+## V7-E35 cooperative half-warp softmax (accepted isolated candidate)
+
+E35 splits each owner row's 32 score columns into two 16-column halves. Use
+`local_row = lane & 15`, `half = lane >> 4`, and exchange peers with
+`__shfl_xor_sync(..., 16)`; do not use adjacent lane pairs. The lower half
+publishes the combined alpha/m/l state. Standard, mixed and high-ID
+reference checks passed (max error 0.000977 standard, 0.062500 high-ID).
+ptxas reported 164 registers/thread, zero spills, and unchanged shared/
+two-CTA geometry. Locked-1350MHz q=8/NSEG=35 E21/E35 medians were
+185.8/179.8 us at 4K, 2209.5/2064.0 us at 126K and 4220.9/3952.6 us at
+250K (3.2%/6.6%/6.4% faster). Retain this as an isolated candidate; before
+vLLM dispatch, run matched API, two-request and CUDA-Graph A/B checks.

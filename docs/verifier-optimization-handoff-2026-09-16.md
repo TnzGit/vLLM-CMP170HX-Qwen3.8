@@ -290,3 +290,30 @@ scan 32 score columns serially. A two-lane-per-row candidate will split each
 row into two 16-column halves and combine max/sum with warp shuffles. It must
 preserve BF16 P writes, causal masking and FP16-per-tile rounding, then pass
 the same numerical, ptxas and locked-clock gates.
+
+### E35 — cooperative half-warp softmax (accepted isolated candidate)
+
+The candidate uses the WMMA-compatible mapping `local_row = lane & 15`,
+`half = lane >> 4`, and exchanges the peer half with
+`__shfl_xor_sync(..., 16)`. Each row's 32 score columns are processed as two
+16-column halves; the lower half owns the final alpha/m/l publication. This
+avoids the incorrect adjacent-lane mapping (`lane >> 1`, `lane & 1`) and
+leaves cache, block table, QK/PV, BF16 P writes and the workspace ABI intact.
+
+Reference-based correctness passed for single, mixed, int32/int64 and high
+block-ID cases: max absolute error was 0.000977 for standard cases and
+0.062500 for the high-ID case. ptxas reported 164 registers/thread, zero
+spills and unchanged shared-memory/two-CTA geometry.
+
+Interleaved locked-1350MHz q=8/NSEG=35 medians (E21/E35, us/layer) were
+185.8/179.8 at 4K (3.2% faster), 2,209.5/2,064.0 at 126K (6.6% faster),
+and 4,220.9/3,952.6 at 250K (6.4% faster). E35 clears the 2% isolated gate
+and is retained as a candidate, but is not yet vLLM dispatch-ready: matched
+API, two-request and CUDA-Graph A/B checks remain required. Reduction-order
+differences are why acceptance is reference-based rather than bit-identical
+to E21.
+
+Current next gate: obtain matched NCU attribution if the installed legacy
+Nsight Compute accepts an unambiguous option form, then measure E35 through
+the real SpecDecodeAttention API. Do not merge it into production from
+standalone timing alone.
