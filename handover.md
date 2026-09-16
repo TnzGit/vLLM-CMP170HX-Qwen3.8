@@ -1,6 +1,6 @@
 # Engineering handover: CMP 170HX / Qwen3.8 mixed-FP8 path
 
-Last updated: 2026-09-15
+Last updated: 2026-09-16
 
 This document is the handover for the work in `TnzGit/vLLM-CMP170HX-Qwen3.8` to reconstruct, validate, and eventually productionize the mixed-KV configuration demonstrated on a single 64 GB NVIDIA CMP 170HX (SM80 / GA100-class) with Qwen3.8-27B W4A16 + DFlash2.
 
@@ -56,6 +56,17 @@ CUDA 13
 ```
 
 The branch must remain separate from `main` until the GPU qualification matrix in this document passes. Do not merge simply because the server boots.
+
+Structural verifier optimization after the initial mixed-FP8 reconstruction is
+tracked milestone-by-milestone in:
+
+```text
+docs/verifier-redesign-log.md
+```
+
+That append-only log is the current continuation point.  It freezes the active
+runtime source, profiler boundary, rejection gates, and the next isolated
+experiment so another agent can resume without conversation history.
 
 ---
 
