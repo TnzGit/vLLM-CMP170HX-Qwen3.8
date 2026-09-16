@@ -613,3 +613,8 @@ The wrapper was numerically clean (max_abs 0.000008-0.000015), but actual
 API latency was 180.8/2109.1/4111.0 us at 4K/126K/250K versus Triton's
 71.8/746.7/1495.6 us. E21 was therefore rejected for direct integration;
 the test-site and production dispatch remain unchanged.
+
+An NCU sample of the identical partial launch found Triton q8 at 895 us
+(73.53% memory, 16.30% DRAM throughput) and E21 at 2.52 ms (54.65%, 5.79%).
+Both had 12.5% theoretical occupancy; E21's 81.86 KiB shared-memory FP8/LUT
+staging, rather than occupancy, is the likely cost center.

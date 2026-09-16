@@ -455,6 +455,14 @@ This rejects direct dispatch integration; the isolated source remains E21.
 The result also shows that the earlier standalone E21 scan was not an
 apples-to-apples vLLM baseline.
 
+NCU on the same partial launch measured Triton q8 at 895 us, 73.53% memory
+throughput and 16.30% DRAM throughput, versus E21 at 2.52 ms, 54.65% and
+5.79%. Both were 128-thread/grid-140 launches with 12.5% theoretical
+occupancy; E21 used 81.86 KiB shared and 133 registers/thread, while Triton
+used 57.34 KiB and 252 registers/thread. This points to E21's shared FP8/LUT
+staging overhead and weaker effective cache traffic, not a missing occupancy
+opportunity.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with

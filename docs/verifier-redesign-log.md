@@ -1659,6 +1659,16 @@ apples-to-apples comparison with the current Triton q8 specialization. The
 test-site dispatch and remote production tree were left unchanged; no
 production service was started or modified.
 
+An NCU default-set sample of the same partial launch (126K, q=8, NSEG=35)
+explains the gap. Triton q8 took 895 us under profiling with 73.53% memory
+throughput, 16.30% DRAM throughput, 252 registers/thread and 57.34 KiB dynamic
+shared memory. E21 took 2.52 ms with 54.65% memory throughput, 5.79% DRAM
+throughput, 133 registers/thread and 81.86 KiB dynamic shared memory. Both
+used 128 threads and grid 140 with the same 12.5% theoretical occupancy; the
+regression is therefore not an occupancy win left on the table. E21's shared
+FP8 staging/LUT decode is doing more work while achieving less effective L2/
+DRAM traffic than the existing q8 global-load specialization.
+
 ## Milestone V7-E25 — cp.async K prefetch (rejected negative control)
 
 **Date:** 2026-09-16
