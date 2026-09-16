@@ -260,3 +260,19 @@ have similarly low achieved occupancy. The next justified work is either a
 q8-specific structural kernel design that preserves global FP8/LUT reuse, or
 end-to-end telemetry to prove that verifier attention is the dominant wall
 time before changing it. Production dispatch remains untouched.
+
+### E33 — full register-resident persistent accumulator (rejected)
+
+The isolated full-register candidate was numerically exact and reduced
+locked-clock verifier latency by about 3.7%/4.2%/4.5% at 4K/126K/250K.
+However, ptxas used 255 registers/thread and emitted 124--172B spill
+stores/loads. This fails the zero-spill gate; the source was discarded.
+
+### Updated next step
+
+E33 confirms that shared accumulator traffic is measurable but that all-at-once
+registerization exceeds the compiler's safe register budget. Any follow-up
+must keep the live register set bounded (for example, a small tile-group
+register cache with explicit shared checkpoints) and must pass ptxas before
+timing. In parallel, end-to-end telemetry should establish whether this
+partial-kernel gain can matter to whole-model latency.

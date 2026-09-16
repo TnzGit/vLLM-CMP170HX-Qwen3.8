@@ -651,3 +651,9 @@ qualified address path remains unchanged.
 Prefetching the next page's block-table ID one tile early was numerically
 identical and changed locked-clock latency by only -0.8%/-0.7%/+0.6% at
 4K/126K/250K. The qualified q8 path remains unchanged.
+
+## V7-E33 full register-resident accumulator (rejected)
+
+The full register accumulator was numerically exact and about 4% faster at
+long context, but ptxas used 255 registers/thread with 124--172B spills.
+It violates the zero-spill resource gate and is not qualified.

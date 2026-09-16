@@ -1805,3 +1805,20 @@ At locked 1350MHz the baseline/candidate latency was 55.9/55.3 us at 4K,
 775.8/770.4 us at 126K and 1533.7/1543.2 us at 250K. Changes were -0.8%,
 -0.7% and +0.6%, with identical output. The candidate is below the 2% gate
 and is rejected; no qualified or production source changed.
+
+## Milestone V7-E33 — full register-resident persistent accumulator (rejected)
+
+**Date:** 2026-09-16
+
+This isolated candidate removed the 24,768-byte shared FP16 accumulator and
+kept four `__half2` pairs per owner lane for each of the sixteen D16 output
+tiles. KV staging, LUT decode, WMMA QK/PV, `TILE=32`, `NSEG=35` and the
+workspace ABI were unchanged. Exhaustive smoke output was identical. At
+locked 1350MHz, baseline/candidate latency was 186.3/179.5 us at 4K,
+2209.9/2116.6 us at 126K and 4225.2/4035.9 us at 250K (about 3.7%, 4.2%
+and 4.5% faster).
+
+The resource gate failed: ptxas used 255 registers/thread and reported
+124--172 bytes of spill stores/loads for the partial-kernel variants. The
+candidate is rejected despite the modest timing gain; no source change was
+kept and no production dispatch changed.

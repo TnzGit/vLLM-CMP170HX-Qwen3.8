@@ -1036,3 +1036,9 @@ prefetched the next q8 page block ID before the boundary, but locked-clock
 latency moved only -0.8%/-0.7%/+0.6% at 4K/126K/250K with identical output.
 Reject below the measurement gate unless a trace shows address lookup is a
 real bottleneck.
+
+94. **A full register accumulator can be numerically right but resource-wrong.**
+V7-E33 removed the shared accumulator and reached 255 registers/thread with
+124--172B spills. Even with roughly 4% lower isolated latency, spilled
+register state invalidates the candidate; require zero spills before judging
+any registerization result.

@@ -513,3 +513,11 @@ candidate rose to 134 registers/thread and was consistently slower: three
 locked-clock scans were about 1.2-1.3% slower at 20K-250K and about 4.6%
 slower at 4K. Commit/wait-group overhead outweighed any additional overlap;
 the isolated source has been restored to E21.
+
+## V7-E33 full register-resident accumulator (rejected)
+
+Moving the entire 24,768-byte persistent FP16 accumulator into per-lane
+`__half2` registers was numerically exact and gave about 3.7%/4.2%/4.5%
+lower latency at 4K/126K/250K under locked 1350MHz. It is not resource-safe:
+ptxas reached 255 registers/thread and emitted 124--172B spill stores/loads.
+The candidate was discarded; the qualified E21 source remains unchanged.
