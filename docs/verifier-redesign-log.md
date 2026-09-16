@@ -638,3 +638,78 @@ accumulator (24 KiB), one 16-row BF16 Q/P buffer (8 KiB), and one 16x256 FP32
 WMMA workspace (16 KiB), totaling 80 KiB.  Process the three 16-row groups
 sequentially, reuse the FP32 region for scores/output, and reuse Q for P after
 scores are formed.
+
+## Milestone V7-E2 — BF16 WMMA QK/PV (correct, rejected for throughput)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `73ed877`
+
+E2 mapped both QK and PV to SM80 BF16 WMMA while retaining the fixed V7
+workspace/addressing contract.  It decodes one 32-token K/V tile to BF16,
+processes the 48 GQA/query rows as three sequential 16-row packs, keeps the
+all-row value accumulator in FP16 shared memory, and publishes `part_o/m/l`
+once per segment.
+
+The first real-device correctness run exposed a concrete layout bug: P was
+written with Q's 256-column stride but consumed by PV as compact `[16, 32]`.
+Only the first row of each pack was therefore valid.  A zero-Q/constant-V
+diagnostic localized the failure to row 1 and later; changing the P store to
+stride 32 closed the fault without changing the external ABI.
+
+### Resource and correctness gate
+
+| metric | E1 scalar | E2 WMMA |
+|---|---:|---:|
+| registers/thread | 126 | 88 |
+| dynamic shared | 81,920 B | 81,920 B |
+| local/spill | 0 | 0 |
+| active CTAs/SM | 2 | 2 |
+
+After the P-stride fix, E2 passed q=5/6/7/8, 895/896/897-token boundaries,
+mixed requests, 8K/32K/65K contexts, int32/int64 dispatch and physical block
+ID 2341.  The largest ordinary error was 0.003906; the 4.00-GiB high-ID case
+was 0.031250 (<0.08).
+
+### Isolated latency
+
+| context | qualified Triton us/layer | E2 WMMA us/layer | ratio |
+|---:|---:|---:|---:|
+| 4K | about 52-54 | 488.2 | about 9.2x slower |
+| 70K | about 434-450 | 8,546.7 | about 19.3x slower |
+| 126K | about 760-805 | 15,269.0 | about 19.5x slower |
+| 200K | about 1,194-1,245 | 24,167.6 | about 19.8x slower |
+| 250K | about 1,530-1,545 | 30,208.5 | about 19.6x slower |
+
+E2 is faster than scalar E1 at 250K (30.2 ms versus 44.2 ms), but still far
+outside the admission threshold.
+
+### Counter-guided diagnosis at 126K
+
+The baseline and E2 execute the same 6,048,768 tensor-pipe instructions and
+read essentially the same 258 MB from DRAM.  The difference is feed/schedule
+efficiency rather than missing tensor-core lowering:
+
+| NCU metric | qualified Triton | E2 WMMA |
+|---|---:|---:|
+| tensor-pipe active | 17.21% | 0.82% |
+| shared-load bank conflicts | 2.02 M | 190.54 M |
+| shared-store bank conflicts | 4.44 M | 31.21 M |
+| long-scoreboard stall | 12.09% | 51.20% |
+| barrier stall | 6.58% | 11.63% |
+| executed instructions | 126.0 M | 1,079.1 M |
+| measured memory throughput | 289.0 GB/s | 13.6 GB/s |
+
+This establishes two primary causes: unswizzled 256-column BF16 shared layouts
+create extreme bank conflicts, and scalar per-element LUT/address preparation
+creates long dependencies and about 8.6x the instruction count.  The WMMA
+instructions are present and numerically correct, but spend almost all their
+time starved.
+
+### Decision and next gate
+
+**Rejected for production dispatch; retained as the E3 base.**  E3 must first
+remove shared-bank conflicts with padded/swizzled Q/K/V layouts while retaining
+two CTAs/SM.  Only then should it optimize page carry, vectorized raw loads,
+shared/read-only LUT access and redundant Q/P fragment loads.  The next
+milestone must publish the same NCU A/B counters, not only wall-clock latency.

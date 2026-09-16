@@ -759,3 +759,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     versus 250 and 43,008 for the qualified kernel, then regressed interleaved
     126K/250K latency by about 16.9%/14.8%.  Source grouping is not lifetime
     control; further work needs an explicit storage/synchronization design.
+
+60. **Tensor-core instruction count does not prove tensor-core utilization.**
+    The standalone V7-E2 CUDA verifier lowered both QK and PV to BF16 WMMA and
+    executed exactly the same 6,048,768 tensor-pipe instructions as the
+    qualified Triton kernel at 126K.  It was still about 19.5x slower.  NCU
+    showed why: an unswizzled 256-column BF16 shared layout caused 190.54 M
+    shared-load bank conflicts versus Triton's 2.02 M, long-scoreboard stalls
+    rose from 12.09% to 51.20%, and tensor-pipe active time fell from 17.21%
+    to 0.82%.  Its scalar decode/feed path also executed 1.079 B instructions
+    versus 126.0 M.  Validate shared layout, feed efficiency and stalls with
+    counters; `mma_sync` in source or SASS is not a performance result.

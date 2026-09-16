@@ -1340,16 +1340,20 @@ Completed milestones:
 | V6 explicit 3x16 rows | `d2f42c9` | rejected; 15-17% slower |
 | V7-E0 CUDA scaffold | `5e76c2a` | build/ABI smoke accepted |
 | V7 full correctness gate | `36bff72` | high-block-ID accepted |
-| V7-E1 shared accumulator | current milestone | correct, scalar math 19-29x slower |
+| V7-E1 shared accumulator | `73ed877` | correct, scalar math 19-29x slower |
+| V7-E2 BF16 WMMA | current milestone | correct; rejected, shared-feed path 9-20x slower |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should continue V7-E1 from the standalone CUDA scaffold, not by
-editing the production dispatch.  Required gates are the V2
-correctness suite, zero local spill, a credible two-CTA resource budget, >=5%
-isolated gain at 126K/250K, <=2% 4K regression, then full-model and CUDA Graph
-A/B.  If the prototype cannot meet the isolated gate, stop without touching
-the qualified service.
+The next owner should continue from the standalone V7-E2 CUDA scaffold, not by
+editing production dispatch.  E2 passed correctness and produced HMMA, but NCU
+found 190.54 M shared-load bank conflicts, 51.20% long-scoreboard stalls and
+only 0.82% tensor-pipe activity at 126K.  E3 should first pad/swizzle Q/K/V
+shared layouts while preserving two CTAs/SM, then repeat the complete gate and
+the same counters.  Required admission remains zero spill, >=5% isolated gain
+at 126K/250K and <=2% 4K regression before full-model/CUDA Graph A/B.  If the
+prototype cannot meet the isolated gate, stop without touching the qualified
+service.
