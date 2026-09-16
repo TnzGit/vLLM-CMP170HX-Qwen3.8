@@ -331,3 +331,31 @@ L1/TEX throughput 24.62%/25.50%, L1 hit 87.86%/87.93%, and L2 hit
 Thus E35's isolated gain is not an occupancy change or a cache-policy
 change; it is consistent with doing less serial softmax work while retaining
 the same memory geometry. This is still not an end-to-end vLLM result.
+
+### E36 — two-request API-shaped A/B (accepted)
+
+Using the same standalone `SpecDecodeAttention` ABI with two requests
+(`q=5+8`) and request-private block-table rows, E35 remained faster than
+the E21 standalone adapter: 377.5/352.6 us at 4K (6.60%), 4,349.5/4,059.5
+us at 126K (6.67%) and 8,357.2/7,793.0 us at 250K (6.75%). Reference
+max-error was 0.000000, 0.000015 and 0.000000 respectively. This confirms
+the half-warp mapping is request-safe in the fixed ABI; it does not yet
+prove scheduler or vLLM integration safety.
+
+### E37 — two-request CUDA Graph capture/replay (accepted)
+
+With fixed cache, query, block-table and workspace addresses, both E21 and
+E35 captured and replayed the two-request (`q=5+8`, 4K) sequence. Each
+replay matched its eager output with max absolute difference 0.000000.
+This is a capture-safety result for the standalone adapter only; arbitrary
+scheduler shapes still require a graph pool or eager fallback.
+
+### E35 long-context NCU attribution (126K)
+
+Matched legacy Nsight Compute sampling of the same partial launch measured
+2.5264 ms for E21 and 2.3367 ms for E35 (7.5% lower). Compute-memory
+throughput was 54.66%/59.11%, DRAM throughput 5.79%/6.25%, L1/TEX
+throughput 55.17%/59.84%, L1 hit 16.40%/16.38% and L2 hit 26.05%/26.06%
+(E21/E35). Launch geometry/shared memory stayed identical and registers
+were 133/164. The long-context delta therefore remains consistent with
+reduced softmax serialization rather than changed cache residency.

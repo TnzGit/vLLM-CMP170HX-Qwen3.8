@@ -1867,3 +1867,32 @@ launch selection. Kernel duration was 202.912 us (E21) versus 195.136 us
 threads/grid 140, 81.856 KiB dynamic shared and a two-CTA limit; registers
 were 133 versus 164 per thread. The attribution supports a softmax
 instruction/serialization reduction, not an occupancy or cache-policy win.
+
+## Milestone V7-E36 — two-request API-shaped A/B (accepted)
+
+**Date:** 2026-09-17
+
+With two request-private block-table rows and `q=5+8`, E35 versus E21
+standalone medians were 377.5/352.6 us at 4K (6.60%), 4,349.5/4,059.5 us
+at 126K (6.67%) and 8,357.2/7,793.0 us at 250K (6.75%). Reference
+max-error was 0.000000/0.000015/0.000000. E35 retains its gain under two
+requests, but this fixed adapter test is not a scheduler/vLLM integration
+result.
+
+## Milestone V7-E37 — two-request CUDA Graph capture/replay (accepted)
+
+**Date:** 2026-09-17
+
+Fixed-address two-request (`q=5+8`, 4K) capture and replay passed for both
+E21 and E35. Eager versus graph-replay max absolute difference was 0.000000
+for each candidate. This proves capture safety for the standalone ABI only;
+graph pools and eager fallback are still required for arbitrary shapes.
+
+### E35 long-context NCU attribution (126K)
+
+Matched sampling measured 2.5264 ms for E21 and 2.3367 ms for E35, a 7.5%
+reduction. Compute-memory/DRAM/L1-TEX throughput was 54.66%/59.11%,
+5.79%/6.25% and 55.17%/59.84%; L1 hit was 16.40%/16.38% and L2 hit
+26.05%/26.06% (E21/E35). Both kept identical launch/shared geometry and
+133/164 registers per thread. The long-context gain is consistent with
+softmax serialization reduction rather than cache-residency changes.

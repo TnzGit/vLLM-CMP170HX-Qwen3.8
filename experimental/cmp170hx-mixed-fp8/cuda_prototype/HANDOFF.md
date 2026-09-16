@@ -551,3 +551,25 @@ Matched Nsight Compute 2022.4 sampling of the 4K/q=8 partial launch measured
 shared memory were unchanged (128 threads, grid 140, 81.856 KiB, two CTA
 limit); registers were 133/164. The gain therefore tracks reduced softmax
 serialization rather than an occupancy or cache-policy change.
+
+## V7-E36 two-request API-shaped A/B (accepted)
+
+With request-private block-table rows and `q=5+8`, E21/E35 medians were
+377.5/352.6 us at 4K, 4349.5/4059.5 us at 126K and 8357.2/7793.0 us at
+250K (6.60%/6.67%/6.75% faster for E35). Reference max-error was at most
+0.000015. This validates request-local behavior in the fixed ABI, not full
+vLLM scheduler integration.
+
+## V7-E37 two-request CUDA Graph capture/replay (accepted)
+
+Fixed-address capture/replay for the two-request shape passed for both E21
+and E35 with eager-versus-replay maxdiff 0.000000. Arbitrary scheduler
+shapes still need a graph pool or eager fallback.
+
+## E35 126K NCU attribution
+
+Matched samples measured 2.5264 ms for E21 and 2.3367 ms for E35. Compute
+memory/DRAM/L1-TEX throughput was 54.66%/59.11%, 5.79%/6.25% and
+55.17%/59.84%; L1/L2 hit was 16.40%/16.38% and 26.05%/26.06%. Launch and
+shared geometry stayed identical (133/164 registers). The long-context gain
+tracks reduced softmax serialization, not a cache-residency change.

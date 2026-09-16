@@ -684,3 +684,18 @@ L1/L2 hit rates 87.86%/87.93% and 55.19%/54.96% (E21/E35). Both retained
 128-thread/grid-140, 81.856 KiB and the two-CTA limit; registers were
 133/164. The result supports a softmax-serialization reduction, not an
 occupancy or cache-policy change.
+
+### E36/E37 validation
+
+Two-request (`q=5+8`) E21/E35 A/B retained 6.60%/6.67%/6.75% E35 gains at
+4K/126K/250K with maximum reference error 0.000015. Fixed-address CUDA
+Graph capture/replay passed for both candidates with maxdiff 0.000000.
+These are standalone ABI gates; scheduler shape management and production
+dispatch remain unvalidated.
+
+### 126K NCU attribution
+
+Matched samples measured 2.5264 ms (E21) versus 2.3367 ms (E35). Throughput
+and cache metrics moved consistently with the 4K sample while launch/shared
+geometry stayed fixed; the long-context gain is attributable to reduced
+softmax serialization rather than changed cache residency.
