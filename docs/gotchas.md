@@ -668,3 +668,29 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     hardware-shape tuning: do not copy 35 to a GPU with a different SM count,
     resident-CTA limit or KV-head count without redoing the wave calculation and
     A/B.
+
+50. **The next integer after a wave-aligned split is not a useful compromise.**
+    NSEG36 launches 144 CTAs: four CTAs spill into a second resident wave on the
+    70-SM CMP 170HX.  Against NSEG35 it was 45-54% slower at 70K, 126K, 200K and
+    250K in the isolated q=8 verifier scan.  This is much worse than the four-CTA
+    tail suggests because the non-matching segmentation also changes generated
+    loop and memory geometry.  Keep NSEG35; do not sweep adjacent integers as if
+    segment count were a smooth tuning knob.
+
+51. **Cache hints after `ld.global.nc` did not improve the long-context LUT path.**
+    Four interleaved runs of `ld.global.nc.L2::64B.u16` were statistically neutral
+    at 250K, and three runs of `ld.global.nc.L1::evict_last.u16` were neutral to
+    slower.  Both showed high variance at 126K and retained exact output, but
+    neither passed the requirement to improve 126K and 250K together.  The useful
+    change is the read-only cache route itself; extra prefetch/eviction decoration
+    is rejected unless a future architecture-specific NCU trace establishes a new
+    bottleneck.
+
+52. **Use exact-token, counter-aware A/B requests for speculative tuning.**
+    `bench/context_ab.py` sends token IDs rather than approximate repeated text,
+    changes a salt to defeat accidental prefix-cache reuse, streams the response,
+    and records TTFT, decode tok/s, speculative steps, accepted tokens, tokens per
+    step, milliseconds per step and preemptions.  This separates kernel latency
+    changes from DFlash acceptance drift.  The prompt corpus is tokenized with an
+    explicit limit so a 250K benchmark does not first allocate a multi-million-token
+    host sequence.
