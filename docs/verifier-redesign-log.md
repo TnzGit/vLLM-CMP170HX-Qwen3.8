@@ -820,3 +820,37 @@ cheap and the overall E2-relative admission numbers are positive, but absolute
 latency remains 18-19x Triton.  E4b must reduce the scalar feed instruction
 chain using aligned 16-byte raw K/V loads and tile-level block/head base
 calculation.  Page carry should remain a later independent change.
+
+## Milestone V7-E4b — direct 16-byte K/V loads (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `0e09a1d`
+
+E4b mapped each K/V tile to 1,024 aligned 16-byte chunks, assigned eight
+chunks to each of 128 threads, and hoisted block/head bases to tile scope.
+Unaligned external cache bases retained a safe scalar fallback. Geometry,
+shared allocation, WMMA, two-phase PV and ABI were unchanged.
+
+The implementation passed every resource and correctness gate: 79
+registers/thread, zero spill, 81,664 B shared, two CTAs/SM, all q5-q8/mixed/
+65K cases, and the 4-GiB high-block-ID case at 0.0625 max error.
+
+| context | E4a scalar raw load | E4b direct vector load | change |
+|---:|---:|---:|---:|
+| 4K | 479.3 | 541.5 | +13.0% |
+| 70K | 8,222.1 | 8,240.1 | +0.2% |
+| 126K | 14,338.5 | 14,349.7 | +0.1% |
+| 200K | 22,858.5 | 22,862.3 | +0.02% |
+| 250K | 28,522.1 | 28,517.7 | -0.02% |
+
+NCU remained essentially identical: 1.093 B executed instructions, 52.00%
+long-scoreboard stalls, 0.88% tensor-pipe activity, 72.22 M shared-load and
+31.15 M shared-store conflicts, and 259.35 MB DRAM reads. `uint4` global loads
+were offset by scalar register unpack and per-byte shared LUT lookups.
+
+**Rejected.** The next isolated experiment should stage one compact 8-KiB raw
+matrix in the otherwise-not-yet-used Q/P buffer, then decode from shared to
+the padded BF16 K/V matrix. This separates/coalesces global fetch from decode
+without increasing the 81,664-B allocation. It must be measured because the
+extra phase barriers may erase the latency benefit.

@@ -798,3 +798,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     loading/addressing and staging, not the LUT's global-memory residence.
     Vectorize raw loads and hoist address bases before attempting more lookup
     caching.
+
+64. **A vector global load can remain a scalar decode pipeline.** V7-E4b
+    changed raw K/V reads to aligned 16-byte `uint4` loads and hoisted tile
+    address bases without changing occupancy or correctness. It nevertheless
+    regressed 4K by 13% and was flat from 70K through 250K. NCU still showed
+    about 1.09 B instructions, 52% long-scoreboard stalls and 0.88% tensor
+    activity because every vector still had to be unpacked byte by byte and
+    indexed through the shared LUT before WMMA. Distinguish vector transport
+    from vector conversion; stage compact raw bytes separately if the goal is
+    to break the global-load/decode dependency chain.

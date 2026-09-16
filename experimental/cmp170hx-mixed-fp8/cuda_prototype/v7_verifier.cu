@@ -29,6 +29,7 @@ constexpr int kD = 256;
 constexpr int kQmax = 8;
 constexpr int kBlockSize = 896;
 constexpr int kTile = 32;
+constexpr int kRawChunkBytes = 16;
 constexpr int kNseg = 35;
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
@@ -40,7 +41,10 @@ constexpr int kRowGroups = kRows / kRowsPerGroup;
 constexpr int kWmmaLd = 264;
 constexpr int kKvElementsPerTile = kTile * kD;
 constexpr int kKvMatrixElements = kTile * kWmmaLd;
-// E4a retains E3b's padded physical BF16 WMMA rows and logical 256-wide
+constexpr int kRawChunksPerMatrix = kKvElementsPerTile / kRawChunkBytes;
+constexpr int kRawChunksPerTile = 2 * kRawChunksPerMatrix;
+constexpr int kRawChunksPerThread = kRawChunksPerTile / kThreads;
+// E4b retains E4a's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -48,7 +52,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E4a keeps E3b's FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E4b keeps E4a's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -68,26 +72,36 @@ constexpr int kSharedBytes = kFp8LutSharedOffset + kFp8LutBytes;
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kWmmaLd == 264, "E4a WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E4a WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E4a WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E4a PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E4a PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E4a PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E4a PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E4a K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E4a accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E4a Q/P buffer must be 8,448 bytes");
+static_assert(sizeof(uint4) == kRawChunkBytes,
+              "E4b raw K/V vector chunk must be 16 bytes");
+static_assert(alignof(uint4) == kRawChunkBytes,
+              "E4b raw K/V vector chunk must be 16-byte aligned");
+static_assert(kD % kRawChunkBytes == 0,
+              "E4b head dimension must contain whole vector chunks");
+static_assert(kRawChunksPerTile == 1024,
+              "E4b K/V tile must contain 1,024 vector chunks");
+static_assert(kRawChunksPerThread == 8,
+              "E4b each thread must load eight vector chunks");
+static_assert(kWmmaLd == 264, "E4b WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E4b WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E4b WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E4b PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E4b PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E4b PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E4b PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E4b K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E4b accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E4b Q/P buffer must be 8,448 bytes");
 static_assert(kTmpSharedOffset == 66816,
-              "E4a temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E4a temporary tile must be 14,336 bytes");
-static_assert(kFp8LutEntries == 256, "E4a LUT must have 256 entries");
-static_assert(kFp8LutBytes == 512, "E4a shared LUT must be 512 bytes");
+              "E4b temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E4b temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E4b LUT must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E4b shared LUT must be 512 bytes");
 static_assert(kFp8LutSharedOffset == 81152,
-              "E4a shared LUT offset must be 81,152 bytes");
-static_assert(kSharedBytes == 81664, "E4a shared layout must be 81,664 bytes");
+              "E4b shared LUT offset must be 81,152 bytes");
+static_assert(kSharedBytes == 81664, "E4b shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E4a shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E4b shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -127,14 +141,14 @@ __device__ __forceinline__ int64_t load_block_id(
 // elements of each row logically populated.  The resulting K matrix can be
 // viewed by WMMA as a logical [256, 32] column-major operand with ld=264.
 // Loading is deliberately a full-CTA operation followed by a barrier: the
-// E4a layout has one K/V tile and does not rely on a second stage or cp.async
+// E4b layout has one K/V tile and does not rely on a second stage or cp.async
 // overlap.  The LUT pointer is the shared 256-entry BF16 table populated at
 // kernel entry.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
     const unsigned char* k_cache,
     const unsigned char* v_cache,
-    const uint16_t* fp8_lut,
+    const uint16_t* fp8_lut_shared,
     int64_t tile_token,
     int64_t block_size,
     int64_t kvh,
@@ -147,28 +161,69 @@ __device__ __forceinline__ void load_kv_bf16(
     int64_t v_stride_h,
     int64_t kv_len) {
   const int tid = threadIdx.x;
-  // 16,384 BF16 elements cover one K and one V tile.  Each thread decodes a
-  // balanced strided subset, including zero-fill for an incomplete final
-  // tile.  Physical block IDs are already promoted to int64 before the cache
-  // stride multiplication below.
-  for (int element = tid; element < 2 * kKvElementsPerTile;
-       element += blockDim.x) {
-    const bool is_v = element >= kKvElementsPerTile;
-    const int local = element % kKvElementsPerTile;
-    const int token_in_tile = local / kD;
-    const int d = local % kD;
-    const int physical = token_in_tile * kWmmaLd + d;
+  // The tile is split into 1,024 aligned 16-byte raw chunks.  Each fixed
+  // 128-thread CTA owns eight chunks.  Block/head addressing is hoisted out
+  // of this loop; only the token stride and d0 vary per chunk.
+  const int64_t tile_slot = tile_token % block_size;
+  const int64_t k_tile_base =
+      block_id * k_stride_b + tile_slot * k_stride_s + kvh * k_stride_h;
+  const int64_t v_tile_base =
+      block_id * v_stride_b + tile_slot * v_stride_s + kvh * v_stride_h;
+  constexpr int kChunksPerMatrix = kD / kRawChunkBytes;
+  for (int chunk = tid; chunk < kRawChunksPerTile; chunk += blockDim.x) {
+    const bool is_v = chunk >= kRawChunksPerMatrix;
+    const int local_chunk = chunk % kRawChunksPerMatrix;
+    const int token_in_tile = local_chunk / kChunksPerMatrix;
+    const int d0 = (local_chunk % kChunksPerMatrix) * kRawChunkBytes;
+    const int physical = token_in_tile * kWmmaLd + d0;
     const int64_t token = tile_token + token_in_tile;
-    uint16_t decoded = 0;
-    if (token < kv_len) {
-      const int64_t slot = token % block_size;
-      const int64_t base = is_v
-          ? block_id * v_stride_b + slot * v_stride_s + kvh * v_stride_h + d
-          : block_id * k_stride_b + slot * k_stride_s + kvh * k_stride_h + d;
-      const uint8_t raw = (is_v ? v_cache : k_cache)[base];
-      decoded = fp8_lut[static_cast<int>(raw)];
+    uint16_t* dst = shared_kv + (is_v ? kKvMatrixElements : 0) + physical;
+    const bool valid_token = token >= 0 && token < kv_len;
+    if (!valid_token) {
+      #pragma unroll
+      for (int i = 0; i < kRawChunkBytes; ++i) {
+        dst[i] = 0;
+      }
+      continue;
     }
-    shared_kv[is_v ? kKvMatrixElements + physical : physical] = decoded;
+
+    const unsigned char* cache = is_v ? v_cache : k_cache;
+    const int64_t stride_s = is_v ? v_stride_s : k_stride_s;
+    const int64_t tile_base = is_v ? v_tile_base : k_tile_base;
+    const int64_t raw_base =
+        tile_base + static_cast<int64_t>(token_in_tile) * stride_s + d0;
+    const uintptr_t raw_address = reinterpret_cast<uintptr_t>(cache) +
+                                  static_cast<uintptr_t>(raw_base);
+    // The mapping guarantees d0 <= 240, but keep the row bound explicit so a
+    // future geometry change cannot turn the vector load into an over-read.
+    const bool row_in_bounds = d0 >= 0 && d0 + kRawChunkBytes <= kD;
+    if (!row_in_bounds) {
+      #pragma unroll
+      for (int i = 0; i < kRawChunkBytes; ++i) {
+        dst[i] = 0;
+      }
+      continue;
+    }
+    const bool aligned = (raw_address & (kRawChunkBytes - 1)) == 0;
+    if (aligned) {
+      const uint4 raw =
+          *reinterpret_cast<const uint4*>(cache + raw_base);
+      const uint32_t words[4] = {raw.x, raw.y, raw.z, raw.w};
+      #pragma unroll
+      for (int i = 0; i < kRawChunkBytes; ++i) {
+        const uint8_t byte =
+            static_cast<uint8_t>((words[i >> 2] >> ((i & 3) * 8)) & 0xff);
+        dst[i] = fp8_lut_shared[static_cast<int>(byte)];
+      }
+    } else {
+      // Contiguous NHD caches normally take the vector path.  If an external
+      // caller supplies an unaligned base, preserve correctness with scalar
+      // byte reads rather than issuing an illegal or unaligned uint4 load.
+      #pragma unroll
+      for (int i = 0; i < kRawChunkBytes; ++i) {
+        dst[i] = fp8_lut_shared[static_cast<int>(cache[raw_base + i])];
+      }
+    }
   }
 }
 

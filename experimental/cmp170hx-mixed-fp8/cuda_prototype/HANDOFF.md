@@ -1,9 +1,9 @@
 # V7 prototype handoff
 
-Status: V7-E4a BF16 WMMA shared-decode-LUT scaffold passed the complete
-hardware correctness/resource gate and produced a small measured gain.  It is
-still about 18-19x slower than the qualified Triton path, is not connected to
-production dispatch, and is retained only as the base for E4b feed-path work.
+Status: V7-E4b BF16 WMMA vectorized raw-decode experiment passed correctness
+and resource gates but failed performance admission. It is not connected to
+production dispatch. Keep it only as a measured rejected experiment; the next
+candidate should stage compact raw bytes separately before scalar decode.
 
 Files:
 
@@ -14,7 +14,7 @@ Files:
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
 
-V7-E4a candidate layout in `v7_verifier.cu`:
+V7-E4b candidate layout in `v7_verifier.cu`:
 
 - persistent all-row FP16 shared accumulator `[48, 256]`, 24,576 B;
 - one decoded BF16 K/V tile physically `[2, 32, 264]`, 33,792 B; only the
@@ -24,11 +24,13 @@ V7-E4a candidate layout in `v7_verifier.cu`:
 - one FP32 score/PV temporary `[16, 224]`, 14,336 B;
 - one shared BF16 FP8 decode LUT `[256]`, 512 B;
 - total dynamic shared: 81,664 B;
+- raw K/V decode uses 1,024 aligned 16-byte chunks per tile, eight chunks per
+  thread; the shared 256-entry BF16 LUT is populated once at kernel entry;
 - `m/l` retained in registers, with warp-0 lanes 0..15 owning three row-pack
   states each;
 - `part_o/m/l` published once per segment after all tiles, preserving the ABI.
 
-E4a WMMA/decode mapping:
+E4b WMMA/decode mapping:
 
 - QK uses two N16 tiles per 16-row pack: row-major BF16 Q with logical
   `[16,256]` and physical `ld=264`, and col-major BF16 K with logical
@@ -40,10 +42,11 @@ E4a WMMA/decode mapping:
   After a barrier, warp 3 computes tail tiles d=224,240, stores them into the
   temporary prefix as dense 16x32 with `ld=32`, and after another barrier the
   whole CTA merges d=224..255.  Both phases apply `previous * alpha + tmp`.
-- each tile decodes raw FP8 K/V through the supplied LUT with the full CTA and
-  synchronizes before WMMA; E4a stages the LUT once in shared memory at kernel
-  entry with two global entries per thread and reuses it for every tile.  There
-  is no K/V double buffer.
+- each tile decodes raw FP8 K/V through the shared LUT with the full CTA and
+  synchronizes before WMMA.  E4b hoists the physical block/head bases once per
+  tile, loads valid rows through aligned `uint4` chunks, zero-fills incomplete
+  token tails, and uses scalar byte fallback for an externally unaligned base
+  rather than issuing an unsafe vector read.  There is no K/V double buffer.
 
 Historical E2 baseline: the unpadded candidate compiled to 88 registers/thread,
 zero local spill, 81,920 B dynamic shared memory and two CTAs/SM.  Its complete
@@ -77,7 +80,7 @@ faster than E2 at long contexts but 3% slower at 4K.  NCU still showed 52.26%
 long-scoreboard stalls, 63.51 M shared-load conflicts and only 0.87%
 tensor-pipe activity.
 
-E4a measured result:
+Historical E4a measured result:
 
 - resources: 79 registers/thread, zero local spill, 81,664 B dynamic shared,
   two active CTAs/SM;
@@ -90,25 +93,40 @@ E4a measured result:
 - NCU still reported 51.97% long-scoreboard stalls and only 0.88% tensor-pipe
   activity. Shared-load conflicts increased from E3b's 63.51 M to 72.22 M.
 
-E4b handoff checklist:
+E4b measured result:
 
-1. Keep E4a's resource geometry and replace scalar raw K/V byte loads with
-   aligned 16-byte vector loads.
-2. Hoist per-tile physical block/head address bases out of per-element decode.
-3. Repeat resource, full correctness/high-block-ID, five-context and identical
-   NCU gates. Reject immediately on local spill or loss of two-CTA residency.
+- resources remained 79 registers/thread, zero local spill, 81,664 B shared,
+  and two active CTAs/SM;
+- full correctness/high-block-ID passed; high-block max error was 0.0625;
+- 4K/70K/126K/200K/250K latency was
+  541.5/8,240.1/14,349.7/22,862.3/28,517.7 us;
+- versus E4a: +13.0%/+0.2%/+0.1%/+0.02%/-0.02%, so it failed admission;
+- NCU remained effectively unchanged: 1.093 B executed instructions, 52.00%
+  long-scoreboard stalls, 0.88% tensor activity, 72.22 M shared-load and
+  31.15 M shared-store conflicts.
+
+Next handoff checklist:
+
+1. Branch from E4a or undo E4b's direct `uint4` unpack loop.
+2. Reuse the 8,448-B Q/P buffer before Q staging as a compact 8,192-B raw-tile
+   buffer: coalesced/vector-load raw K, decode to BF16 K, then repeat for V.
+3. Preserve two-CTA residency and run the same resource/correctness/perf/NCU
+   gate. Treat extra barriers as a measured trade-off, not an assumption.
 4. Keep page carry and P-fragment reuse as later isolated changes.
 
 Known risks:
 
 - WMMA BF16 accumulation, online softmax ordering, two-phase scratch reuse and
-  E4a's shared-LUT decode path passed the complete hardware gate.
+  both E4a/E4b decode paths passed the complete correctness gate; E4b failed
+  only the performance admission gate.
 - E3a proved that 83,200 B leaves one CTA/SM; E3b proved 81,152 B restores two.
   E4a raises the allocation to 81,664 B, leaving only 256 B of headroom; its
   intended two-CTA residency was measured successfully.
-- E4a removes repeated global LUT reads, but raw FP8 bytes and each Q/P pack
-  are still reloaded for every tile.  NCU proved on E2 that this preparation
-  starves the tensor pipe; the remaining address/decode feed is still a risk.
+- E4b removes repeated global LUT reads and vectorizes valid raw FP8 chunks,
+  but each Q/P pack is still reloaded for every tile.  The scalar fallback for
+  an externally unaligned cache base is safe but may reduce the expected gain.
+  NCU proved on E2 that this preparation starves the tensor pipe; the remaining
+  address/decode feed is still a risk.
 - The launcher rejects non-contiguous caches and requests the required
   dynamic shared-memory carveout; WMMA is compiled only for SM80.
 - `part_o/m/l` are the established flattened workspace contract, but the
@@ -120,7 +138,7 @@ Known risks:
 Measured E0 resources were 48 registers/thread, 81,920 bytes dynamic shared,
 zero local bytes and two active CTAs/SM.  The 895/896/897/4097 correctness
 smoke passed at max absolute error 0.000977.  These are historical E0/E1
-results and do not qualify the E4a WMMA scaffold by themselves.
+results and do not qualify the E4b WMMA scaffold by themselves.
 
 `bench/test_v7_cuda_prototype.py --full --high-block-id` subsequently passed
 q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic
