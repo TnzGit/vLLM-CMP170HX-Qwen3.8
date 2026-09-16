@@ -714,3 +714,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     load would require paired contiguous addresses, which this lookup does not
     have.  Keep the scalar read-only-cache load rather than trying to force
     vectorization through the pack metadata.
+
+55. **More Triton pipeline stages are not free latency hiding for the q8
+    verifier.**  Changing only the production q8/GQA6 launch from
+    `num_stages=1` to 2 really generated 22 `cp.async` instructions, but dynamic
+    shared memory rose from 43,008 to 73,728 bytes.  It was 4.2% slower at 4K,
+    only 0.7% faster at 126K, and 2.1% slower at 250K.  Stage 3 generated 32
+    `cp.async` instructions, used 90,112 bytes and regressed long contexts by
+    36-40%, consistent with losing the two-resident-CTA geometry behind NSEG35.
+    Keep stage 1.  Future latency hiding must control shared-memory lifetime and
+    accumulator liveness explicitly rather than relying on a launch hint.

@@ -7,15 +7,23 @@ chat history.
 
 ## Milestone V0 — freeze the qualified baseline
 
-**Date:** 2026-09-16  
-**Parent commit:** `333f651`  
-**Runtime:** vLLM 0.27.1, PyTorch 2.13.0, CUDA 13, SM80 CMP 170HX 64 GiB  
-**Service:** `cmp170hx-mixed-fp8-full-256k-8002.service`  
-**Power:** 180 W peak profile; 175 W separately qualified  
-**Model:** Qwen3.8-27B W4A16 target + DFlash2 W4A16, seven draft tokens  
-**Cache:** FP8 E4M3 target KV + BF16 draft KV, 896/448-token logical pages  
-**Graph:** FULL CUDA Graph  
-**Concurrency/capacity:** C4 / 262144 tokens  
+**Date:** 2026-09-16
+
+**Parent commit:** `333f651`
+
+**Runtime:** vLLM 0.27.1, PyTorch 2.13.0, CUDA 13, SM80 CMP 170HX 64 GiB
+
+**Service:** `cmp170hx-mixed-fp8-full-256k-8002.service`
+
+**Power:** 180 W peak profile; 175 W separately qualified
+
+**Model:** Qwen3.8-27B W4A16 target + DFlash2 W4A16, seven draft tokens
+
+**Cache:** FP8 E4M3 target KV + BF16 draft KV, 896/448-token logical pages
+
+**Graph:** FULL CUDA Graph
+
+**Concurrency/capacity:** C4 / 262144 tokens
 **Verifier:** q<=8, GQA=6 specialization; 35 segments; 32-token KV tiles
 
 ### Objective
@@ -130,3 +138,86 @@ The active 8002 service is the reference baseline.  Candidate code must be
 installed in a separate test-site or guarded by a candidate-only environment
 variable, and the baseline path must remain recoverable without rebuilding.
 
+## Milestone V1 — Triton automatic K/V pipeline (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `1231ccf`
+**Candidate patches:**
+
+```text
+experimental/cmp170hx-mixed-fp8/candidates/
+  spec-decode-fp8-q8-pipeline-stage2.patch
+  spec-decode-fp8-q8-pipeline-stage3.patch
+```
+
+### Hypothesis
+
+The baseline q8/GQA6 verifier launches with `num_stages=1` and reports 54.75%
+no-eligible-warp cycles.  Increasing Triton's software-pipeline depth might
+overlap the next K/V tile load with the current dot/softmax work without
+changing global workspace, page geometry, the NSEG35 grid, or K/V read count.
+
+### Isolation
+
+The qualified baseline test-site remained unchanged.  Two complete copies were
+created on the test host, and each candidate changed only the q8/GQA6 launch's
+`num_stages`.  The API service was stopped so no second CUDA context could
+pollute timings.
+
+The isolated production-shape scan used:
+
+```text
+Hq/Hkv/D       24/4/256
+page/tile      896/32
+query length   8
+segments       35
+warmup/iters   10/50
+contexts       4096,70000,126000,200000,250000
+```
+
+### Result
+
+| context | stage1 us/layer | stage2 | stage2 delta | stage3 | stage3 delta |
+|---:|---:|---:|---:|---:|---:|
+| 4K | 52.4 | 54.6 | +4.2% | 59.2 | +13.0% |
+| 70K | 450.0 | 445.2 | -1.1% | 613.9 | +36.4% |
+| 126K | 794.0 | 788.8 | -0.7% | 1100.1 | +38.6% |
+| 200K | 1244.6 | 1199.4 | -3.6% | 1690.0 | +35.8% |
+| 250K | 1549.2 | 1581.5 | +2.1% | 2170.3 | +40.1% |
+
+Positive delta means slower.  Stage2's isolated gains were small and did not
+hold at either end of the range; it failed the predeclared >=5% improvement at
+both 126K and 250K and exceeded the 2% 4K regression limit.  Stage3 was a large
+regression at every useful long-context tier.
+
+Generated-code inspection proved that this was a real pipeline experiment, not
+an ignored launch hint:
+
+| variant | registers/thread | local/stack | dynamic shared | PTX `cp.async` count |
+|---|---:|---:|---:|---:|
+| stage1 | 250 | 0 | 43,008 B | 0 |
+| stage2 | 248 | 0 | 73,728 B | 22 |
+| stage3 | 252 | 0 | 90,112 B | 32 |
+
+Stage2 preserved two-CTA shared-memory feasibility on SM80 but spent much more
+shared memory for inconsistent overlap.  Stage3's 90,112-byte footprint cannot
+keep two such CTAs resident in the available SM shared memory, which is
+consistent with its severe second-wave regression.  No whole-model or FULL
+Graph test was run because both candidates failed the isolated admission gate.
+
+### Decision and rollback
+
+**Rejected.**  Neither candidate is added to
+`experimental/cmp170hx-mixed-fp8/series`; the baseline test-site was never
+modified.  Restoring the service therefore requires no code rollback, only
+starting the unchanged baseline unit.
+
+### Next milestone
+
+V2 must address the persistent `acc0[32,256] + acc1[16,256]` live state rather
+than adding automatic pipeline buffers.  The preferred design target is a CTA
+internal producer/consumer or row strip-mining scheme that continues to load
+each K/V tile once.  Before writing that larger kernel, close the cheap test
+gaps for q=6/7, production 896-page boundaries, and mixed query lengths so V2
+has a stronger admission harness.
