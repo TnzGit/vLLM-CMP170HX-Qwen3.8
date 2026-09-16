@@ -1971,3 +1971,33 @@ than E35; the single-owner layout cannot meet the two-CTA/register gate.
 E36 is closed with no source promotion. The next experiment is a separate
 producer/consumer warp ownership design (E37), not another register-PV
 variant with the same four owners.
+
+## Milestone V7-E37 — producer/consumer split-D register PV (rejected)
+
+**Date:** 2026-09-17
+
+The first NInfer-inspired ownership split used six warps: three producer
+warps for the 16-row QK/softmax groups and three consumer warps for the
+matching D=128 upper halves. Each warp held a 64-float register PV
+accumulator; FP8 staging, LUT decode, TILE=32, NSEG=35, page mapping and the
+partial/combine ABI stayed unchanged.
+
+Two implementation bugs were found and fixed before timing: a 16-wide
+publication offset for an 8-wide register tile, and missing CTA publication
+of the producer alpha table. The repaired candidate was finite and matched
+E35 closely, with max error 0.00024414/0.00006104/0.00003052 at
+4K/126K/250K and no NaN/Inf.
+
+It was nevertheless substantially slower. Interleaved dynamic-clock E35/E37
+medians (us/layer) were 184.25/274.23 at 4K, 2101.42/3210.00 at 126K and
+3721.11/5670.98 at 250K, corresponding to regressions of 32.8%, 34.5% and
+34.4%. The extra six-warp cooperative load/barrier schedule and explicit
+ldmatrix/MMA PV path outweighed the reduced per-thread accumulator state.
+E37 is rejected and no source was promoted to vLLM or production. This is
+negative evidence against split-D ownership *in this implementation*, not a
+claim that all producer/consumer designs are impossible.
+
+The next candidate is E38-INT8-G64: retain E35's contracts, quantize Q
+on-chip, use the fork's native SM80 s8 QK MMA and keep V/PV constant first.
+The same correctness, two-request, graph and zero-spill/two-CTA gates apply;
+without a >=10% 126K improvement over E35 it will be rejected.

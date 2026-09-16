@@ -524,3 +524,54 @@ they are either slower, numerically invalid, or exceed the register budget.
 No E36 source is wired into vLLM or production. NInfer's producer/consumer
 warp topology is the next independent experiment (E37), retaining E35 as the
 qualified reference and changing ownership rather than cache/page ABI.
+
+### E37 result — producer/consumer split-D register PV (rejected)
+
+**Date:** 2026-09-17
+
+E37 implemented the first NInfer-inspired producer/consumer topology for the
+q8/G6 shape: six warps per CTA, with warps 0--2 producing the three 16-row
+QK/softmax groups and warps 3--5 consuming the matching groups' second D=128
+half. Each warp kept a 64-float register PV accumulator, so this was a real
+ownership split rather than the earlier E28 warp-count-only experiment. FP8
+cache staging, shared LUT decode, TILE=32, NSEG=35, page mapping and the
+partial/combine ABI were otherwise unchanged.
+
+The first implementation exposed two correctness bugs. Publication used a
+16-wide D offset for an 8-wide register tile, producing huge values; this was
+fixed to the correct 8-wide offset. The consumer then observed NaNs in the
+upper D half because producer alpha values were written to shared memory but
+not published across warps. A CTA barrier was added after the 48-row alpha
+table write. The repaired candidate is finite and matches E35 closely under
+the same deterministic inputs: maximum absolute error was 0.00024414,
+0.00006104 and 0.00003052 at 4K/126K/250K, with no NaN or Inf output.
+
+The correctness repair does not make this topology competitive on the current
+SM80 path. Interleaved dynamic-clock timing (the host did not permit a user
+`nvidia-smi -lgc` lock during this run) measured E35/E37 latency (us/layer) of
+184.25/274.23 at 4K, 2,101.42/3,210.00 at 126K and 3,721.11/5,670.98 at
+250K. E37 is therefore 32.8%, 34.5% and 34.4% slower. The likely costs are
+the six-warp cooperative load/barrier schedule and the explicit ldmatrix/MMA
+PV path; splitting ownership alone is not enough to offset those costs. E37
+is rejected and is not wired into vLLM or production. The alpha publication
+barrier is retained as a correctness lesson, not as a promoted kernel.
+
+### E36/E37 disposition and next NInfer-derived work
+
+The E36 register-fed-K and single-owner register-PV variants, plus the first
+producer/consumer split-D prototype, are now closed by measured gates:
+correctness is achievable, but none provides a speedup over the qualified E35
+q8 kernel without either excessive register pressure or substantial schedule
+overhead. This is useful negative evidence: the remaining gap is not fixed by
+moving one operand or one accumulator into registers in isolation.
+
+The next independent candidate is **E38-INT8-G64**, not another FP8 decode
+micro-variant. It will keep E35's request/page/workspace and graph contracts,
+but use the fork's existing INT8-G64 numerical contract for K/Q and native
+SM80 `mma.sync ... s8.s8.s32` QK, with V/PV held constant initially. Before
+any integration it must pass the same deterministic oracle, mixed query and
+two-request checks, zero-spill/two-CTA resource gate, and a >=10% 126K gain
+over E35. If the INT8 path fails its quality or resource gate, work should
+move to graph-stable adaptive NSEG and then representative Q4
+Linear+SwiGLU-vs-Marlin measurements; no candidate should be promoted merely
+because it is architecturally interesting.
