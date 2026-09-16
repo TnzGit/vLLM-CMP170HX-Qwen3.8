@@ -833,3 +833,16 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     decode feed despite fewer synchronizations. Preserve staged transport and
     reduce its phase count or overlap it; do not optimize barrier percentage in
     isolation.
+
+68. **Preserve the application's invalid-code contract when replacing a
+    numeric LUT.** PyTorch converts E4M3FN `0x7f/0xff` to NaN, but this verifier
+    deliberately fail-closes those two encodings to zero. E6's first exhaustive
+    test accidentally validated PyTorch NaNs; cross-review caught it before
+    integration, and E8 corrected the device helper/test. Exhaustive encoding
+    tests must compare against the runtime contract, not merely a library cast.
+
+69. **Fewer source barriers need not reduce measured barrier stalls.** E8
+    staged K and V together and cut four explicit phases to two, reducing
+    instructions about 5%, yet barrier stalls stayed near 19.3%. Long latency
+    improved only 1-2% and 4K regressed 7.7%. Arrival imbalance and the work
+    between barriers matter more than the source-level barrier count.

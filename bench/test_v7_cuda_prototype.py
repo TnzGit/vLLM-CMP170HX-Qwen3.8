@@ -46,11 +46,16 @@ def e4m3_lut(device):
     import torch
 
     codes = torch.arange(256, device=device, dtype=torch.uint8)
-    return codes.view(torch.float8_e4m3fn).to(torch.bfloat16)
+    lut = codes.view(torch.float8_e4m3fn).to(torch.bfloat16)
+    # Match the qualified historical LUT's fail-closed policy for the two
+    # E4M3FN NaN encodings instead of propagating PyTorch NaN payloads.
+    lut[0x7F] = 0
+    lut[0xFF] = 0
+    return lut
 
 
 def check_e4m3_decoder(ext, device):
-    """Compare the device bit decoder against PyTorch for every encoding."""
+    """Check finite bits against PyTorch and qualified NaN fail-closed bits."""
     import torch
 
     codes = torch.arange(256, device=device, dtype=torch.uint8)
@@ -58,15 +63,13 @@ def check_e4m3_decoder(ext, device):
     actual = ext.decode_e4m3fn_bf16(codes)
     torch.cuda.synchronize()
     # CUDA does not implement boolean indexing for UInt16.  The audit is only
-    # 256 entries, so copy the semantic mask and raw bits to CPU before exact
-    # comparison rather than casting away the bit representation.
+    # 256 entries, so copy raw bits to CPU before exact comparison.  The
+    # qualified LUT treats exactly 0x7f/0xff as fail-closed zero, rather than
+    # accepting PyTorch's NaN payload or isnan result as the device contract.
     expected_bits = expected.view(torch.uint16).cpu()
     actual_bits = actual.view(torch.uint16).cpu()
-    expected_nan = torch.isnan(expected).cpu()
-    actual_nan = torch.isnan(actual).cpu()
-    if not torch.equal(expected_nan, actual_nan):
-        raise AssertionError("E4M3FN decoder NaN mask differs from PyTorch")
-    finite = ~expected_nan
+    nan_codes = (codes.cpu() == 0x7F) | (codes.cpu() == 0xFF)
+    finite = ~nan_codes
     if not torch.equal(expected_bits[finite], actual_bits[finite]):
         mismatch = torch.nonzero(
             finite & (expected_bits != actual_bits), as_tuple=False
@@ -77,11 +80,11 @@ def check_e4m3_decoder(ext, device):
             f"code=0x{first:02x}: expected=0x{int(expected_bits[first]):04x} "
             f"actual=0x{int(actual_bits[first]):04x}"
         )
-    if expected_nan.any() and not torch.all(actual_bits[expected_nan] == 0x7FC0):
-        raise AssertionError("E4M3FN decoder NaNs are not canonical BF16 0x7fc0")
+    if not torch.equal(actual_bits[nan_codes], torch.zeros_like(actual_bits[nan_codes])):
+        raise AssertionError("E4M3FN decoder NaN codes must fail closed to BF16 zero")
     print(
-        "PASS exhaustive E4M3FN[256] device decode: finite BF16 bits exact; "
-        "NaNs match isnan and canonicalize to 0x7fc0"
+        "PASS exhaustive E4M3FN[256] device decode: 254 finite BF16 bits exact; "
+        "NaN codes 0x7f/0xff fail closed to 0"
     )
 
 

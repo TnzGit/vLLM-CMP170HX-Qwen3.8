@@ -1,8 +1,8 @@
 # V7 prototype handoff
 
-Status: V7-E7 direct-global-load factorial passed correctness/resources but
-failed performance admission. It proves E6 compact staging is necessary and
-is retained only as measured rejected evidence, never production dispatch.
+Status: V7-E8 dual-alias staged-decode factorial passed exhaustive semantics,
+correctness and resources, but missed performance admission. It is retained as
+measured evidence and remains disconnected from production dispatch.
 
 Files:
 
@@ -14,7 +14,7 @@ Files:
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
 
-V7-E7 candidate layout in `v7_verifier.cu`:
+V7-E8 candidate layout in `v7_verifier.cu`:
 
 - persistent all-row FP16 shared accumulator `[48, 256]`, 24,576 B;
 - one decoded BF16 K/V tile physically `[2, 32, 264]`, 33,792 B; only the
@@ -24,10 +24,11 @@ V7-E7 candidate layout in `v7_verifier.cu`:
 - one FP32 score/PV temporary `[16, 224]`, 14,336 B;
 - one shared BF16 FP8 decode LUT `[256]`, 512 B;
 - total dynamic shared: 81,664 B;
-- the first 8,192 B of the Q/P allocation remains reserved as dead E6 raw
-  staging space so the factorial keeps the same shared allocation;
+- the first 8,192 B of the Q/P allocation aliases raw K before Q is loaded;
+- the first 8,192 B of the FP32 tmp allocation aliases raw V before tmp is
+  used for scores/PV; these disjoint aliases preserve the same shared allocation;
 - the shared 256-entry BF16 LUT remains allocated and populated once at kernel
-  entry for geometry/occupancy comparability, but E7's hot decode does not read
+  entry for geometry/occupancy comparability, but E8's hot decode does not read
   it;
 - `decode_e4m3fn_bf16` is an exported CUDA helper used by the bench's exhaustive
   256-code device check;
@@ -35,7 +36,7 @@ V7-E7 candidate layout in `v7_verifier.cu`:
   states each;
 - `part_o/m/l` published once per segment after all tiles, preserving the ABI.
 
-E7 WMMA/decode mapping:
+E8 WMMA/decode mapping:
 
 - QK uses two N16 tiles per 16-row pack: row-major BF16 Q with logical
   `[16,256]` and physical `ld=264`, and col-major BF16 K with logical
@@ -47,16 +48,18 @@ E7 WMMA/decode mapping:
   After a barrier, warp 3 computes tail tiles d=224,240, stores them into the
   temporary prefix as dense 16x32 with `ld=32`, and after another barrier the
   whole CTA merges d=224..255.  Both phases apply `previous * alpha + tmp`.
-- each tile directly loads raw K/V bytes by logical element from global memory,
-  applies the exact E6 integer bit decoder, and writes padded BF16 K/V.  E7
-  hoists physical block/head bases once per tile, zero-fills invalid token
-  tails, and has no compact staging or K/V phase barriers; one final CTA
-  barrier publishes both direct-global decode passes before Q loading and WMMA.
+- each tile uses one CTA loop to coalesced-stage raw K into Q/P's first 8,192 B
+  and raw V into tmp's first 8,192 B as aligned 16-byte `uint4` chunks; an
+  externally unaligned source uses the scalar fallback and invalid token tails
+  are zero-filled.  One barrier publishes both aliases.  A single element loop
+  applies E6's exact integer decoder to both raw matrices into padded BF16 K/V,
+  followed by one final CTA barrier before Q/P and tmp return to WMMA/PV use.
   Finite normal codes map with `(8+m)*2^(e-10)` to BF16 exponent
   `e+120`/fraction `m<<4`; E4M3FN subnormals normalize from their highest
-  mantissa bit.  NaN codes `0x7f` and `0xff` canonicalize to quiet BF16
-  `0x7fc0`.  The reserved raw region never overlaps decoded K/V, temporary
-  storage or the retained LUT, and there is no K/V double buffer.
+  mantissa bit.  NaN codes `0x7f` and `0xff` follow the qualified LUT's
+  fail-closed policy and decode to BF16 zero (`0x0000`).  The two raw aliases
+  are disjoint and never overlap decoded K/V or the retained LUT; there is no
+  K/V double buffer.
 
 Historical E2 baseline: the unpadded candidate compiled to 88 registers/thread,
 zero local spill, 81,920 B dynamic shared memory and two CTAs/SM.  Its complete
@@ -129,8 +132,9 @@ Historical E5 measured result:
 
 Historical E6 measured result:
 
-- the exported CUDA helper passed all 256 encodings: finite BF16 bits exact;
-  both NaNs canonicalized to `0x7fc0` and matched PyTorch `isnan`;
+- the exported CUDA helper passed all 256 encodings: 254 finite BF16 bits were
+  exact against PyTorch, and both NaN encodings followed the qualified LUT's
+  fail-closed BF16-zero policy;
 - resources remained 79 registers/thread, zero spill, 81,664 B shared and two
   active CTAs/SM; full correctness/high-block-ID passed at 0.0625 max error;
 - 4K/70K/126K/200K/250K latency was
@@ -140,7 +144,7 @@ Historical E6 measured result:
   72.22 M -> 63.52 M, long scoreboard 51.99% -> 28.48%, tensor activity
   0.88% -> 1.51%; barrier stalls rose to 19.23%.
 
-E7 measured result:
+Historical E7 measured result:
 
 - resources/correctness/exhaustive decoder remained unchanged and passed;
 - 4K/70K/126K/200K/250K latency was
@@ -149,15 +153,25 @@ E7 measured result:
   28.48% -> 54.34%, tensor activity fell 1.51% -> 0.92%, and instructions rose
   711.7 M -> 845.6 M.
 
+E8 measured result:
+
+- all 254 finite codes were bit-exact and `0x7f/0xff` fail-closed to zero;
+  resources/correctness/high-block-ID remained green;
+- 4K/70K/126K/200K/250K latency was
+  407.8/4,924.6/7,979.2/12,692.6/15,781.1 us;
+- versus E6: +7.7%/-0.7%/-1.9%/-1.2%/-1.6%, failing both the >=5% long gain
+  and <=2% 4K-regression admission rules;
+- NCU instructions improved 711.7 M -> 675.1 M, but barrier stalls stayed
+  19.31%, long scoreboard was 29.11%, and tensor activity 1.53%.
+
 Next handoff checklist:
 
-1. Return to E6 staged bit decode.
-2. Alias raw K in Q/P shared and raw V in the currently-idle tmp shared region;
-   stage both, one barrier, decode both, one final barrier.
-3. Preserve the exhaustive decoder and complete gates; verify tmp/Q alias
-   lifetimes before WMMA reuses those regions.
-4. Profile whether halving staging phases reduces barrier stalls without
-   returning to direct-global scoreboard stalls.
+1. Retain E6 four-phase staging as the performance baseline; preserve E8's
+   corrected fail-closed decoder test.
+2. A/B CUDA's two-code FP8 conversion intrinsic against pure bit synthesis,
+   explicitly mask `0x7f/0xff` to zero.
+3. Only after decode A/B, test split-local page-ID/base staging.
+4. Keep production disconnected until the absolute Triton gap closes.
 
 Known risks:
 
@@ -166,8 +180,8 @@ Known risks:
 - E3a proved that 83,200 B leaves one CTA/SM; E3b proved 81,152 B restores two.
   E4a raises the allocation to 81,664 B, leaving only 256 B of headroom; its
   intended two-CTA residency was measured successfully.
-- E7 proved direct global loads trade lower barriers for much worse scoreboard
-  stalls; do not use it as the next base.
+- E8 reduced instructions but not barrier stalls and missed admission; phase
+  count alone is not the relevant synchronization cost.
 - The launcher rejects non-contiguous caches and requests the required
   dynamic shared-memory carveout; WMMA is compiled only for SM80.
 - `part_o/m/l` are the established flattened workspace contract, but the
@@ -180,7 +194,7 @@ Known risks:
 Measured E0 resources were 48 registers/thread, 81,920 bytes dynamic shared,
 zero local bytes and two active CTAs/SM.  The 895/896/897/4097 correctness
 smoke passed at max absolute error 0.000977.  These are historical E0/E1
-results and do not qualify the E7 WMMA scaffold by themselves.
+results and do not qualify the E8 WMMA scaffold by themselves.
 
 `bench/test_v7_cuda_prototype.py --full --high-block-id` subsequently passed
 q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic

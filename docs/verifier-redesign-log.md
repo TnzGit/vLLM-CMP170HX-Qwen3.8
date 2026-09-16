@@ -894,10 +894,12 @@ instruction counters.
 **Parent commit:** `cc04e4e`
 
 E6 replaced every hot-loop shared LUT lookup with pure integer synthesis of
-the BF16 bits. An exported CUDA helper exhaustively checked all 256 encodings
-against PyTorch: all finite values were bit-exact; `0x7f/0xff` matched `isnan`
-and canonicalized to `0x7fc0`. The 512-B LUT allocation stayed in place for a
-controlled occupancy comparison but is dead in the decode hot loop.
+the BF16 bits. Its initial helper checked all finite encodings bit-exactly but
+incorrectly canonicalized `0x7f/0xff` as NaN instead of preserving the
+qualified LUT's fail-closed zero contract. Cross-review caught this before any
+production integration; normal finite-cache performance numbers are unaffected
+and E8 corrected both device behavior and exhaustive test. The 512-B LUT
+allocation stayed in place for a controlled occupancy comparison.
 
 Resources remained 79 registers/thread, zero spill, 81,664 B and two CTAs/SM.
 The complete correctness/high-block-ID gate passed at 0.0625 max error.
@@ -946,3 +948,31 @@ instructions rose 711.7 M -> 845.6 M.
 V concurrently in two otherwise-idle aliases (Q/P and tmp), then decode both
 after one publication barrier and use one final publication barrier. This
 targets barrier count without giving up the scoreboard benefit.
+
+## Milestone V7-E8 — dual-alias two-phase staging (correct; rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `b6980c6`
+
+E8 corrected NaN fail-closed semantics, retained E6 bit synthesis, staged raw
+K and V concurrently in Q/P and tmp aliases, and reduced four stage/decode
+phases to two. All 256-code, resource, correctness and high-block-ID gates
+passed.
+
+| context | E6 four-phase | E8 dual two-phase | change |
+|---:|---:|---:|---:|
+| 4K | 378.5 | 407.8 | +7.7% |
+| 70K | 4,957.3 | 4,924.6 | -0.7% |
+| 126K | 8,130.3 | 7,979.2 | -1.9% |
+| 200K | 12,845.7 | 12,692.6 | -1.2% |
+| 250K | 16,041.2 | 15,781.1 | -1.6% |
+
+Instructions fell 711.7 M -> 675.1 M, but barrier stalls stayed 19.31%; long
+scoreboard was 29.11% and tensor activity 1.53%. Fewer explicit barriers did
+not reduce measured barrier waiting because phase arrival imbalance dominates.
+
+**Rejected by admission thresholds.** Keep E6 as the performance baseline and
+E8's corrected fail-closed semantics in all future tests. Next compare CUDA's
+two-code FP8 conversion intrinsic with bit synthesis, then investigate
+split-local page metadata/base staging.

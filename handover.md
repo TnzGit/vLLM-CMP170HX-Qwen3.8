@@ -1348,17 +1348,18 @@ Completed milestones:
 | V7-E4b direct vector load | `4c83b37` | correct; rejected, +13% at 4K and flat long-context |
 | V7-E5 compact raw staging | `cc04e4e` | correct; -1.2/-2.9% at 4K/70K, flat long-context |
 | V7-E6 bitwise FP8 decode | `c732fe9` | correct; 43-44% long gain, accepted isolated scaffold |
-| V7-E7 direct global load | current milestone | correct; rejected, 28-69% slower than staged E6 |
+| V7-E7 direct global load | `b6980c6` | correct; rejected, 28-69% slower than staged E6 |
+| V7-E8 dual staging | current milestone | correct; 1-2% long gain, +7.7% 4K, rejected |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should branch from standalone E6, not E7. E7 proved removing
-staging lowers barrier stalls but more than doubles long-scoreboard pressure
-and regresses long contexts about 69%. Next alias raw K in Q/P shared and raw V
-in the idle tmp shared region, stage both concurrently, decode both after one
-barrier, then publish both with one final barrier. Preserve the exhaustive
-decoder and all gates. Admission remains zero spill, two CTAs/SM, >=5% isolated
-gain at 126K/250K and <=2% 4K regression before full-model/CUDA Graph A/B.
+The next owner should use E6 four-phase staging as the performance baseline
+but preserve E8's corrected NaN fail-closed contract. E8 dual staging reduced
+instructions and long latency 1-2% but regressed 4K 7.7%, while barrier stalls
+did not fall. Next A/B CUDA FP8x2 conversion intrinsic versus bit synthesis,
+explicitly masking `0x7f/0xff` to zero. Then test split-local page IDs/bases.
+Admission remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and
+<=2% 4K regression before full-model/CUDA Graph A/B.
