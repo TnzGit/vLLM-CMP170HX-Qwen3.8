@@ -588,6 +588,12 @@ losing the required second resident CTA.
 No illegal access, Xid or OOM occurred.  The 256-code E4M3FN LUT test also
 passes and maps the two NaN encodings to zero.
 
+The follow-up full standalone gate also passed q=6/7, mixed q=5/8/6/1,
+8K/32K/65K KV, all 895/896/897 boundaries, and physical block ID 2341.  The
+largest ordinary-case error was 0.003906; the synthetic 4.00-GiB high-ID cache
+case was 0.031250, still below the established 0.08 gate.  This closes the E0
+integer-addressing and mixed-request coverage without changing the kernel.
+
 ### Decision and next gate
 
 **E0 accepted as an isolated scaffold, not as a performance candidate.**

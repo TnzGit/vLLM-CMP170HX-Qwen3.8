@@ -93,6 +93,16 @@ including the int64 index/block-table dispatch.  Maximum absolute error was
 0.000977 in all three cases.  This validates the build, ABI, page-boundary and
 basic numerical contract only; it is not an E1 throughput result.
 
+The expanded command below adds q=6/7, mixed q lengths, 8K/32K/65K KV and a
+physical block ID above the signed-int32 element-offset boundary:
+
+```bash
+python bench/test_v7_cuda_prototype.py --full --high-block-id
+```
+
+It passed on the CMP 170HX; the high-ID case allocated 4.00 GiB across the two
+raw caches and produced maximum absolute error 0.031250 (<0.08).
+
 ## Scope and limitations
 
 This is a correctness-first prototype, not a production performance claim.

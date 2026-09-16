@@ -68,21 +68,39 @@ def quantize_fp8(x, scale):
     )
 
 
-def make_case(device, lengths, q_lens, int64_indices=False):
+def make_case(
+    device,
+    lengths,
+    q_lens,
+    int64_indices=False,
+    physical_block_base=0,
+):
     import torch
 
     assert len(lengths) == len(q_lens)
     requests = len(lengths)
     max_len = max(lengths)
     pages = math.ceil(max_len / BLOCK)
+    physical_blocks = physical_block_base + pages
     k_scale = 0.03125
     v_scale = 0.02734375
     # The raw cache is intentionally kept as uint8: this is the SM80 path's
     # zero-copy view of PyTorch's E4M3 bytes, not a new cache format.
-    k_src = torch.randn(pages, BLOCK, H_KV, D, device=device, dtype=torch.float32)
-    v_src = torch.randn(pages, BLOCK, H_KV, D, device=device, dtype=torch.float32)
-    k_cache = quantize_fp8(k_src, k_scale).contiguous()
-    v_cache = quantize_fp8(v_src, v_scale).contiguous()
+    if physical_block_base:
+        # Avoid materializing full FP32 staging tensors for the 4 GiB high-ID
+        # case.  Every raw byte is valid input to the fail-closed LUT decoder.
+        shape = (physical_blocks, BLOCK, H_KV, D)
+        k_cache = torch.randint(0, 256, shape, device=device, dtype=torch.uint8)
+        v_cache = torch.randint(0, 256, shape, device=device, dtype=torch.uint8)
+    else:
+        k_src = torch.randn(
+            physical_blocks, BLOCK, H_KV, D, device=device, dtype=torch.float32
+        )
+        v_src = torch.randn(
+            physical_blocks, BLOCK, H_KV, D, device=device, dtype=torch.float32
+        )
+        k_cache = quantize_fp8(k_src, k_scale).contiguous()
+        v_cache = quantize_fp8(v_src, v_scale).contiguous()
 
     total_q = sum(q_lens)
     q = torch.randn(total_q, H_Q, D, device=device, dtype=torch.bfloat16)
@@ -92,9 +110,12 @@ def make_case(device, lengths, q_lens, int64_indices=False):
     index_dtype = torch.int64 if int64_indices else torch.int32
     cu_q = torch.tensor(cu_cpu, device=device, dtype=index_dtype)
     seq = torch.tensor(lengths, device=device, dtype=index_dtype)
-    block_table = torch.arange(pages, device=device, dtype=index_dtype).repeat(
-        requests, 1
-    )
+    block_table = torch.arange(
+        physical_block_base,
+        physical_block_base + pages,
+        device=device,
+        dtype=index_dtype,
+    ).repeat(requests, 1)
     lut = e4m3_lut(device)
     workspace_n = requests * H_Q * QMAX * NSEG
     part_o = torch.empty(workspace_n, D, device=device, dtype=torch.float32)
@@ -145,9 +166,10 @@ def reference(case):
         positions = torch.arange(kv_len, device=q.device)
         pages = positions // BLOCK
         slots = positions % BLOCK
+        physical = block_table[req, pages].long()
         for kvh in range(H_KV):
-            k = lut[k_cache[pages, slots, kvh].long()].float() * k_scale
-            v = lut[v_cache[pages, slots, kvh].long()].float() * v_scale
+            k = lut[k_cache[physical, slots, kvh].long()].float() * k_scale
+            v = lut[v_cache[physical, slots, kvh].long()].float() * v_scale
             for qi in range(q_len):
                 q_pos = kv_len - q_len + qi
                 allowed = positions <= q_pos
@@ -165,10 +187,22 @@ def reference(case):
     return ref
 
 
-def run_case(ext, lengths, q_lens, int64_indices=False):
+def run_case(
+    ext,
+    lengths,
+    q_lens,
+    int64_indices=False,
+    physical_block_base=0,
+):
     import torch
 
-    case = make_case(torch.device("cuda"), lengths, q_lens, int64_indices)
+    case = make_case(
+        torch.device("cuda"),
+        lengths,
+        q_lens,
+        int64_indices,
+        physical_block_base,
+    )
     (
         q,
         k_cache,
@@ -214,13 +248,15 @@ def run_case(ext, lengths, q_lens, int64_indices=False):
         )
     print(
         f"PASS lengths={lengths} q_lens={q_lens} int64={int64_indices} "
-        f"max_abs={err:.6f}"
+        f"block_base={physical_block_base} max_abs={err:.6f}"
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-only", action="store_true")
+    parser.add_argument("--full", action="store_true")
+    parser.add_argument("--high-block-id", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -246,6 +282,30 @@ def main() -> int:
     run_case(ext, [895], [5])
     run_case(ext, [896], [8])
     run_case(ext, [897, 4097], [5, 8], int64_indices=True)
+    if args.full:
+        run_case(ext, [897], [8])
+        run_case(ext, [895, 896, 897, 4097], [5, 8, 6, 1])
+        run_case(ext, [1500], [6])
+        run_case(ext, [1500], [7])
+        run_case(ext, [8192], [8])
+        run_case(ext, [4097, 1300, 8192, 64], [5, 8, 6, 1])
+        run_case(ext, [32768], [8])
+        run_case(ext, [65536], [8])
+    if args.high_block_id:
+        block_stride = BLOCK * H_KV * D
+        first_high_block = (2**31) // block_stride + 1
+        gib = 2 * (first_high_block + 1) * block_stride / 2**30
+        print(
+            f"high_block_id={first_high_block} stride={block_stride} "
+            f"two_cache_bytes={gib:.2f} GiB"
+        )
+        run_case(
+            ext,
+            [895],
+            [5],
+            int64_indices=True,
+            physical_block_base=first_high_block,
+        )
     return 0
 
 

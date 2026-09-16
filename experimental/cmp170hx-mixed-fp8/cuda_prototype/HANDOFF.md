@@ -47,5 +47,9 @@ zero local bytes and two active CTAs/SM.  The 895/896/897/4097 correctness
 smoke passed at max absolute error 0.000977.  This is still the global-workspace
 correctness scaffold, not the on-chip E1 optimization.
 
+`bench/test_v7_cuda_prototype.py --full --high-block-id` subsequently passed
+q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic
+4.00-GiB two-cache case had max absolute error 0.031250 (<0.08).
+
 No production files, active-series entries or qualified test-site files were
 changed.
