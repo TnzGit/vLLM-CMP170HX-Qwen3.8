@@ -1025,3 +1025,8 @@ real benefit.
 V7-E30's integer/exp2 decoder regressed 12% at 4K and 73-75% at long
 contexts. On SM80, retain the LUT unless instruction-level profiling proves
 the table lookup is the dominant cost.
+
+92. **Tiny address-conversion wins must be repeated before keeping them.**
+V7-E31's q8 int32 block-ID fast path showed sub-0.5% long-context change and
+unstable 4K deltas across 500-iteration repeats. Do not keep a short-tier
+fast-path on a single noisy scan.

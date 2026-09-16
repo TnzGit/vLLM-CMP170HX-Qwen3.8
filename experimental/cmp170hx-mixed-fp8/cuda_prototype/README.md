@@ -639,3 +639,9 @@ locked clocks, with identical output. The qualified TILE=32 source remains.
 
 Arithmetic E4M3FN decoding was 12% slower at 4K and about 73-75% slower at
 126K/250K under locked clocks. The LUT path remains qualified.
+
+## V7-E31 q8 block-ID int32 fast path (rejected)
+
+Removing the two explicit q8 block-ID int64 conversions gave no repeatable
+long-context gain and noisy 4K deltas across 500-iteration repeats. The
+qualified address path remains unchanged.

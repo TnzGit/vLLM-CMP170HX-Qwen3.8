@@ -1772,3 +1772,24 @@ us/layer:
 
 Immediate commit/wait-group synchronization outweighed additional copy
 overlap. **Rejected.** The source remains E21 and no production code changed.
+
+## Milestone V7-E30 — q8 arithmetic E4M3 decode (rejected)
+
+**Date:** 2026-09-16
+
+An isolated module replaced the q8 kernel's 256-entry E4M3FN LUT with
+integer sign/exponent/mantissa extraction plus `exp2`; global K/V loads,
+four-warps launch, TILE=32, NSEG=35 and the attention algorithm were
+unchanged. At locked 1350MHz (q=8, 30 warmups, 100 iterations), us/layer was
+57.1/64.2 at 4K, 772.2/1,349.6 at 126K and 1,532.7/2,658.2 at 250K
+(LUT/arithmetic). Extra instructions overwhelmed LUT-load savings; the
+candidate is rejected.
+
+## Milestone V7-E31 — q8 block-ID int32 fast path (rejected)
+
+**Date:** 2026-09-16
+
+Removing only the two explicit q8 block-ID `int64` conversions changed long
+latency by under 0.5%; repeated 500-iteration 4K pairs varied from -0.9% to
++4.6% to +2.0%. The short result was noise, so the qualified source remains
+unchanged.

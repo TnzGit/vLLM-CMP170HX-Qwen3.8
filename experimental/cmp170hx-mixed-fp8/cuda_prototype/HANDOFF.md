@@ -490,6 +490,12 @@ passed finite output checks but regressed locked-clock latency by 12% at 4K
 and 73-75% at 126K/250K (64.2/1349.6/2658.2 versus 57.1/772.2/1532.7
 us/layer). No source change kept.
 
+## V7-E31 q8 block-ID int32 fast path (rejected)
+
+Removing only the two explicit q8 block-ID int64 conversions changed long
+latency by under 0.5%; repeated 500-iteration 4K pairs varied from -0.9% to
++4.6% to +2.0%, so the short result was noise. No source change kept.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with
