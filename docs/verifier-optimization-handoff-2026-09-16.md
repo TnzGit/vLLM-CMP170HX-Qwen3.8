@@ -477,3 +477,50 @@ path. E36-A2 is rejected and no source is promoted. The E36 register-fed-K
 direction is therefore closed for now; future work should target a genuinely
 cooperative producer/consumer schedule (or return to the production Triton q8
 path) rather than further tuning this owner-local raw-reader variant.
+
+### E36-B0 result — explicit MMA with register score but shared PV (rejected)
+
+**Date:** 2026-09-17
+
+E36-B0 kept E35's FP8/LUT staging and shared PV path, but replaced the QK
+WMMA call with explicit `mma.sync` and register-resident score fragments. The
+output mapping was not numerically equivalent: same-input max absolute error
+was 0.05104351 at 4K, 0.00831604 at 126K and 0.00558472 at 250K. This was
+traced to an incomplete score/fragment mapping, so B0 is rejected and no
+source was retained.
+
+### E36-N0 result — NInfer K ldmatrix hybrid (rejected)
+
+**Date:** 2026-09-17
+
+N0 used explicit ldmatrix K operands and register score fragments while
+retaining the proven WMMA Q and shared PV path. After fixing the full-mask
+publication and four-lane reductions, same-input error was at or below
+0.00012207 at 4K/126K/250K. Locked-1350 medians (E35/N0, us/layer) were
+181.52/183.74, 2061.89/2161.19 and 3944.69/4136.65, or -1.2%/-4.6%/-4.6%.
+The explicit K fragment is correct but slower; it is not promoted.
+
+### E36-N1/N1b result — persistent register PV (rejected)
+
+**Date:** 2026-09-17
+
+N1 followed NInfer's `float[D/8][4]` persistent PV accumulator and explicit
+`mma.sync` PV path. N1b additionally used ldmatrix Q operands. Both required
+255 registers/thread with no local-memory report, versus E35's 164; this
+leaves no safe two-CTA register budget on SM80. After correcting the P
+`swz32` address and the V transpose-ldmatrix operand, both candidates were
+finite and matched E35 closely: N1b max error was 0.00024414/0.00006104/
+0.00003052 at 4K/126K/250K, with means below 4.1e-6. Dynamic-clock A/B
+timing (not used as a locked acceptance result) was E35/N1b 170.73/211.63,
+1978.57/2301.10 and 3735.55/4250.66 us/layer, i.e. 12.1–23.9% slower.
+The N1 register-PV dataflow is therefore rejected for this four-warp
+ownership; a future attempt must split D ownership across producer/consumer
+warps before revisiting register PV.
+
+### E36 disposition
+
+All direct register-fed-K and single-owner register-PV variants are closed:
+they are either slower, numerically invalid, or exceed the register budget.
+No E36 source is wired into vLLM or production. NInfer's producer/consumer
+warp topology is the next independent experiment (E37), retaining E35 as the
+qualified reference and changing ownership rather than cache/page ABI.

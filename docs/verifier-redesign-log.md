@@ -1945,3 +1945,29 @@ removed repeated global reads but owner-local rereads plus serialized K/V
 staging/barriers dominated. Rejected; no source promotion. A future E36
 successor requires a producer/consumer schedule that shares decoded operands,
 not another owner-local raw-reader variant.
+
+## Milestone V7-E36-B0 — explicit MMA score mapping (rejected)
+
+E36-B0 retained E35 staging/shared PV and used explicit `mma.sync` score
+fragments. Same-input output error (0.0510/0.00832/0.00558 at 4K/126K/250K)
+showed that the first score mapping was not equivalent. The candidate was
+discarded without changing any qualified source.
+
+## Milestone V7-E36-N0 — explicit ldmatrix K hybrid (rejected)
+
+N0 kept WMMA Q/shared PV but used NInfer-style ldmatrix K and register score.
+Correctness was restored after full-mask publication and width-4 reduction
+fixes; max error was <=0.00012207. Locked-1350 E35/N0 latency was
+181.52/183.74, 2061.89/2161.19 and 3944.69/4136.65 us/layer, so N0 is
+rejected for a 1.2–4.6% regression.
+
+## Milestone V7-E36-N1 — persistent register PV (rejected)
+
+N1/N1b implemented NInfer's persistent `float[D/8][4]` PV accumulator. The
+corrected candidates were finite and close to E35 (N1b max error
+0.00024414/0.00006104/0.00003052), but ptxas reached 255 registers/thread
+versus 164 for E35. Dynamic-clock measurements showed 12–24% lower speed
+than E35; the single-owner layout cannot meet the two-CTA/register gate.
+E36 is closed with no source promotion. The next experiment is a separate
+producer/consumer warp ownership design (E37), not another register-PV
+variant with the same four owners.
