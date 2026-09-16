@@ -359,3 +359,53 @@ throughput 55.17%/59.84%, L1 hit 16.40%/16.38% and L2 hit 26.05%/26.06%
 (E21/E35). Launch geometry/shared memory stayed identical and registers
 were 133/164. The long-context delta therefore remains consistent with
 reduced softmax serialization rather than changed cache residency.
+
+## E35 disposition and E36 design gate
+
+E35 is now a **qualified research baseline**, not a production dispatch
+candidate. The qualification and attribution records are intentionally named
+`E35-Q1` (two-request eager/API-shaped), `E35-Q2` (two-request CUDA Graph
+capture/replay), `E35-A1` (matched 4K NCU) and `E35-A2` (matched 126K NCU).
+This keeps `E36` available for a real data-flow change rather than another
+qualification pass. No production vLLM service or port is changed by this
+status update.
+
+The next candidate is **E36: direct register-fed K for QK**. It must retain
+E35's cooperative half-warp softmax, `TILE=32`, `NSEG=35`, accumulator,
+V/PV path, output/workspace ABI and request mapping. The intended data flow
+is:
+
+```text
+global FP8 K load -> per-lane LUT decode -> BF16 register operands
+                                          -> SM80 mma.sync QK
+```
+
+The current code cannot safely substitute a register value for the
+`wmma::fragment<matrix_b>` argument: WMMA fragment register layout is
+implementation-defined. Therefore E36 must introduce an explicit operand
+mapping (and, if required by the PTX instruction shape, a matching Q-register
+mapping) before emitting `mma.sync.aligned.m16n8k16`. V/PV remains on the
+existing WMMA/shared path for this experiment. Keeping the existing shared
+allocation during the first prototype is preferred so any gain is attributable
+to the K feed rather than an occupancy/layout change; reclaiming shared bytes
+is a separate follow-up.
+
+### E36 hard gates
+
+1. Compare against E35 with identical inputs, q=8, `NSEG=35`, and locked
+   clocks at 4K, 126K and 250K. The 126K median must improve by at least 10%
+   to justify extending the idea to V/PV; a 2--5% gain is a rejection.
+2. Exhaustive FP8 decode, mixed query lengths, int32/int64 and high block IDs
+   must match the reference within the existing tolerance; no illegal access,
+   NaN/Inf divergence or stale request state is allowed.
+3. `ptxas` must report zero spills/local bytes, no worse than two CTAs/SM,
+   and no hidden workspace/ABI change. Record registers, shared bytes and
+   launch geometry before timing.
+4. Run the same two-request eager and fixed-address CUDA Graph checks used by
+   E35-Q1/Q2 before any end-to-end integration. Use a fresh user-owned build
+   cache for every candidate; do not reuse root-owned NCU/Ninja directories.
+
+If the explicit SM80 operand mapping cannot be implemented without increasing
+registers enough to lose two-CTA residency, E36 should be marked blocked and
+the next work should return to the production Triton q8 path rather than
+force a WMMA/inline-PTX hybrid.
