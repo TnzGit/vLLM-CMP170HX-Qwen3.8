@@ -177,6 +177,16 @@ E21 is an accepted isolated prototype only; it is not wired into vLLM.
 Multi-request correctness, CUDA Graph capture and end-to-end dispatch A/B are
 still required before integration.
 
+## V7-E22 two-request CUDA Graph capture (qualified)
+
+The final E21 extension passed a CUDA Graph capture and replay with two static
+requests (`lengths=[895,896]`, `q_lens=[5,8]`) covering both `partial` and
+`combine`. Replay matched the reference with `max_abs=0.001953` and produced
+no CUDA errors. This qualifies the kernel's barriers and warp-3 prefetch for a
+fixed graph shape/address set. Dynamic vLLM scheduler shapes still require
+separate graph variants or eager fallback; request-local block tables must be
+updated before each replay.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

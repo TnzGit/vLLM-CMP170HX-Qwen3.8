@@ -1,12 +1,13 @@
 # V7 prototype handoff
 
 Status: V7-E21 warp-3 K prefetch on top of E19 is the current accepted isolated
-scaffold on top of E18/E17/E16. It preserves the exact shared LUT and paired
-decode, and uses the otherwise idle fourth warp to stage the next tile's raw K
-bytes while owner warps compute the current tile. A locked-clock A/B improved
-query-8 latency 2.2-11.1% over E19 from 4K through 250K; correctness,
-zero-spill and two-CTA gates pass. E21 is not connected to production
-dispatch.
+scaffold on top of E18/E17/E16. E22 has now qualified a two-request
+CUDA-Graph capture/replay on this scaffold. E21 preserves the exact shared LUT
+and paired decode, and uses the otherwise idle fourth warp to stage the next
+tile's raw K bytes while owner warps compute the current tile. A locked-clock
+A/B improved query-8 latency 2.2-11.1% over E19 from 4K through 250K;
+correctness, zero-spill, two-CTA and graph-capture gates pass. E21/E22 are not
+connected to production dispatch.
 
 Files:
 
@@ -78,6 +79,20 @@ the remaining dependency pressure to short scoreboard; traffic and occupancy
 are unchanged. This is a strong isolated result, but the current source still
 requires multi-request stress, CUDA Graph capture and end-to-end vLLM A/B
 before any integration decision.
+
+## V7-E22 two-request CUDA Graph capture (accepted validation gate)
+
+The final E21 extension was warmed up and captured with a fixed two-request
+shape (`lengths=[895,896]`, `q_lens=[5,8]`) using the existing `partial` and
+`combine` bindings, then replayed on the same static tensor addresses. Capture
+and replay both completed without CUDA errors; the replayed output had
+`max_abs=0.001953` against the reference. This validates that the E21 warp-3
+prefetch and its retained barriers are compatible with CUDA Graph execution.
+
+This is a fixed-shape/address gate, not proof that arbitrary scheduler shapes
+are graph-safe. A vLLM integration must use one graph per supported capture
+shape (or eager fallback for shape misses) and must rebind request-local block
+tables before replay.
 
 ## V7-E18 shared-LUT FP8 decode (accepted isolated scaffold)
 

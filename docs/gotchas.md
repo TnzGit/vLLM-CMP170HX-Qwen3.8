@@ -967,3 +967,11 @@ request-local block ids: a persistent next-tile pointer would create stale
 state across requests. The extra register (133 vs 132) did not reduce the
 two-CTA occupancy, but this is still an isolated prototype until multi-request,
 CUDA Graph and vLLM A/B gates pass.
+
+83. **CUDA Graph compatibility is shape- and-address-specific.** V7-E22
+captured the E21 `partial`+`combine` sequence for two requests
+(`lengths=[895,896]`, `q_lens=[5,8]`) and replayed it successfully with
+`max_abs=0.001953`. This proves the kernel's synchronization is capture-safe,
+not that one graph can serve arbitrary scheduler batches. Integration must
+maintain a graph pool keyed by capture shape (and refresh request-local block
+tables before replay), with eager fallback for misses.

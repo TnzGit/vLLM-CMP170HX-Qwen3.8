@@ -1562,3 +1562,22 @@ dependency pressure; traffic and occupancy are unchanged.
 monotonic at medium/long context, but it is not a production claim. Required
 next gates are multi-request/request-switch correctness, CUDA Graph capture
 compatibility and end-to-end vLLM dispatch A/B. Production remains untouched.
+
+## Milestone V7-E22 — two-request CUDA Graph capture (qualified validation)
+
+**Date:** 2026-09-16
+
+**Parent:** E21 source (`018e7db`)
+
+The final E21 extension was warmed up and captured with a fixed two-request
+shape (`lengths=[895,896]`, `q_lens=[5,8]`) across the existing `partial` and
+`combine` bindings, then replayed on the same static tensor addresses. Capture
+and replay completed without CUDA errors; the replayed output matched the
+reference with `max_abs=0.001953`. This qualifies E21's retained barriers and
+warp-3 K prefetch for CUDA Graph execution at that shape.
+
+The result is intentionally limited: CUDA Graphs freeze tensor addresses and
+launch geometry. A vLLM adapter must maintain graph variants keyed by capture
+shape, refresh request-local block tables before replay, and use eager fallback
+for unsupported scheduler shapes. This is a validation gate, not a production
+integration or throughput claim.
