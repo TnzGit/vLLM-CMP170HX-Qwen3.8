@@ -779,3 +779,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     Long-context latency regressed about 55%.  Always query active CTAs after
     a shared-layout change; fitting below the per-block opt-in limit is not
     evidence that the intended multi-CTA occupancy survives.
+
+62. **A small serialized tail can be cheaper than losing a resident CTA.**
+    Keeping padded Q/K/V but shrinking the FP32 PV scratch from 16x256 to
+    16x224 restored two CTAs/SM.  A second 16x32 tail phase added barriers and
+    made 4K about 3% slower, yet improved 70K-250K roughly 5% over the
+    unpadded E2 because the bank-conflict reduction finally survived at two
+    CTA residency.  This remains far from production-fast, but it is a useful
+    design rule: explicitly serialize a small tail when doing so preserves a
+    major occupancy tier, and verify the trade with both short and long tiers.

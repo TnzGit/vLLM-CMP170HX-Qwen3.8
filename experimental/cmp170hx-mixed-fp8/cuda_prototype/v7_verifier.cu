@@ -40,7 +40,7 @@ constexpr int kRowGroups = kRows / kRowsPerGroup;
 constexpr int kWmmaLd = 264;
 constexpr int kKvElementsPerTile = kTile * kD;
 constexpr int kKvMatrixElements = kTile * kWmmaLd;
-// E3a pads the physical BF16 WMMA rows while retaining the logical 256-wide
+// E3b retains E3a's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -48,7 +48,15 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-constexpr int kTmpBytes = kRowsPerGroup * kD * static_cast<int>(sizeof(float));
+// E3b keeps the FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// final two N16 tiles are reused through the first 16x32 entries after the
+// main phase has merged, so the logical output/workspace width stays 256.
+constexpr int kPvMainD = 224;
+constexpr int kPvTailD = kD - kPvMainD;
+constexpr int kPvMainTiles = kPvMainD / 16;
+constexpr int kPvTailTiles = kPvTailD / 16;
+constexpr int kTmpBytes = kRowsPerGroup * kPvMainD *
+                          static_cast<int>(sizeof(float));
 constexpr int kKvSharedOffset = kAccBytes;
 constexpr int kQSharedOffset = kKvSharedOffset + kKvSharedBytes;
 constexpr int kTmpSharedOffset = kQSharedOffset + kQBytes;
@@ -57,16 +65,22 @@ constexpr int kSharedBytes = kTmpSharedOffset + kTmpBytes;
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kWmmaLd == 264, "E3a WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E3a WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E3a WMMA layout requires three row groups");
-static_assert(kKvSharedBytes == 33792, "E3a K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E3a accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E3a Q/P buffer must be 8,448 bytes");
-static_assert(kTmpBytes == 16384, "E3a temporary tile must be 16,384 bytes");
-static_assert(kSharedBytes == 83200, "E3a shared layout must be 83,200 bytes");
+static_assert(kWmmaLd == 264, "E3b WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E3b WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E3b WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E3b PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E3b PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E3b PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E3b PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E3b K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E3b accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E3b Q/P buffer must be 8,448 bytes");
+static_assert(kTmpSharedOffset == 66816,
+              "E3b temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E3b temporary tile must be 14,336 bytes");
+static_assert(kSharedBytes == 81152, "E3b shared layout must be 81,152 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E3a shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E3b shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -106,7 +120,7 @@ __device__ __forceinline__ int64_t load_block_id(
 // elements of each row logically populated.  The resulting K matrix can be
 // viewed by WMMA as a logical [256, 32] column-major operand with ld=264.
 // Loading is deliberately a full-CTA operation followed by a barrier: the
-// E3a layout has one K/V tile and does not rely on a second stage or cp.async
+// E3b layout has one K/V tile and does not rely on a second stage or cp.async
 // overlap.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
@@ -364,14 +378,63 @@ __global__ void v7_partial_kernel(
       }
       __syncthreads();
 
-      // PV: every warp owns four output N16 tiles.  A is P [16,32] row-major;
+      // PV main phase: cover d=0..223 with fourteen N16 tiles.  Warps 0..2
+      // own four tiles each and warp 3 owns two.  A is P [16,32] row-major;
       // B is the decoded V logical [32,256] row-major tile with physical
       // row stride ld=264.  P remains dense [16,32] with ld=32.
       {
         const int d_base = warp * 4 * 16;
         #pragma unroll
         for (int output_tile = 0; output_tile < 4; ++output_tile) {
-          const int d0 = d_base + output_tile * 16;
+          // Warp 3 has only two valid main-phase tiles (d=192,208).
+          if (warp < 3 || output_tile < 2) {
+            const int d0 = d_base + output_tile * 16;
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
+                                   __nv_bfloat16, nvcuda::wmma::row_major>
+                a_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
+                                   __nv_bfloat16, nvcuda::wmma::row_major>
+                b_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16,
+                                   float>
+                c_frag;
+            nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+            #pragma unroll
+            for (int k0 = 0; k0 < 32; k0 += 16) {
+              nvcuda::wmma::load_matrix_sync(a_frag, q_bf16 + k0, kTile);
+              nvcuda::wmma::load_matrix_sync(
+                  b_frag, v_bf16 + k0 * kWmmaLd + d0, kWmmaLd);
+              nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
+            nvcuda::wmma::store_matrix_sync(
+                tmp_shared + d0, c_frag, kPvMainD,
+                nvcuda::wmma::mem_row_major);
+          }
+        }
+      }
+      __syncthreads();
+
+      // Merge the main phase's FP32 PV result into d=0..223.  Keeping alpha
+      // in FP32 avoids introducing an extra rounding step in the online
+      // softmax state while preserving E1's FP16 accumulator ABI.
+      for (int idx = tid; idx < kRowsPerGroup * kPvMainD; idx += blockDim.x) {
+        const int local_row = idx / kPvMainD;
+        const int d = idx % kPvMainD;
+        const int row = row_group * kRowsPerGroup + local_row;
+        const float alpha = alpha_shared[local_row];
+        const float previous = fp16_bits_to_float(acc_shared[row * kD + d]);
+        acc_shared[row * kD + d] =
+            float_to_fp16_bits(previous * alpha + tmp_shared[idx]);
+      }
+      __syncthreads();
+
+      // PV tail phase: warp 3 computes d=224,240 only.  The main scratch has
+      // already been merged, so reuse its first 16x32 entries as a dense tail
+      // tile with ld=32.
+      if (warp == 3) {
+        #pragma unroll
+        for (int output_tile = 0; output_tile < kPvTailTiles; ++output_tile) {
+          const int d0 = kPvMainD + output_tile * 16;
           nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
                                  __nv_bfloat16, nvcuda::wmma::row_major>
               a_frag;
@@ -389,17 +452,16 @@ __global__ void v7_partial_kernel(
             nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
           }
           nvcuda::wmma::store_matrix_sync(
-              tmp_shared + d0, c_frag, kD, nvcuda::wmma::mem_row_major);
+              tmp_shared + (d0 - kPvMainD), c_frag, kTile,
+              nvcuda::wmma::mem_row_major);
         }
       }
       __syncthreads();
 
-      // Merge this tile's FP32 PV result into the all-row FP16 accumulator.
-      // Keeping alpha in FP32 avoids introducing an extra rounding step in
-      // the online softmax state while preserving E1's FP16 accumulator ABI.
-      for (int idx = tid; idx < kRowsPerGroup * kD; idx += blockDim.x) {
-        const int local_row = idx / kD;
-        const int d = idx % kD;
+      // Merge the dense tail [16,32] into d=224..255 across the whole CTA.
+      for (int idx = tid; idx < kRowsPerGroup * kPvTailD; idx += blockDim.x) {
+        const int local_row = idx / kPvTailD;
+        const int d = kPvMainD + idx % kPvTailD;
         const int row = row_group * kRowsPerGroup + local_row;
         const float alpha = alpha_shared[local_row];
         const float previous = fp16_bits_to_float(acc_shared[row * kD + d]);

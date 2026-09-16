@@ -749,3 +749,40 @@ recovering at least 1,280 B from the FP32 PV temporary.  A testable option is
 a 224-column main PV phase plus a 32-column tail phase; it must prove that the
 additional barriers cost less than the recovered occupancy and conflict
 reduction.
+
+## Milestone V7-E3b — two-phase PV scratch recovery (accepted scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `62d0375`
+
+E3b retained padded Q/K/V `ld=264` and compact P `ld=32`, but reduced FP32 PV
+scratch from 16x256 to 16x224.  The main phase computes d=0..223; after its
+result is merged, warp 3 reuses the first 16x32 entries for d=224..255.  Total
+dynamic shared fell to 81,152 B.
+
+Resources returned to 79 registers/thread, zero spill and **two CTAs/SM**.
+The full ordinary/high-block-ID correctness suite passed with the same error
+bounds as E3a.
+
+| context | E2 unpadded | E3a one CTA | E3b two CTA | E3b vs E2 |
+|---:|---:|---:|---:|---:|
+| 4K | 488.2 | 882.3 | 502.7 | +3.0% |
+| 70K | 8,546.7 | 13,220.8 | 8,093.1 | -5.3% |
+| 126K | 15,269.0 | 23,600.3 | 14,481.3 | -5.2% |
+| 200K | 24,167.6 | 37,307.3 | 23,061.9 | -4.6% |
+| 250K | 30,208.5 | 46,681.1 | 28,746.7 | -4.8% |
+
+NCU at 126K reported 63.51 M shared-load conflicts, 31.14 M shared-store
+conflicts, 52.26% long-scoreboard stalls, 10.99% barrier stalls and 0.87%
+tensor-pipe activity.  Thus recovered occupancy converted padding into a real
+~5% long-context gain, but the remaining 18-19x gap is no longer primarily an
+occupancy question.  Scalar FP8 decode, random global LUT lookup and repeated
+64-bit address preparation now dominate the feed path.
+
+**Accepted only as the next isolated scaffold, not for production dispatch.**
+It misses the production admission gate (4K regression >2%, 250K gain <5%,
+and absolute latency remains far above Triton).  E4a should spend the remaining
+768-B two-CTA shared budget on a 512-B BF16 decode LUT and remeasure the same
+long-scoreboard/conflict counters before combining vectorized raw loads or
+page-carry changes.

@@ -1,10 +1,9 @@
 # V7 prototype handoff
 
-Status: V7-E3a BF16 WMMA padded-shared-layout candidate passed correctness but
-was rejected for throughput and occupancy.  It is an isolated layout-only
-follow-on to E2 and is not connected to production dispatch.  The workstation
-that authored this source has no CUDA device; all measurements below came from
-the isolated remote test directory.
+Status: V7-E3b BF16 WMMA padded-shared-layout scaffold passed hardware
+correctness and improved long-context E2 latency by about 5%, but still failed
+the production admission gate.  It is not connected to production dispatch.
+All measurements below came from the isolated remote test directory.
 
 Files:
 
@@ -15,30 +14,31 @@ Files:
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
 
-V7-E3a candidate layout in `v7_verifier.cu`:
+V7-E3b candidate layout in `v7_verifier.cu`:
 
 - persistent all-row FP16 shared accumulator `[48, 256]`, 24,576 B;
 - one decoded BF16 K/V tile physically `[2, 32, 264]`, 33,792 B; only the
   first 256 elements of each row are logical K/V data;
 - one BF16 Q/P pack physically `[16, 264]`, 8,448 B; logical Q is 256-wide
   and P is repacked densely as `[16, 32]` with `ld=32`;
-- one FP32 score/PV temporary `[16, 256]`, 16,384 B;
-- total dynamic shared: 83,200 B;
+- one FP32 score/PV temporary `[16, 224]`, 14,336 B;
+- total dynamic shared: 81,152 B;
 - `m/l` retained in registers, with warp-0 lanes 0..15 owning three row-pack
   states each;
 - `part_o/m/l` published once per segment after all tiles, preserving the ABI.
 
-E3a WMMA mapping:
+E3b WMMA mapping:
 
 - QK uses two N16 tiles per 16-row pack: row-major BF16 Q with logical
   `[16,256]` and physical `ld=264`, and col-major BF16 K with logical
   `[256,32]` viewed from physical token-major rows with `ld=264`;
 - warp 0 lanes 0..15 perform the 32-score causal online softmax, write BF16
   P using compact `ld=32`, and save exact FP32 alpha in the Q/P buffer tail;
-- PV uses four warps, each owning four N16 output tiles: row-major P `[16,32]`
-  with `ld=32` times row-major logical V `[32,256]` with physical `ld=264`,
-  with FP32 temporary stores followed by parallel alpha fusion into the
-  all-row FP16 accumulator;
+- PV main phase covers d=0..223 with fourteen N16 tiles: warps 0..2 own four
+  each and warp 3 owns two; stores and merge use the FP32 temporary `ld=224`.
+  After a barrier, warp 3 computes tail tiles d=224,240, stores them into the
+  temporary prefix as dense 16x32 with `ld=32`, and after another barrier the
+  whole CTA merges d=224..255.  Both phases apply `previous * alpha + tmp`.
 - each tile decodes raw FP8 K/V through the supplied LUT with the full CTA and
   synchronizes before WMMA; there is no K/V double buffer.
 
@@ -60,30 +60,34 @@ Measured E1 resources were 126 registers/thread, zero stack/spill, 81,920 bytes
 dynamic shared and two active CTAs/SM.  The full gate passed with maximum error
 0.0625, but latency was 19-29x worse than Triton because QK/PV were scalar.
 
-E3a compiled to 79 registers/thread and zero spill, and its complete
-correctness/high-block-ID gate passed.  Padding reduced shared-load bank
+Historical E3a baseline compiled to 79 registers/thread and zero spill, and
+its complete correctness/high-block-ID gate passed.  Padding reduced shared-load bank
 conflicts from 190.54 M to 63.51 M, but 83,200 B crossed the residency cliff:
 only one CTA/SM remained.  Latency regressed to
 882.3/13,220.8/23,600.3/37,307.3/46,681.1 us at
 4K/70K/126K/200K/250K.  Tensor-pipe activity fell further to 0.53%.
 
-E3b handoff checklist:
+E3b compiled to 79 registers/thread, zero spill, 81,152 B dynamic shared and
+two CTAs/SM.  Full correctness/high-block-ID passed.  Five-tier latency was
+502.7/8,093.1/14,481.3/23,061.9/28,746.7 us, about 5% faster than E2 at long
+contexts but 3% slower at 4K.  NCU still showed 52.26% long-scoreboard stalls,
+63.51 M shared-load conflicts and only 0.87% tensor-pipe activity.
 
-1. Keep padded Q/K/V, but recover at least 1,280 B from the FP32 PV temporary
-   so total dynamic shared is <=81,920 B and two CTAs/SM return.
-2. A practical isolated design is a 224-column FP32 PV phase followed by a
-   32-column tail phase; measure the added barriers rather than assuming they
-   are free.
-3. Repeat full correctness, five-context latency and the same NCU counter set.
-4. Only after two-CTA padded layout improves should page carry, vectorized raw
-   loads, shared/read-only LUT and P-fragment reuse be combined.
+E4a handoff checklist:
+
+1. Use the remaining shared budget for a 256-entry BF16 decode LUT (512 B),
+   keeping total shared <=81,920 B and two CTAs/SM.
+2. Repeat full correctness, five-context latency and the identical NCU set.
+3. If long-scoreboard does not materially fall, reject shared LUT and move to
+   vectorized 16-byte raw loads plus hoisted block/head address bases.
+4. Keep page carry and P-fragment reuse as later isolated changes.
 
 Known risks:
 
-- WMMA BF16 accumulation and online softmax ordering passed the E3a gate, but
-  every temporary-layout change must repeat it before performance testing.
-- E3a proved that 83,200 B leaves only one CTA/SM on this host.  E3b must not
-  accept that occupancy loss even though the single-CTA allocation is legal.
+- WMMA BF16 accumulation, online softmax ordering and E3b's two-phase scratch
+  reuse passed the full gate; every decode-path change must repeat it.
+- E3a proved that 83,200 B leaves one CTA/SM; E3b proved 81,152 B restores two.
+  E4a has only 768 B of safe headroom.
 - The raw FP8 LUT decode and each Q/P pack are reloaded for every tile.  NCU
   proved on E2 that this preparation starves the tensor pipe; E3a intentionally
   does not change that path.
@@ -98,7 +102,7 @@ Known risks:
 Measured E0 resources were 48 registers/thread, 81,920 bytes dynamic shared,
 zero local bytes and two active CTAs/SM.  The 895/896/897/4097 correctness
 smoke passed at max absolute error 0.000977.  These are historical E0/E1
-results and do not qualify the new E2 WMMA candidate.
+results and do not qualify the new E3b WMMA candidate.
 
 `bench/test_v7_cuda_prototype.py --full --high-block-id` subsequently passed
 q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic
