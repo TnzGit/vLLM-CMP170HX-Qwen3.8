@@ -1997,6 +1997,17 @@ and CUDA-Graph checks, cache-writer compatibility and model/task-level
 quality remain. Treat E38 as a high-priority research candidate, not a
 production or vLLM dispatch change.
 
+### E38-Q1/Q2 — batch and graph safety (standalone pass)
+
+The adapter was extended to the NInfer `MultiBatch=true` specialization. A
+two-request mixed 4K/126K run produced finite output (`nan=0`) and a
+representative 1.30 ms partial+reduce round. Fixed-address CUDA Graph
+capture/replay of that same shape matched eager output exactly (`maxdiff=0`).
+The initial graph check used the default stream and was discarded after an
+empty-graph warning; switching the launcher to
+`c10::cuda::getCurrentCUDAStream()` made the capture real. Cache-writer and
+mixed-query dispatch integration remain open, so E38 is still research-only.
+
 ## Milestone V7-E37 — producer/consumer split-D register PV (rejected)
 
 **Date:** 2026-09-17

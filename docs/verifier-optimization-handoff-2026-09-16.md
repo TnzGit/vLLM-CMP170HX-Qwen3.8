@@ -608,3 +608,19 @@ fixed-address graph capture/replay and a vLLM-compatible cache writer before
 it can be considered for integration. Cross-dtype differences against E35
 are expected quantization error and are not a quality oracle; the INT8-G64
 oracle and the model's task-level A/B must remain separate gates.
+
+### E38-Q1/Q2 — batch and graph safety (standalone pass)
+
+The E38 adapter was extended to NInfer's `MultiBatch=true` specialization and
+tested with two request-private block-table rows at 4K and 126K. The mixed
+batch output remained finite (`nan=0`) with a representative 1.30 ms
+partial+reduce round on the CMP170HX. Fixed-address CUDA Graph capture and
+replay of the same two-request shape completed without warnings and matched
+the eager output exactly (`maxdiff=0`).
+
+The first graph attempt used the default CUDA stream and produced an empty
+graph warning; this was corrected to `c10::cuda::getCurrentCUDAStream()` before
+accepting the result. This stream-selection detail is required for any future
+vLLM integration and is now part of the E38 handoff. E38 remains a standalone
+candidate until the cache writer, mixed query-length dispatch and task-level
+model quality are integrated and requalified.
