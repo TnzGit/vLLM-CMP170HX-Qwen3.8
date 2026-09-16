@@ -111,6 +111,24 @@ aggregate shared conflicts and DRAM reads remain about 29.65M and 258.21MB.
 This is a low-risk secondary scaffold, not production dispatch; validate
 multi-request correctness and an end-to-end A/B before integration.
 
+## V7-E18 shared-LUT FP8 decode (accepted)
+
+E18 changes only the K/V tile decoder: it reads the exact 256-entry BF16 LUT
+already copied into shared memory rather than recomputing E4M3FN exponent,
+mantissa and `clz` arithmetic for every byte. The LUT preserves the qualified
+fail-closed zero semantics for `0x7f/0xff`; cache bytes, scales, block geometry,
+ABI, synchronization and E17's disjoint score lifetime are unchanged.
+
+Resources remain 132 registers/thread, zero local bytes/spills, 81,856 B
+dynamic shared and two active CTAs/SM. Exhaustive decoder, mixed boundaries,
+int32/int64 and high-block-ID checks pass. Three locked-1350MHz query-8 scans
+give 198.9/558.1/1,378.2/2,709.1/4,202.8/5,239.6 us/layer at
+4K/20K/60K/126K/200K/250K, 11.6-21.8% below E17. NCU at 126K reports
+12.50% barrier, 15.61% long-scoreboard and 16.74% short-scoreboard stalls;
+shared conflicts rise to about 38.42M because of the LUT loads, but DRAM stays
+258.21MB and wall time improves substantially. E18 is accepted as the current
+isolated scaffold, still disconnected from production dispatch.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

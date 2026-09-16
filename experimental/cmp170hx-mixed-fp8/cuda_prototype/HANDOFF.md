@@ -1,13 +1,12 @@
 # V7 prototype handoff
 
-Status: V7-E17 disjoint score tail and tile-barrier reduction is the current
-accepted secondary isolated scaffold on top of E16. It preserves E13b score
-`ld=36`, E14 P `ld=40`, E15's safe accumulator `ld=258`, and E16's half2 merge,
-then moves score packs to the `tmp_shared` tail and removes only the per-tile
-tail barrier. A locked-clock A/B improved query-8 latency 1.0-1.5% over E16
-from 20K through 250K (stable at 4K); correctness, zero-spill and two-CTA
-gates pass. E16 remains the larger accepted factor (6.2-12.1% over E14).
-E17 is not connected to production dispatch.
+Status: V7-E18 shared-LUT FP8 decode is the current accepted isolated scaffold
+on top of E17/E16. It preserves the E17 disjoint score tail and barrier
+reduction plus E16's half2 accumulator merge, then replaces per-element FP8
+integer conversion with the already-copied exact shared LUT. A locked-clock
+A/B improved query-8 latency 11.6-21.8% over E17 from 4K through 250K;
+correctness, zero-spill and two-CTA gates pass. E18 is not connected to
+production dispatch.
 
 Files:
 
@@ -18,6 +17,22 @@ Files:
   int32/int64 index variants.
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
+
+## V7-E18 shared-LUT FP8 decode (accepted isolated scaffold)
+
+The K/V tile decoder indexes the CTA-local 256-entry BF16 LUT copied at kernel
+entry. It retains the exact E4M3FN mapping and fail-closed `0x7f/0xff` zeros,
+with no change to cache bytes, scales, block geometry or ABI. Resources are
+132 registers/thread, zero local bytes/spills, 81,856B dynamic shared and two
+active CTAs/SM; exhaustive, mixed-boundary and high-block-ID correctness pass.
+
+Locked-1350MHz query-8 medians (us/layer) are 198.9/558.1/1,378.2/2,709.1/
+4,202.8/5,239.6 at 4K/20K/60K/126K/200K/250K, 11.6-21.8% below E17.
+NCU at 126K reports 12.50% barrier, 15.61% long-scoreboard and 16.74%
+short-scoreboard stalls, about 38.42M aggregate shared conflicts and
+258.21MB DRAM reads. The extra shared LUT reads are outweighed by removing
+the integer decode instruction path. Run multi-request correctness and
+end-to-end vLLM A/B before any integration.
 
 ## V7-E16 half2 accumulator merge (accepted isolated scaffold)
 

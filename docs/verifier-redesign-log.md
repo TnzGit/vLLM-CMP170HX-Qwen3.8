@@ -1409,3 +1409,47 @@ original 5% single-factor gate, but it is stable, resource-neutral and
 composes with E16 for roughly 21% lower verifier latency than E12 at long
 context. Keep the final publication barrier; removing that last barrier is
 not safe. Production integration remains a separate adapter and A/B gate.
+
+## Milestone V7-E18 — shared-LUT FP8 decode (accepted)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `301d840`
+
+E18 changes one kernel factor: the FP8-to-BF16 conversion in the K/V tile
+loader now reads the exact 256-entry BF16 LUT already copied into shared
+memory, instead of recomputing the E4M3FN exponent/mantissa conversion with
+integer arithmetic and `clz` for every element. The LUT contains the same
+fail-closed `0x7f/0xff` semantics, so cache bytes, scales, shared layout,
+block table, synchronization and the E17 score lifetime are unchanged.
+
+Build resources remain 132 registers/thread, zero local bytes/spills, 81,856 B
+dynamic shared and two active CTAs/SM. Exhaustive device LUT decoding,
+ordinary/mixed boundaries, int32/int64 indices and the 4-GiB high-block-ID
+case all passed with max error within the existing tolerance.
+
+Three locked-1350MHz scans (query length 8, 300 timed iterations) gave these
+medians in us/layer:
+
+| context | E17 | E18 | change |
+|---:|---:|---:|---:|
+| 4K | 225.0 | 198.9 | -11.6% |
+| 20K | 674.2 | 558.1 | -17.2% |
+| 60K | 1,726.0 | 1,378.2 | -20.2% |
+| 126K | 3,442.7 | 2,709.1 | -21.3% |
+| 200K | 5,372.7 | 4,202.8 | -21.8% |
+| 250K | 6,689.1 | 5,239.6 | -21.7% |
+
+At 126K, NCU reported 12.50% barrier, 15.61% long-scoreboard and 16.74%
+short-scoreboard stalls, about 38.42 M aggregate shared-bank conflicts and
+258.21 MB DRAM reads. The LUT adds shared loads (and therefore more bank and
+scoreboard activity) but removes the much larger per-element integer decode
+path; wall latency falls 17-22% at medium/long context with no occupancy or
+correctness cost. This is a positive result, not a contradiction: the
+source-level transaction counters must be read together with instruction
+count and end-to-end time.
+
+**Accepted as the new isolated V7 scaffold.** The cumulative query-8 gain is
+about 21% over E17 and about 38% over the pre-E16 E14 baseline at 250K. It is
+still disconnected from vLLM; next gates are multi-request stress, CUDA Graph
+capture compatibility and an end-to-end dispatch A/B.

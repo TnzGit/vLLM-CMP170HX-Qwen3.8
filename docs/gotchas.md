@@ -928,3 +928,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     end-of-loop barrier: warp 3 can otherwise publish/read `acc_shared` while
     an owner warp is still finishing its last PV merge. Verify the entire
     producer/consumer lifetime before deleting a synchronization point.
+
+79. **A resident shared LUT can beat “zero extra shared loads” when decode
+    arithmetic dominates.** V7-E18 reused the already-copied 256-entry BF16
+    E4M3FN LUT for K/V conversion instead of recomputing exponent/mantissa and
+    `clz` per byte. Shared-bank conflicts and scoreboard stalls increased, but
+    fixed-clock wall latency fell 11.6% at 4K and 17-22% from 20K to 250K with
+    unchanged DRAM traffic, registers and occupancy. Keep exact LUT semantics
+    (including fail-closed NaN codes) and measure end-to-end latency; do not
+    reject a lookup path solely because shared transaction counters rise.
