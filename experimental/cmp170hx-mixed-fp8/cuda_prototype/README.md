@@ -657,3 +657,9 @@ identical and changed locked-clock latency by only -0.8%/-0.7%/+0.6% at
 The full register accumulator was numerically exact and about 4% faster at
 long context, but ptxas used 255 registers/thread with 124--172B spills.
 It violates the zero-spill resource gate and is not qualified.
+
+## V7-E34 partial register accumulator (rejected)
+
+Four D16 tiles in registers passed correctness with 168 registers/thread and
+zero spills, but improved locked-clock latency by only 1.8%/1.1%/1.2% at
+4K/126K/250K. Below the 2% gate; not qualified.

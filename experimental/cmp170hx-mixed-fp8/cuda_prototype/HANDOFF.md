@@ -521,3 +521,10 @@ Moving the entire 24,768-byte persistent FP16 accumulator into per-lane
 lower latency at 4K/126K/250K under locked 1350MHz. It is not resource-safe:
 ptxas reached 255 registers/thread and emitted 124--172B spill stores/loads.
 The candidate was discarded; the qualified E21 source remains unchanged.
+
+## V7-E34 partial register accumulator (rejected)
+
+Registerizing only four of the sixteen D16 output tiles passed correctness
+and used 168 registers/thread with zero spills. Locked-1350MHz latency was
+only 1.8%/1.1%/1.2% lower at 4K/126K/250K, below the 2% gate; no source
+change was kept.

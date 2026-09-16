@@ -276,3 +276,17 @@ must keep the live register set bounded (for example, a small tile-group
 register cache with explicit shared checkpoints) and must pass ptxas before
 timing. In parallel, end-to-end telemetry should establish whether this
 partial-kernel gain can matter to whole-model latency.
+
+### E34 — partial register-resident accumulator (rejected)
+
+Registerizing four of sixteen D16 tiles passed ptxas (168 registers/thread,
+zero spills) but reduced locked-clock latency only 1.8%/1.1%/1.2% at
+4K/126K/250K, below the 2% gate. The qualified source was restored.
+
+### Next candidate: cooperative two-lane softmax
+
+The remaining WMMA path has owner-local softmax where only lanes 0--15 each
+scan 32 score columns serially. A two-lane-per-row candidate will split each
+row into two 16-column halves and combine max/sum with warp shuffles. It must
+preserve BF16 P writes, causal masking and FP16-per-tile rounding, then pass
+the same numerical, ptxas and locked-clock gates.

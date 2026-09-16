@@ -1822,3 +1822,16 @@ The resource gate failed: ptxas used 255 registers/thread and reported
 124--172 bytes of spill stores/loads for the partial-kernel variants. The
 candidate is rejected despite the modest timing gain; no source change was
 kept and no production dispatch changed.
+
+## Milestone V7-E34 — partial register accumulator (rejected)
+
+**Date:** 2026-09-16
+
+Only the first four D16 output tiles were kept in owner-lane `__half2`
+registers; the other twelve retained the E21 shared accumulator. The
+candidate passed numerical smoke and ptxas resource checks (168
+registers/thread, zero spills, unchanged shared geometry). Interleaved
+locked-1350MHz scans measured 186.5/183.2 us at 4K, 2207.5/2183.3 us at
+126K and 4224.0/4174.7 us at 250K (baseline/candidate): 1.8%, 1.1% and 1.2%
+lower latency. These deltas are below the 2% gate, so the candidate is
+rejected and the qualified E21 source remains unchanged.

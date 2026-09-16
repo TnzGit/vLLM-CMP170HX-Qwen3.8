@@ -1042,3 +1042,8 @@ V7-E33 removed the shared accumulator and reached 255 registers/thread with
 124--172B spills. Even with roughly 4% lower isolated latency, spilled
 register state invalidates the candidate; require zero spills before judging
 any registerization result.
+
+95. **Partial registerization may be safe but too small to matter.** V7-E34
+kept four D16 accumulator tiles in registers (168 registers/thread, zero
+spills) but improved locked-clock latency by only 1.8%/1.1%/1.2% at
+4K/126K/250K. Apply the measurement gate before retaining a hybrid path.
