@@ -734,3 +734,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     it: isolated latency was 75% slower at 126K and 79% slower at 250K.  NSEG18
     was worse because two CTAs formed a long second-wave tail.  Keep 4 warps and
     NSEG35; optimize live ranges without changing this resident-grid geometry.
+
+57. **A smaller partial workspace can trigger a larger verifier kernel.**  The
+    q8 static-FP8 running accumulator is FP16, so changing `part_o` from FP32 to
+    FP16 looked like a free 50% workspace reduction.  On Triton 3.7.1 it changed
+    lowering enough to raise dynamic shared memory from 43,008 to about 57,344
+    bytes and retained 252-255 registers/thread.  Three interleaved scans showed
+    6-15% regression at 126K and 5-8% at 250K.  Keep the FP32 external partial
+    buffer; workspace byte count is not a proxy for generated-kernel cost.

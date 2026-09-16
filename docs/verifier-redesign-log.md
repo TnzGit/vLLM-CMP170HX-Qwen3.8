@@ -351,3 +351,56 @@ candidate must preserve the 4w/NSEG35 grid and attack accumulator live ranges
 inside the CTA.  FP16 `part_o` is a separate low-risk memory-headroom experiment
 but is expected to provide less than 1% whole-model throughput; it should not be
 confused with the main structural redesign.
+
+## Milestone V4 — FP16 partial-output workspace (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `f75a362`
+
+**Candidate patch:**
+
+```text
+experimental/cmp170hx-mixed-fp8/candidates/
+  spec-decode-fp16-partial-workspace.patch
+```
+
+### Hypothesis
+
+The static-FP8 q8 kernel already rounds its running accumulator to FP16 after
+every tile, but writes the segment result into an FP32 `part_o` workspace.
+Changing only that workspace to FP16 would halve its memory footprint and might
+reduce partial-store/combine-load traffic without adding a new numerical round.
+
+### Result
+
+The first production-shape scan was slower at every context.  Three additional
+interleaved 126K/250K rounds confirmed that this was not a single-run outlier:
+
+| round | 126K baseline us | FP16 | regression | 250K baseline us | FP16 | regression |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 765.6 | 814.7 | 6.4% | 1543.2 | 1636.4 | 6.0% |
+| 2 | 823.9 | 949.4 | 15.2% | 1535.8 | 1665.0 | 8.4% |
+| 3 | 759.2 | 836.1 | 10.1% | 1544.5 | 1627.3 | 5.4% |
+
+The dtype change also altered Triton's lowering: recent four-warp candidate
+variants used about 57,344 bytes of dynamic shared memory rather than the
+qualified 43,008-byte footprint, with 252-255 registers/thread.  Thus the
+apparently smaller global workspace did not translate to a lighter partial
+kernel.
+
+### Decision
+
+**Rejected for the throughput branch.**  The memory saving is real, but current
+capacity already fits and a repeatable 5-15% verifier regression is not an
+acceptable trade.  The patch remains an audit artifact and is not added to the
+active series.  No full-model or CUDA Graph run was performed after the
+isolated admission failure.
+
+### Next milestone
+
+All low-risk launch/workspace variants are now exhausted.  V5 is the first true
+kernel-structure milestone: preserve 4w/NSEG35 and one K/V load per tile while
+shortening the lifetime of the 48x256 running output.  Its design must state
+where accumulator state lives, how producer/consumer synchronization works,
+and why two resident CTAs remain possible before implementation begins.
