@@ -705,3 +705,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     failures.  Changing `blocks_per_sm` or grid size would also change Marlin's
     workspace/lock/reduction protocol and is not a safe follow-up to these
     negative tile tests.
+
+54. **`inline_asm_elementwise(pack=2)` is not a vectorized random LUT load.**
+    The FP8 decode table uses one data-dependent scalar address per lane.  Merely
+    changing the Triton inline-assembly call from `pack=1` to `pack=2` aborts
+    compilation with `number of input constraints does not match number of
+    parameters`; it does not lower to a useful `ld.v2.u16`.  A genuine packed
+    load would require paired contiguous addresses, which this lookup does not
+    have.  Keep the scalar read-only-cache load rather than trying to force
+    vectorization through the pack metadata.
