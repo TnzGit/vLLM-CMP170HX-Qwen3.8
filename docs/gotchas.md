@@ -694,3 +694,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     changes from DFlash acceptance drift.  The prompt corpus is tokenized with an
     explicit limit so a 250K benchmark does not first allocate a multi-million-token
     host sequence.
+
+53. **Do not transplant the verifier's 140-CTA reasoning into Marlin.**  The
+    verifier can keep two CTAs resident per SM; the profiled Marlin target GEMMs
+    use about 163 KiB dynamic shared memory and launch 70 CTAs, one per SM.  An
+    SM80-only source build that prioritized `(128,64,128)` over the stock
+    `(128,128,256)` tile regressed step latency 12-18%.  Prioritizing
+    `(64,128,128)` regressed it 9-12%.  Both candidates passed load and execution
+    smoke tests, so these are real performance results rather than build
+    failures.  Changing `blocks_per_sm` or grid size would also change Marlin's
+    workspace/lock/reduction protocol and is not a safe follow-up to these
+    negative tile tests.

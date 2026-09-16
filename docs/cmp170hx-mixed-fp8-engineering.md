@@ -317,6 +317,36 @@ The short-context micro regression is hidden by fixed whole-model work: FULL-gra
 126K and 47.5-48.1 at 250K, versus 36.3 and 50.0 for NSEG32.  All tests had zero
 preemptions; the full reference suite, including high block IDs, passed.
 
+### Post-verifier profiler boundary
+
+After the verifier changes above, a shape-aware CUDA profile at 126K measured
+30.426 ms of GPU kernels per decode step.  The two remaining large components are
+now nearly equal:
+
+| component | time / step | share |
+|---|---:|---:|
+| speculative FP8 verifier partials | 12.847 ms | 42.2% |
+| target Marlin GEMMs | 13.219 ms | 43.4% |
+| GatedDeltaNet kernels | 1.120 ms | 3.7% |
+| combine reduction | 0.123 ms | 0.4% |
+| all other kernels | ~3.12 ms | 10.3% |
+
+The dominant target GEMMs were `M=16,N=34816,K=5120` (64 calls, 6.111 ms)
+and `M=16,N=5120,K=17408` (64 calls, 3.139 ms).  The selected Marlin kernel
+launches exactly 70 CTAs on the 70-SM GPU and uses `(thread_k, thread_n,
+threads)=(128,128,256)`.  Two source-built SM80-only alternatives were tested
+with the exact-token harness.  `(128,64,128)` increased step latency by 18% at
+4K and 12.4% at 126K; `(64,128,128)` increased it by 12.3% and 8.7%.
+Therefore the stock selector remains qualified.  Do not raise its grid to 140:
+the one-wave/140-CTA argument belongs to the two-resident-CTA verifier, while
+this Marlin kernel consumes about 163 KiB dynamic shared memory and sustains one
+CTA per SM.
+
+This profile also rules out recurrent-state work as the principal long-context
+bottleneck.  Future material gains must reduce verifier KV-scan cost without
+duplicating reads, or change Marlin implementation/resource use more
+fundamentally than reordering its existing tile candidates.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:
