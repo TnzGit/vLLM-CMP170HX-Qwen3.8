@@ -156,6 +156,27 @@ unchanged, but three locked-1350MHz scans regressed 1.7-6.1% (medians
 4,745.7). Random per-lane read-only-cache latency outweighs the shared-bank
 conflict reduction, so E20 is rejected and not present in the current source.
 
+## V7-E21 warp-3 next-K prefetch (accepted)
+
+E21 keeps E19's paired shared-LUT decode and uses the otherwise idle fourth
+warp to prefetch the next tile's raw K bytes into the existing `q_shared`
+staging alias while the three owner warps compute the current tile. A retained
+CTA barrier publishes that data at the next iteration; V staging/decoding and
+the final publication barrier remain unchanged. Cache bytes, block tables,
+shared-memory size, occupancy and ABI are unchanged.
+
+At locked 1350MHz (query=8, three 300-iteration runs), median us/layer at
+4K/20K/60K/126K/200K/250K is 186.1/479.0/1,136.3/2,205.6/3,403.6/4,218.6,
+which is 2.2-11.1% faster than E19. The candidate uses 133 registers/thread,
+81,856 B dynamic shared, zero spill and two CTAs/SM. NCU at 126K reports
+12.50% barrier, ~7.6% long-scoreboard, ~19.55% short-scoreboard, ~38.45M
+shared-bank conflicts and 258.21 MB DRAM reads. Exhaustive decoder,
+mixed-boundary, int64/high-ID and numerical correctness checks pass.
+
+E21 is an accepted isolated prototype only; it is not wired into vLLM.
+Multi-request correctness, CUDA Graph capture and end-to-end dispatch A/B are
+still required before integration.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

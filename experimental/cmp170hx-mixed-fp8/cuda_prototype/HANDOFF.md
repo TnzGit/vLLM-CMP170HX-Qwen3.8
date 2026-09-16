@@ -1,11 +1,12 @@
 # V7 prototype handoff
 
-Status: V7-E19 paired shared-LUT decode is the current accepted isolated
-scaffold on top of E18/E17/E16. It preserves the exact shared LUT and decodes
-two FP8 bytes per loop with one aligned halfword load and one aligned 32-bit
-store. A locked-clock A/B improved query-8 latency 4.4-9.4% over E18 from 4K
-through 250K; correctness, zero-spill and two-CTA gates pass. E19 is not
-connected to production dispatch.
+Status: V7-E21 warp-3 K prefetch on top of E19 is the current accepted isolated
+scaffold on top of E18/E17/E16. It preserves the exact shared LUT and paired
+decode, and uses the otherwise idle fourth warp to stage the next tile's raw K
+bytes while owner warps compute the current tile. A locked-clock A/B improved
+query-8 latency 2.2-11.1% over E19 from 4K through 250K; correctness,
+zero-spill and two-CTA gates pass. E21 is not connected to production
+dispatch.
 
 Files:
 
@@ -41,6 +42,42 @@ correctness and resources were unchanged, but three locked-1350MHz scans were
 126K/200K/250K versus E19's 2,464.7/3,822.9/4,745.7). Random per-lane
 read-only-cache latency loses to the shared LUT, so E20 is rejected and the
 source remains E19.
+
+## V7-E21 warp-3 next-K prefetch (accepted isolated scaffold)
+
+E21 keeps E19's cache, shared-memory and ABI geometry unchanged. During each
+tile's owner-local QK/softmax/PV work, the otherwise idle warp 3 loads the next
+tile's block id and raw K bytes into the existing `q_shared` staging alias. The
+next iteration begins with the retained CTA barrier, decodes the prefetched K,
+then stages/decodes V through the normal all-thread path. The final publication
+barrier remains mandatory; no request or block-table state is persisted across
+launches.
+
+The candidate passed exhaustive E4M3FN decoding, mixed-boundary lengths,
+int32/int64 indices, 4-GiB high-block-ID checks and the existing numerical
+tolerance. Resources are 133 registers/thread, zero local bytes/spills,
+81,856 B dynamic shared and two active CTAs/SM (one extra register versus E19).
+
+Three locked-1350MHz scans (query length 8, 300 iterations) produced these
+medians in us/layer:
+
+| context | E19 | E21 | change |
+|---:|---:|---:|---:|
+| 4K | 190.2 | 186.1 | -2.2% |
+| 20K | 516.5 | 479.0 | -7.3% |
+| 60K | 1,260.3 | 1,136.3 | -9.8% |
+| 126K | 2,464.7 | 2,205.6 | -10.5% |
+| 200K | 3,822.9 | 3,403.6 | -11.0% |
+| 250K | 4,745.7 | 4,218.6 | -11.1% |
+
+At 126K, NCU reports 12.50% barrier, about 7.6% long-scoreboard and 19.55%
+short-scoreboard stalls, about 38.45M aggregate shared-bank conflicts and
+258.21 MB DRAM reads. Relative to E19's 17.70%/18.75% long/short scoreboard,
+the prefetch removes most of the exposed K-load wait while slightly shifting
+the remaining dependency pressure to short scoreboard; traffic and occupancy
+are unchanged. This is a strong isolated result, but the current source still
+requires multi-request stress, CUDA Graph capture and end-to-end vLLM A/B
+before any integration decision.
 
 ## V7-E18 shared-LUT FP8 decode (accepted isolated scaffold)
 

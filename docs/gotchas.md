@@ -949,8 +949,21 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 
 81. **Random `__ldg` LUT reads are slower than the resident shared table on
     this SM80 path.** V7-E20 kept E19's paired decode and changed only the
-    address space; correctness and occupancy were identical, but locked-clock
-    latency regressed 1.7-6.1% (about 6% at long context). The 256-entry table
-    is small enough that shared-bank conflicts are cheaper than per-lane
-    read-only-cache misses. Retain E19 unless a different broadcast/constant
-    access pattern is measured.
+address space; correctness and occupancy were identical, but locked-clock
+latency regressed 1.7-6.1% (about 6% at long context). The 256-entry table
+is small enough that shared-bank conflicts are cheaper than per-lane
+read-only-cache misses. Retain E19 unless a different broadcast/constant
+access pattern is measured.
+
+82. **An idle warp can hide the next K-tile load when the raw staging alias is
+already free.** V7-E21 uses warp 3 to fetch the next block id and raw K bytes
+while the three owner warps perform QK/softmax/PV for the current tile. The
+next iteration's existing CTA barrier publishes the prefetch before decode;
+V still uses the normal all-thread stage because the alias holds only one raw
+matrix. On locked clocks this reduced query-8 verifier latency 2.2-11.1% over
+E19, with the largest gains at 126K-250K, and NCU long-scoreboard stalls fell
+from 17.70% to about 7.6%. Keep the final publication barrier and verify
+request-local block ids: a persistent next-tile pointer would create stale
+state across requests. The extra register (133 vs 132) did not reduce the
+two-CTA occupancy, but this is still an isolated prototype until multi-request,
+CUDA Graph and vLLM A/B gates pass.

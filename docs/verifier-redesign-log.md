@@ -1520,3 +1520,45 @@ shared-conflict count.
 **Rejected.** The source and current scaffold remain E19; this negative
 control is retained in the log only to prevent retrying the global-LUT route
 without a different access pattern.
+
+## Milestone V7-E21 — warp-3 next-K prefetch (accepted isolated scaffold)
+
+**Date:** 2026-09-16
+
+**Parent source:** E19 (`79ef3fc` lineage; E20 remains a documentation-only
+negative control)
+
+E21 changes only the tile-feed schedule. Warp 3, which is idle during the
+owner-local QK/softmax/PV phase, loads the next tile's block id and raw K bytes
+into the existing `q_shared` raw-staging alias. The following iteration begins
+with the retained CTA barrier, decodes the prefetched K and then stages/decodes
+V through the unchanged all-thread path. No KV storage, block-table format,
+shared-memory allocation, scheduler state or public ABI changes. The final
+end-of-loop publication barrier is retained.
+
+The source builds with 133 registers/thread, 81,856 B dynamic shared, zero
+local bytes/spills and two active CTAs/SM. Exhaustive E4M3FN decoding,
+mixed-boundary lengths, int32/int64 indices, 4-GiB high-block-ID and existing
+numerical-tolerance checks all pass.
+
+Three locked-1350MHz scans (query length 8, 300 timed iterations) produced:
+
+| context | E19 | E21 | change |
+|---:|---:|---:|---:|
+| 4K | 190.2 | 186.1 | -2.2% |
+| 20K | 516.5 | 479.0 | -7.3% |
+| 60K | 1,260.3 | 1,136.3 | -9.8% |
+| 126K | 2,464.7 | 2,205.6 | -10.5% |
+| 200K | 3,822.9 | 3,403.6 | -11.0% |
+| 250K | 4,745.7 | 4,218.6 | -11.1% |
+
+At 126K NCU measured 12.50% barrier, ~7.6% long-scoreboard and ~19.55%
+short-scoreboard stalls, ~38.45M aggregate shared-bank conflicts and 258.21
+MB DRAM reads. E19 reported 17.70%/18.75% long/short scoreboard, so the
+prefetch hides most exposed K-load latency while slightly increasing short
+dependency pressure; traffic and occupancy are unchanged.
+
+**Accepted as the current isolated V7 scaffold.** The result is strong and
+monotonic at medium/long context, but it is not a production claim. Required
+next gates are multi-request/request-switch correctness, CUDA Graph capture
+compatibility and end-to-end vLLM dispatch A/B. Production remains untouched.
