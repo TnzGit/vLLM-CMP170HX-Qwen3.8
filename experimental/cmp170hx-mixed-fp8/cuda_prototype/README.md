@@ -629,3 +629,8 @@ identical but changed locked-clock latency by only -0.2%/-1.2%/+0.5% at
 
 Eight warps were 22-78% slower than the qualified four-warps launch across
 4K/126K/250K at locked clocks, with identical output. No source change kept.
+
+## V7-E29 q8 TILE 32→64 (rejected)
+
+TILE=64 was 11% slower at 4K and about 63-65% slower at 126K/250K under
+locked clocks, with identical output. The qualified TILE=32 source remains.

@@ -477,6 +477,12 @@ used 57.34 KiB and 252 registers/thread. This points to E21's shared FP8/LUT
 staging overhead and weaker effective cache traffic, not a missing occupancy
 opportunity.
 
+## V7-E29 q8 TILE 32→64 (rejected)
+
+Only the q8 K/V tile width changed to 64. Locked-1350MHz q=8/NSEG=35
+latency was 59.5/1278.5/2502.7 us/layer versus 53.6/775.7/1533.3 at
+4K/126K/250K, with identical output. The wider tile is rejected.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with

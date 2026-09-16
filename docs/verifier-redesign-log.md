@@ -1709,6 +1709,25 @@ regression is therefore not an occupancy win left on the table. E21's shared
 FP8 staging/LUT decode is doing more work while achieving less effective L2/
 DRAM traffic than the existing q8 global-load specialization.
 
+## Milestone V7-E29 — q8 TILE 32→64 (rejected)
+
+**Date:** 2026-09-16
+
+The q8 specialization was tested with only its K/V tile width changed from
+32 to 64 (896-token pages are divisible by both). Four warps, global FP8/LUT
+loads, NSEG=35 and all arithmetic were unchanged. At locked 1350MHz
+(q=8, 30 warmups, 100 iterations), us/layer was:
+
+| context | TILE=32 | TILE=64 | change |
+|---:|---:|---:|---:|
+| 4K | 53.6 | 59.5 | +11.0% |
+| 126K | 775.7 | 1,278.5 | +64.8% |
+| 250K | 1,533.3 | 2,502.7 | +63.3% |
+
+Outputs were identical, but the wider tile increased register/live-state
+pressure and was much slower. The candidate is rejected; TILE=32 remains
+qualified.
+
 ## Milestone V7-E25 — cp.async K prefetch (rejected negative control)
 
 **Date:** 2026-09-16

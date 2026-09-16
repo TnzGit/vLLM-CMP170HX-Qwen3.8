@@ -1015,3 +1015,8 @@ existing cache policy unless a workload-specific trace shows L1 pollution.
 V7-E28 changed only the launch from four to eight warps; locked-clock latency
 was 22-78% worse at 4K/126K/250K with identical output. Keep four warps and
 measure resource/launch effects before increasing parallelism.
+
+90. **Wider KV tiles can hurt the q8 specialization.** V7-E29 changed only
+TILE 32→64; latency regressed 11% at 4K and roughly 63-65% at 126K/250K.
+Keep TILE=32 unless register/live-state and long-context measurements show a
+real benefit.
