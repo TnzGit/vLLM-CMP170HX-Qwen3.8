@@ -1496,3 +1496,27 @@ resource/traffic invariants are more informative than one counter.
 E17 and about 38% faster than the E14 baseline at 250K in this microbenchmark.
 It remains disconnected from vLLM; multi-request stress, CUDA Graph capture
 and end-to-end dispatch A/B are still required before integration.
+
+## Milestone V7-E20 — global read-only LUT negative control (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `79ef3fc`
+
+E20 kept E19's paired two-byte decode and changed only the LUT address space:
+the same 256-entry device table was read through `__ldg` instead of the
+CTA-local shared copy. Full correctness, mixed-boundary, int64 and high-ID
+checks passed, and resources stayed at 132 registers/thread, 81,856 B shared
+and two active CTAs/SM.
+
+Three locked-1350MHz scans (query length 8, 300 iterations) were consistently
+slower than E19. Median us/layer at 4K/20K/60K/126K/200K/250K were
+193.5/543.3/1,335.8/2,615.0/4,015.0/5,031.7 versus E19's
+190.2/516.5/1,260.3/2,464.7/3,822.9/4,745.7, i.e. regressions of 1.7-6.1%
+(about 6% through long context). The read-only cache did not hide the random
+per-lane LUT latency; E19's shared lookup remains faster despite its higher
+shared-conflict count.
+
+**Rejected.** The source and current scaffold remain E19; this negative
+control is retained in the log only to prevent retrying the global-LUT route
+without a different access pattern.

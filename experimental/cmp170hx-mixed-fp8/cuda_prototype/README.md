@@ -146,6 +146,16 @@ barrier, 17.70% long-scoreboard and 18.75% short-scoreboard stalls, about
 outweighed by fewer decode-loop/address instructions. E19 is the current
 isolated scaffold, not production dispatch.
 
+## V7-E20 global read-only LUT (rejected)
+
+E20 kept E19's paired decode and changed only LUT reads from CTA shared memory
+to the same device table through `__ldg`. Correctness and resources were
+unchanged, but three locked-1350MHz scans regressed 1.7-6.1% (medians
+193.5/543.3/1,335.8/2,615.0/4,015.0/5,031.7 us/layer at
+4K/20K/60K/126K/200K/250K versus E19's 190.2/516.5/1,260.3/2,464.7/3,822.9/
+4,745.7). Random per-lane read-only-cache latency outweighs the shared-bank
+conflict reduction, so E20 is rejected and not present in the current source.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

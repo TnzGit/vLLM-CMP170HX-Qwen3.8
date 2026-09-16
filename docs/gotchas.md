@@ -946,3 +946,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     (up to 29% versus E17) with unchanged 132 registers, 81,856B shared and
     two-CTA occupancy. Keep alignment assertions; do not generalize the pair
     mapping to odd-width or unaligned cache geometries without a new gate.
+
+81. **Random `__ldg` LUT reads are slower than the resident shared table on
+    this SM80 path.** V7-E20 kept E19's paired decode and changed only the
+    address space; correctness and occupancy were identical, but locked-clock
+    latency regressed 1.7-6.1% (about 6% at long context). The 256-entry table
+    is small enough that shared-bank conflicts are cheaper than per-lane
+    read-only-cache misses. Retain E19 unless a different broadcast/constant
+    access pattern is measured.

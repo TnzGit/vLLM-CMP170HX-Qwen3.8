@@ -33,6 +33,15 @@ short-scoreboard stalls, about 38.40M aggregate shared conflicts and
 258.21MB DRAM reads. It remains an isolated scaffold pending multi-request
 and end-to-end vLLM A/B.
 
+## V7-E20 global read-only LUT (rejected negative control)
+
+E20 changed only E19's LUT address space to `__ldg` device reads. Full
+correctness and resources were unchanged, but three locked-1350MHz scans were
+1.7-6.1% slower (long-context medians 2,615.0/4,015.0/5,031.7 us/layer at
+126K/200K/250K versus E19's 2,464.7/3,822.9/4,745.7). Random per-lane
+read-only-cache latency loses to the shared LUT, so E20 is rejected and the
+source remains E19.
+
 ## V7-E18 shared-LUT FP8 decode (accepted isolated scaffold)
 
 The K/V tile decoder indexes the CTA-local 256-entry BF16 LUT copied at kernel
