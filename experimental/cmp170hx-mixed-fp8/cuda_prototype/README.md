@@ -618,3 +618,9 @@ An NCU sample of the identical partial launch found Triton q8 at 895 us
 (73.53% memory, 16.30% DRAM throughput) and E21 at 2.52 ms (54.65%, 5.79%).
 Both had 12.5% theoretical occupancy; E21's 81.86 KiB shared-memory FP8/LUT
 staging, rather than occupancy, is the likely cost center.
+
+## V7-E27 q8 global K/V `.cg` cache policy (rejected)
+
+An isolated `.cg` modifier on the q8 global K/V loads was numerically
+identical but changed locked-clock latency by only -0.2%/-1.2%/+0.5% at
+4K/126K/250K. It is not present in the qualified source.

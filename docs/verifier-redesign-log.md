@@ -1659,6 +1659,28 @@ apples-to-apples comparison with the current Triton q8 specialization. The
 test-site dispatch and remote production tree were left unchanged; no
 production service was started or modified.
 
+## Milestone V7-E27 — q8 global K/V cache policy (`.cg`) (rejected)
+
+**Date:** 2026-09-16
+
+NCU showed the existing Triton q8 specialization has high L1 reuse (87.6%),
+so this isolated test changed only the K/V raw-byte loads to use the CUDA
+`.cg` cache modifier. The global FP8/LUT path, page-boundary block-table
+reload, TILE=32, NSEG=35, query layout and output ABI were unchanged.
+
+At locked 1350MHz, q=8 and NSEG=35 (30 warmups, 100 iterations), the current
+path versus `.cg` was:
+
+| context | current us/layer | `.cg` us/layer | change |
+|---:|---:|---:|---:|
+| 4K | 53.7 | 53.6 | -0.2% |
+| 126K | 774.6 | 765.2 | -1.2% |
+| 250K | 1,529.6 | 1,537.2 | +0.5% |
+
+Outputs were numerically identical. The long-context change is below the
+2% acceptance gate and the direction is not consistent across lengths, so
+the candidate is rejected; the qualified q8 source remains unchanged.
+
 An NCU default-set sample of the same partial launch (126K, q=8, NSEG=35)
 explains the gap. Triton q8 took 895 us under profiling with 73.53% memory
 throughput, 16.30% DRAM throughput, 252 registers/thread and 57.34 KiB dynamic

@@ -455,6 +455,13 @@ This rejects direct dispatch integration; the isolated source remains E21.
 The result also shows that the earlier standalone E21 scan was not an
 apples-to-apples vLLM baseline.
 
+## V7-E27 q8 global K/V `.cg` cache policy (rejected)
+
+Changing only the q8 kernel's raw K/V loads to `cache_modifier=".cg"` passed
+the same numerical output. Locked-1350MHz q=8/NSEG=35 results (us/layer)
+were 53.7/774.6/1529.6 current versus 53.6/765.2/1537.2 with `.cg` at
+4K/126K/250K. The mixed ±1.2% result is below the gate; source remains E21.
+
 NCU on the same partial launch measured Triton q8 at 895 us, 73.53% memory
 throughput and 16.30% DRAM throughput, versus E21 at 2.52 ms, 54.65% and
 5.79%. Both were 128-thread/grid-140 launches with 12.5% theoretical

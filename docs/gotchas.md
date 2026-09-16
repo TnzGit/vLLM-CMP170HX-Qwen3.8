@@ -1005,3 +1005,8 @@ E21 was 1.52-1.83x slower at 4K/126K/250K despite max_abs 0.000008-0.000015.
 Do not integrate a standalone kernel without an apples-to-apples API test;
 profile the Triton path and E21 under the same wrapper before changing
 dispatch.
+
+88. **A streaming cache modifier is not automatically better for q8 KV.**
+V7-E27 applied `.cg` only to the q8 global K/V loads. Locked-clock results
+changed by -0.2%/-1.2%/+0.5% at 4K/126K/250K, with identical output. Keep the
+existing cache policy unless a workload-specific trace shows L1 pollution.
