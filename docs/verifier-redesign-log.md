@@ -1634,6 +1634,31 @@ The single-warp V copy loses the original all-thread staging bandwidth; the
 overlap does not compensate. **Rejected.** The source was restored to E21 and
 no production code changed.
 
+## Milestone V7-E26 — vLLM API dispatch wrapper (rejected)
+
+**Date:** 2026-09-16
+
+Before changing the installed vLLM tree, a disposable wrapper routed the
+existing SpecDecodeAttention API to E21 only for the exact qualified shape:
+SM80, Hq/Hkv/D=24/4/256, qmax=8, NSEG=35, block=896, and contiguous
+static-FP8 NHD cache. It used identical cache bytes, query, block table and
+scales for the original Triton q8 path and E21, and fell back to Triton for
+all other shapes.
+
+The wrapper was numerically clean, with max_abs 0.000008-0.000015, but the
+actual vLLM-facing A/B was:
+
+| context | Triton us/call | E21 us/call | change |
+|---:|---:|---:|---:|
+| 4K | 71.8 | 180.8 | +151.7% |
+| 126K | 746.7 | 2,109.1 | +182.5% |
+| 250K | 1,495.6 | 4,111.0 | +174.9% |
+
+This rejects E21 for direct integration: the standalone E21 scan was not an
+apples-to-apples comparison with the current Triton q8 specialization. The
+test-site dispatch and remote production tree were left unchanged; no
+production service was started or modified.
+
 ## Milestone V7-E25 — cp.async K prefetch (rejected negative control)
 
 **Date:** 2026-09-16

@@ -444,6 +444,17 @@ parallel than the original all-thread stage; two locked-clock scans regressed
 about 25% at 20K-250K (250K about 5.29 ms/layer versus E21's 4.22 ms).
 The candidate is rejected and the isolated source has been restored to E21.
 
+## V7-E26 vLLM API dispatch wrapper (rejected)
+
+A disposable wrapper tested routing the real SpecDecodeAttention API to E21
+for the exact qualified static-FP8 shape (Hq/Hkv/D=24/4/256, qmax=8,
+NSEG=35, block=896), with Triton fallback for all other requests. Numerical
+error stayed at 0.000008-0.000015, but E21 was 2.52x/2.83x/2.75x the Triton
+latency at 4K/126K/250K (180.8/2109.1/4111.0 us versus 71.8/746.7/1495.6).
+This rejects direct dispatch integration; the isolated source remains E21.
+The result also shows that the earlier standalone E21 scan was not an
+apples-to-apples vLLM baseline.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with

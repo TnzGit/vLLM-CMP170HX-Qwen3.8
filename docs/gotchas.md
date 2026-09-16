@@ -997,3 +997,11 @@ V7-E25 kept a synchronous fallback but still added commit/wait-group overhead
 and raised registers from 133 to 134. Fixed-clock scans regressed 1.2-1.3% at
 20K-250K and about 4.6% at 4K. Retain E21's synchronous warp-3 K prefetch
 unless a design can pipeline multiple groups without an immediate wait.
+
+87. **Standalone prototype timing is not a vLLM baseline.** V7-E26 routed
+the real SpecDecodeAttention API to E21 for one exact static-FP8 shape and
+compared identical inputs against the existing Triton q8 specialization.
+E21 was 1.52-1.83x slower at 4K/126K/250K despite max_abs 0.000008-0.000015.
+Do not integrate a standalone kernel without an apples-to-apples API test;
+profile the Triton path and E21 under the same wrapper before changing
+dispatch.

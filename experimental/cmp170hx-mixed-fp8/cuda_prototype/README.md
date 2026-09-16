@@ -604,3 +604,12 @@ roughly 25% at medium/long context (about 5.29 ms/layer at 250K versus E21's
 SM80 `cp.async` for warp-3's next-K copy passed correctness but added one
 register and was 1.2-1.3% slower at 20K-250K (about 4.6% slower at 4K) across
 three locked-clock scans. The source was restored to E21.
+
+## V7-E26 vLLM API dispatch wrapper (rejected)
+
+Before touching vLLM, a disposable wrapper routed the qualified static-FP8
+SpecDecodeAttention shape to E21 and retained Triton fallback elsewhere.
+The wrapper was numerically clean (max_abs 0.000008-0.000015), but actual
+API latency was 180.8/2109.1/4111.0 us at 4K/126K/250K versus Triton's
+71.8/746.7/1495.6 us. E21 was therefore rejected for direct integration;
+the test-site and production dispatch remain unchanged.
