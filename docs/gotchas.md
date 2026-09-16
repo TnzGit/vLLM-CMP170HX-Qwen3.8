@@ -742,3 +742,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     bytes and retained 252-255 registers/thread.  Three interleaved scans showed
     6-15% regression at 126K and 5-8% at 250K.  Keep the FP32 external partial
     buffer; workspace byte count is not a proxy for generated-kernel cost.
+
+58. **Disabling LICM lowers a register count without fixing verifier liveness.**
+    Replacing the q8 KV loop with `tl.range(..., disable_licm=True)` reduced the
+    compiled count from 250 to 239 registers/thread but raised dynamic shared
+    memory from 43,008 to 57,344 bytes.  Three interleaved scans averaged 4.2%
+    slower at 126K and 1.3% slower at 250K.  The persistent 48x256 accumulator
+    still spans the whole loop; compiler scheduling hints cannot make that state
+    disappear.  Keep normal LICM and move structural experiments to explicit
+    row partitioning or a custom CUDA producer/consumer kernel.

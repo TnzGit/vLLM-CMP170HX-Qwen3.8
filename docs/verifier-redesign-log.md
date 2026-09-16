@@ -404,3 +404,55 @@ kernel-structure milestone: preserve 4w/NSEG35 and one K/V load per tile while
 shortening the lifetime of the 48x256 running output.  Its design must state
 where accumulator state lives, how producer/consumer synchronization works,
 and why two resident CTAs remain possible before implementation begins.
+
+## Milestone V5 — disable loop-invariant hoisting (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `e327b48`
+
+**Candidate patch:**
+
+```text
+experimental/cmp170hx-mixed-fp8/candidates/
+  spec-decode-fp8-q8-disable-licm.patch
+```
+
+### Hypothesis
+
+Triton documents `tl.range(..., disable_licm=True)` as a way to avoid long live
+ranges caused by loop-invariant-code motion.  Replacing only the q8/GQA6 KV
+loop iterator might reduce the 250-register footprint while preserving
+4w/NSEG35, one K/V load per tile, workspace layout, and attention arithmetic.
+
+Explicit Triton `warp_specialize` was not used: Triton 3.7.1 documents that
+feature as Blackwell-only, while this host is SM80.
+
+### Generated resources
+
+The candidate reduced registers/thread from 250 to 239 and kept local/stack at
+zero, but dynamic shared memory increased from 43,008 to 57,344 bytes.  It did
+not reach a qualitatively different occupancy or scheduling regime.
+
+### Performance
+
+The initial scan was slower by about 20% at 70K/126K and 3% at 250K.  Three
+interleaved 100-iteration 126K/250K rounds were noisy but showed no repeatable
+gain:
+
+| round | 126K baseline us | candidate | 250K baseline us | candidate |
+|---:|---:|---:|---:|---:|
+| 1 | 833.5 | 953.4 | 1549.5 | 1592.1 |
+| 2 | 761.5 | 841.8 | 1533.9 | 1615.9 |
+| 3 | 901.3 | 806.0 | 1668.7 | 1605.8 |
+
+Across the three runs the mean candidate latency was about 4.2% worse at 126K
+and 1.3% worse at 250K.  It failed the >=5% admission threshold and increased
+shared memory while leaving the persistent 48x256 accumulator intact.
+
+### Decision
+
+**Rejected.**  Preventing LICM changes scheduling but does not solve accumulator
+lifetime.  The patch remains outside the active series.  V6 tests an explicit
+16+16+16 row organization in one Triton program; acceptance depends entirely
+on generated resources and isolated latency, not source-level appearance.
