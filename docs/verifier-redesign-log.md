@@ -1360,3 +1360,52 @@ end latency.
 **Accepted as the current isolated V7 scaffold.** It is still not wired into
 vLLM or any production dispatch; integration requires a separate adapter,
 multi-request correctness gate and end-to-end A/B before deployment.
+
+## Milestone V7-E17 — disjoint score tail and tile-barrier reduction (accepted secondary scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `123a6fe`
+
+E17 changes only the lifetime of the FP32 score packs and the corresponding
+CTA synchronization. E16 kept scores in the first 6,912 bytes of `q_shared`,
+so every tile needed a tail `__syncthreads()` before a faster owner could let
+the next tile overwrite that raw staging alias. E17 puts the three score packs
+in the unused tail of the existing `tmp_shared` allocation (offset 6,912,
+total 13,824 of 14,336 bytes). `q_shared` is therefore raw-only after the
+fixed load/decode barriers. The per-tile tail barrier is removed; one
+end-of-loop CTA barrier remains before publication so warp 3 cannot read the
+accumulator while an owner warp is finishing its final merge.
+
+The logical cache/block geometry, partial/combine ABI, K/V traffic, and total
+dynamic shared allocation are unchanged. The candidate compiled with 132
+registers/thread, zero local bytes/spills, 81,856 B dynamic shared and two
+active CTAs/SM. Exhaustive E4M3FN decoding, ordinary/mixed boundary cases,
+int32/int64 indices and the 4-GiB high-block-ID case all passed with the same
+existing numerical tolerance.
+
+Three locked-1350MHz runs (query length 8, 300 timed iterations) produced the
+following medians in us/layer:
+
+| context | E16 | E17 | change |
+|---:|---:|---:|---:|
+| 4K | 225.3 | 225.0 | -0.1% |
+| 20K | 684.5 | 674.2 | -1.5% |
+| 60K | 1,751.1 | 1,726.0 | -1.4% |
+| 126K | 3,485.7 | 3,442.7 | -1.2% |
+| 200K | 5,439.8 | 5,372.7 | -1.2% |
+| 250K | 6,757.3 | 6,689.1 | -1.0% |
+
+The gains are small but repeatable and monotonic with context; there was no
+short-tier regression or occupancy change. A 126K Nsight Compute run measured
+12.50% barrier, 12.54% long-scoreboard and 13.08% short-scoreboard stalls,
+versus E16's 12.86%/13.11%/14.78%; aggregate shared-bank conflicts remained
+about 29.65 M and DRAM reads 258.21 MB. This supports the intended diagnosis:
+the removed barriers reduce synchronization/dependency wait, while unchanged
+memory traffic explains why the improvement is only about 1%.
+
+**Accepted as a low-risk secondary isolated scaffold.** It is below the
+original 5% single-factor gate, but it is stable, resource-neutral and
+composes with E16 for roughly 21% lower verifier latency than E12 at long
+context. Keep the final publication barrier; removing that last barrier is
+not safe. Production integration remains a separate adapter and A/B gate.

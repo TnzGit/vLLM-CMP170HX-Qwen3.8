@@ -1,12 +1,13 @@
 # V7 prototype handoff
 
-Status: V7-E16 half2 accumulator merge is the current accepted isolated
-scaffold. It preserves E13b score `ld=36`, E14 P `ld=40`, and E15's safe
-accumulator `ld=258`, then changes only scalar accumulator merging to aligned
-half2/float2 FMA pairs. A locked-clock A/B improved query-8 latency 6.2-12.1%
-over E14 from 4K through 250K; correctness, zero-spill and two-CTA gates pass.
-E15's stride-only factor was rejected and remains documented as a negative
-control. E16 is not connected to production dispatch.
+Status: V7-E17 disjoint score tail and tile-barrier reduction is the current
+accepted secondary isolated scaffold on top of E16. It preserves E13b score
+`ld=36`, E14 P `ld=40`, E15's safe accumulator `ld=258`, and E16's half2 merge,
+then moves score packs to the `tmp_shared` tail and removes only the per-tile
+tail barrier. A locked-clock A/B improved query-8 latency 1.0-1.5% over E16
+from 20K through 250K (stable at 4K); correctness, zero-spill and two-CTA
+gates pass. E16 remains the larger accepted factor (6.2-12.1% over E14).
+E17 is not connected to production dispatch.
 
 Files:
 
@@ -34,6 +35,23 @@ load/store conflicts and 12.86%/13.11%/14.78% barrier/long/short stalls.
 The higher conflict counters do not negate the wall-time gain; scalar merge
 transactions and dependency length are reduced. Before any production use,
 run multi-request correctness and end-to-end vLLM A/B with E14 as baseline.
+
+## V7-E17 disjoint score tail and tile-barrier reduction
+
+The three 2,304-byte FP32 score packs now live at offset 6,912 in the existing
+14,336-byte `tmp_shared` allocation. `q_shared` is raw-only after the fixed
+load/decode barriers, so the former per-tile CTA barrier is gone. A single
+end-of-loop CTA barrier remains before publication; it is required to prevent
+warp 3 from reading `acc_shared` while owner warps finish the last merge.
+
+Resources: 132 registers/thread, zero local bytes/spills, 81,856B dynamic
+shared (81,920B allocator round), two active CTAs/SM. Full and high-block-ID
+correctness passed. Locked-1350MHz query-8 medians in us/layer are
+225.0/674.2/1,726.0/3,442.7/5,372.7/6,689.1 at
+4K/20K/60K/126K/200K/250K. NCU at 126K reports 12.50% barrier, 12.54%
+long-scoreboard and 13.08% short-scoreboard stalls, with about 29.65M
+aggregate shared conflicts and 258.21MB DRAM reads. This is accepted as a
+low-risk secondary scaffold; it is not wired into vLLM or production.
 
 ## V7-E15 negative control (rejected)
 

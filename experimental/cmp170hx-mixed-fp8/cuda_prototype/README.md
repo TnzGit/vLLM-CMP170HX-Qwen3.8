@@ -89,6 +89,28 @@ were 225.3 (4K), 684.5 (20K), 1,751.1 (60K), 3,485.7 (126K), 5,439.8
 merge chain and lower register pressure improve wall latency. E16 is accepted
 as the current isolated scaffold, not production dispatch.
 
+## V7-E17 disjoint score tail and tile-barrier reduction (accepted secondary scaffold)
+
+E17 moves the three FP32 score packs from the `q_shared` raw-staging alias to
+the unused tail of `tmp_shared` (offset 6,912; 13,824 of 14,336 bytes used).
+This makes `q_shared` raw-only after the fixed K/V load/decode barriers, so the
+per-tile tail CTA barrier can be removed. One CTA barrier remains after the
+tile loop before publication; removing that final barrier would race warp 3's
+reads against owner-warp accumulator writes.
+
+The cache geometry, block table, ABI, K/V traffic, dynamic shared allocation
+(81,856 B) and two-CTA residency are unchanged. E17 builds with 132
+registers/thread, zero local bytes/spills and passes the exhaustive decoder,
+mixed boundaries, int32/int64 indices and 4-GiB high-block-ID checks.
+
+At locked 1350MHz, three 300-iteration query-8 medians (us/layer) are
+225.0/674.2/1,726.0/3,442.7/5,372.7/6,689.1 at 4K/20K/60K/126K/200K/250K,
+about 1.0-1.5% below E16 with no short-tier regression. NCU at 126K reports
+12.50% barrier, 12.54% long-scoreboard and 13.08% short-scoreboard stalls;
+aggregate shared conflicts and DRAM reads remain about 29.65M and 258.21MB.
+This is a low-risk secondary scaffold, not production dispatch; validate
+multi-request correctness and an end-to-end A/B before integration.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

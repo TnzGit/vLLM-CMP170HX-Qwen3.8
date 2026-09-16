@@ -918,3 +918,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     9.08M shared loads and 14.49M stores with 14.6% barrier and 14.5% short
     scoreboard stalls. Attribute the specific shared-store instructions before
     trying another accumulator layout; retain E15 only as a negative control.
+
+78. **Removing a per-tile barrier requires moving every live consumer off the
+    raw staging alias, and still needs one publication barrier.** V7-E17 moved
+    the FP32 score packs from `q_shared` into the tail of `tmp_shared`, then
+    removed the tile-tail CTA barrier. At 1350MHz this produced a stable
+    1.0-1.5% gain over E16 from 20K through 250K, with barrier stalls falling
+    12.86% -> 12.50% and no resource change. Do not remove the final
+    end-of-loop barrier: warp 3 can otherwise publish/read `acc_shared` while
+    an owner warp is still finishing its last PV merge. Verify the entire
+    producer/consumer lifetime before deleting a synchronization point.
