@@ -788,3 +788,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     CTA residency.  This remains far from production-fast, but it is a useful
     design rule: explicitly serialize a small tail when doing so preserves a
     major occupancy tier, and verify the trade with both short and long tiers.
+
+63. **Moving a tiny decode LUT to shared memory does not cure a scalar feed
+    pipeline.** V7-E4a copied the 256-entry BF16 FP8 table into 512 B of shared
+    memory and preserved two-CTA residency. It passed the full correctness
+    gate and improved E2 by 6.1%/5.6% at 126K/250K, but long-scoreboard stalls
+    remained 51.97%, tensor-pipe activity only reached 0.88%, and shared-load
+    conflicts rose to 72.22 M. The dominant cost is still scalar raw-byte
+    loading/addressing and staging, not the LUT's global-memory residence.
+    Vectorize raw loads and hoist address bases before attempting more lookup
+    caching.

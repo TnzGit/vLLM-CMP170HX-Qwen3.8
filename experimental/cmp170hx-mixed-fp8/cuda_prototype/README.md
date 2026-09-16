@@ -32,10 +32,13 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
-The V7-E3b partial candidate keeps the same four-warp CTA and fixed geometry,
+The V7-E4a partial candidate keeps the same four-warp CTA and fixed geometry,
 but maps QK/PV to SM80 BF16 WMMA tensor cores.  Each tile is first decoded by
 the full CTA from raw FP8 bytes through the supplied BF16 LUT into one shared
-K/V tile; no double buffer is required.  The 48 query/group rows are processed
+K/V tile; no double buffer is required.  At kernel entry, the 256-entry BF16
+decode LUT is staged into 512 B of shared memory by 128 threads (two entries
+per thread), using the same barrier as accumulator initialization.  The 48
+query/group rows are processed
 as three sequential 16-row packs.  Q/K/V use a padded physical leading
 dimension of 264 elements while their logical head dimension remains 256:
 Q is `[16,264]`, and K/V are `[32,264]` token-major.  QK therefore uses two
@@ -50,9 +53,9 @@ tile.  Each phase merges `previous * alpha + tmp` into the unchanged all-row
 FP16 accumulator.  Empty/causal tails remain masked, and physical block IDs
 are loaded/promoted as `int64_t` before multiplication by cache strides.
 
-## V7-E3b padded-WMMA scaffold (correct; not production-fast)
+## V7-E4a shared-LUT scaffold (hardware qualified, not production-fast)
 
-The current source is the E3b tensor-core candidate.  Its fixed 81,152-byte
+The current source is the E4a tensor-core candidate.  Its fixed 81,664-byte
 dynamic shared-memory layout is:
 
 ```text
@@ -60,28 +63,41 @@ all-row FP16 accumulator [48, 256]       24,576 B
 one decoded BF16 K/V tile [2, 32, 264]    33,792 B
 one BF16 Q/P pack [16, 264]                8,448 B
 one FP32 score/PV temporary [16, 224]     14,336 B
+shared BF16 FP8 decode LUT [256]              512 B
                                            ------
-                                           81,152 B
+                                           81,664 B
 ```
 
 The 264-element leading dimensions add eight BF16 padding elements per
 physical WMMA row only; the logical D remains 256.  P is repacked densely as
 `[16,32]` with `ld=32`, and the Q/P pack's unused tail stores 16 FP32 alpha
 values between softmax and PV fusion.  The FP32 scratch's main-phase rows use
-`ld=224`; the tail reuses its first 16x32 entries with `ld=32`.  Accumulator,
-logical tmp/output indexing, launcher, current-stream selection, int64 index
-and block-table dispatch, page arithmetic, and flattened FP32 partial
-workspace ABI are unchanged.
+`ld=224`; the tail reuses its first 16x32 entries with `ld=32`.  The shared LUT
+is read by each raw FP8 decode.  Accumulator, logical tmp/output indexing,
+launcher, current-stream selection, int64 index and block-table dispatch, page
+arithmetic, and flattened FP32 partial workspace ABI are unchanged.
 
-On hardware E3b compiled to 79 registers/thread, zero spill, 81,152 B dynamic
-shared and two CTAs/SM.  Full correctness/high-block-ID passed.  The five-tier
-scan at 4K/70K/126K/200K/250K measured
-502.7/8,093.1/14,481.3/23,061.9/28,746.7 us per layer.  This is about 5%
+On CMP 170HX hardware E4a compiled to 79 registers/thread, zero local spill,
+81,664 B dynamic shared and two active CTAs/SM. The complete correctness and
+4-GiB high-block-ID gate passed (largest high-block error 0.0625). Its
+4K/70K/126K/200K/250K latency was
+479.3/8,222.1/14,338.5/22,858.5/28,522.1 us per layer. This is a 6.1%/5.6%
+improvement over E2 at 126K/250K but still about 18-19x slower than Triton.
+NCU retained 51.97% long-scoreboard stalls, only 0.88% tensor-pipe activity,
+and 72.22 M shared-load conflicts. The shared LUT is therefore retained only
+as an isolated scaffold; E4b must vectorize raw loads and hoist address bases.
+
+### E3b baseline (historical, not an E4a qualification)
+
+The E3b padded source used 81,152 B dynamic shared memory and two CTAs/SM.
+Full correctness/high-block-ID passed.  The five-tier scan at
+4K/70K/126K/200K/250K measured
+502.7/8,093.1/14,481.3/23,061.9/28,746.7 us per layer.  This was about 5%
 faster than E2 at long contexts but 3% slower at 4K and still 18-19x behind
-Triton.  NCU retained 52.26% long-scoreboard stalls, so E4 starts with the
-FP8 decode/LUT feed path rather than more WMMA changes.
+Triton.  NCU retained 52.26% long-scoreboard stalls, motivating E4a's shared
+LUT feed change.
 
-### E3a baseline (historical, not an E3b qualification)
+### E3a baseline (historical, not an E4a qualification)
 
 The padded E3a source used the same Q/K/V physical leading dimension of 264
 but retained a 16x256 FP32 temporary, for 83,200 B total.  On hardware it
@@ -92,7 +108,7 @@ one.  It regressed at every tier: 4K/70K/126K/200K/250K measured
 882.3/13,220.8/23,600.3/37,307.3/46,681.1 us per layer.  E3b recovered 2,048 B
 of temporary storage while preserving padding and restored two CTAs/SM.
 
-### E2 baseline (historical, not an E3b qualification)
+### E2 baseline (historical, not an E4a qualification)
 
 The unpadded E2 source used 81,920 B of dynamic shared memory and passed the
 complete correctness/high-block-ID gate after correcting P's compact stride

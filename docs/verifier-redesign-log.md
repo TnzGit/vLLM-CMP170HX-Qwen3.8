@@ -786,3 +786,37 @@ and absolute latency remains far above Triton).  E4a should spend the remaining
 768-B two-CTA shared budget on a 512-B BF16 decode LUT and remeasure the same
 long-scoreboard/conflict counters before combining vectorized raw loads or
 page-carry changes.
+
+## Milestone V7-E4a — shared BF16 decode LUT (small accepted scaffold gain)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `6e0d464`
+
+E4a copied the 256-entry BF16 FP8 decode table to 512 B of shared memory once
+per CTA.  It reused the existing accumulator-init barrier; all WMMA, padded
+layout, two-phase PV and external ABI were unchanged.  Total shared became
+81,664 B and hardware retained 79 registers/thread, zero spill and two
+CTAs/SM.  Full correctness/high-block-ID passed; the high-ID error was 0.0625
+(<0.08).
+
+| context | E3b global LUT | E4a shared LUT | change |
+|---:|---:|---:|---:|
+| 4K | 502.7 | 479.3 | -4.7% |
+| 70K | 8,093.1 | 8,222.1 | +1.6% |
+| 126K | 14,481.3 | 14,338.5 | -1.0% |
+| 200K | 23,061.9 | 22,858.5 | -0.9% |
+| 250K | 28,746.7 | 28,522.1 | -0.8% |
+
+Against unpadded E2, E4a is 1.8% faster at 4K and 6.1%/5.6% faster at
+126K/250K.  The counter change is much smaller than the wall-clock improvement
+from restoring occupancy: long-scoreboard stalls moved only 52.26% -> 51.97%,
+while shared-load bank conflicts increased 63.51 M -> 72.22 M because random
+LUT indices now contend in shared memory.  Tensor activity was essentially
+unchanged at 0.88%.
+
+**Accepted as the next isolated scaffold, not production.**  The LUT copy is
+cheap and the overall E2-relative admission numbers are positive, but absolute
+latency remains 18-19x Triton.  E4b must reduce the scalar feed instruction
+chain using aligned 16-byte raw K/V loads and tile-level block/head base
+calculation.  Page carry should remain a later independent change.

@@ -40,7 +40,7 @@ constexpr int kRowGroups = kRows / kRowsPerGroup;
 constexpr int kWmmaLd = 264;
 constexpr int kKvElementsPerTile = kTile * kD;
 constexpr int kKvMatrixElements = kTile * kWmmaLd;
-// E3b retains E3a's padded physical BF16 WMMA rows and logical 256-wide
+// E4a retains E3b's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -48,7 +48,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E3b keeps the FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E4a keeps E3b's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -60,27 +60,34 @@ constexpr int kTmpBytes = kRowsPerGroup * kPvMainD *
 constexpr int kKvSharedOffset = kAccBytes;
 constexpr int kQSharedOffset = kKvSharedOffset + kKvSharedBytes;
 constexpr int kTmpSharedOffset = kQSharedOffset + kQBytes;
-constexpr int kSharedBytes = kTmpSharedOffset + kTmpBytes;
+constexpr int kFp8LutEntries = 256;
+constexpr int kFp8LutBytes = kFp8LutEntries * static_cast<int>(sizeof(uint16_t));
+constexpr int kFp8LutSharedOffset = kTmpSharedOffset + kTmpBytes;
+constexpr int kSharedBytes = kFp8LutSharedOffset + kFp8LutBytes;
 
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kWmmaLd == 264, "E3b WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E3b WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E3b WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E3b PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E3b PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E3b PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E3b PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E3b K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E3b accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E3b Q/P buffer must be 8,448 bytes");
+static_assert(kWmmaLd == 264, "E4a WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E4a WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E4a WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E4a PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E4a PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E4a PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E4a PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E4a K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E4a accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E4a Q/P buffer must be 8,448 bytes");
 static_assert(kTmpSharedOffset == 66816,
-              "E3b temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E3b temporary tile must be 14,336 bytes");
-static_assert(kSharedBytes == 81152, "E3b shared layout must be 81,152 bytes");
+              "E4a temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E4a temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E4a LUT must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E4a shared LUT must be 512 bytes");
+static_assert(kFp8LutSharedOffset == 81152,
+              "E4a shared LUT offset must be 81,152 bytes");
+static_assert(kSharedBytes == 81664, "E4a shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E3b shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E4a shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -120,8 +127,9 @@ __device__ __forceinline__ int64_t load_block_id(
 // elements of each row logically populated.  The resulting K matrix can be
 // viewed by WMMA as a logical [256, 32] column-major operand with ld=264.
 // Loading is deliberately a full-CTA operation followed by a barrier: the
-// E3b layout has one K/V tile and does not rely on a second stage or cp.async
-// overlap.
+// E4a layout has one K/V tile and does not rely on a second stage or cp.async
+// overlap.  The LUT pointer is the shared 256-entry BF16 table populated at
+// kernel entry.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
     const unsigned char* k_cache,
@@ -195,6 +203,8 @@ __global__ void v7_partial_kernel(
   uint16_t* q_shared =
       reinterpret_cast<uint16_t*>(shared + kQSharedOffset);
   float* tmp_shared = reinterpret_cast<float*>(shared + kTmpSharedOffset);
+  uint16_t* fp8_lut_shared = reinterpret_cast<uint16_t*>(
+      shared + kFp8LutSharedOffset);
   // The P matrix occupies the first 16x32 BF16 entries.  The remaining
   // buffer space carries alpha as exact FP32 values until the PV fusion.
   float* alpha_shared =
@@ -210,6 +220,13 @@ __global__ void v7_partial_kernel(
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
+
+  // Stage the decode table once per CTA.  Exactly two entries are copied by
+  // each of the fixed 128 threads, and the existing accumulator-init barrier
+  // also publishes the shared LUT before the first K/V tile decode.
+  const int lut_index = tid * 2;
+  fp8_lut_shared[lut_index] = fp8_lut[lut_index];
+  fp8_lut_shared[lut_index + 1] = fp8_lut[lut_index + 1];
 
   const int64_t q_start = load_index<IndexI64>(cu_q, req);
   const int64_t q_len = load_index<IndexI64>(cu_q, req + 1) - q_start;
@@ -275,9 +292,9 @@ __global__ void v7_partial_kernel(
     }
     __syncthreads();
     load_kv_bf16(
-        kv_shared, k_cache, v_cache, fp8_lut, tile * kTile, kBlockSize, kvh,
-        block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb, stride_vs,
-        stride_vh, kv_len);
+        kv_shared, k_cache, v_cache, fp8_lut_shared, tile * kTile, kBlockSize,
+        kvh, block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb,
+        stride_vs, stride_vh, kv_len);
     __syncthreads();
 
     // The Q/P buffer is reused for each 16-row pack.  Loading Q once per pack

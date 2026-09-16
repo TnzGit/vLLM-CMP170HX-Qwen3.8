@@ -1343,19 +1343,21 @@ Completed milestones:
 | V7-E1 shared accumulator | `73ed877` | correct, scalar math 19-29x slower |
 | V7-E2 BF16 WMMA | `e81c5fd` | correct; rejected, shared-feed path 9-20x slower |
 | V7-E3a padded WMMA | `62d0375` | conflicts -3x; rejected, occupancy fell to 1 CTA |
-| V7-E3b two-phase PV | current milestone | correct, 2 CTA restored; ~5% long gain, still rejected |
+| V7-E3b two-phase PV | `6e0d464` | correct, 2 CTA restored; ~5% long gain, still rejected |
+| V7-E4a shared decode LUT | current milestone | correct, 2 CTA; 5.6-6.1% vs E2 long, scoreboard unchanged |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should continue from standalone V7-E3b, not production
-dispatch.  Its 224+32 PV phases reduced shared to 81,152 B, restored two
-CTAs/SM and kept the ~3x conflict reduction.  It improved E2 about 5% at long
-contexts but still shows 52.26% long-scoreboard stalls and is 18-19x behind
-Triton.  E4a should add a 512-B shared BF16 LUT (total 81,664 B), then repeat
-full correctness, five-context latency and identical NCU counters.  Admission
-remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K
-regression before full-model/CUDA Graph A/B.  If it fails, do not touch the
-qualified service.
+The next owner should continue from standalone V7-E4a, not production
+dispatch. E4a added the 512-B shared BF16 LUT, kept two CTAs/SM and passed the
+full gate, but only improved E2 6.1%/5.6% at 126K/250K. NCU still shows 51.97%
+long-scoreboard stalls, 0.88% tensor-pipe activity and 72.22 M shared-load
+conflicts. E4b should replace scalar raw K/V reads with aligned 16-byte loads
+and hoist physical block/head address bases out of per-element decode. Repeat
+the same resource, correctness, latency and NCU gates. Admission remains zero
+spill, two CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K regression
+before full-model/CUDA Graph A/B. If it fails, do not touch the qualified
+service.
