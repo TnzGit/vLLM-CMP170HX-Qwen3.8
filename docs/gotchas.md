@@ -816,3 +816,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     were flat. The remaining per-byte random shared-LUT read still dominates
     the feed path. After validating all encodings, direct E4M3FN bit conversion
     is a better next test than adding more transport stages.
+
+66. **For E4M3FN on SM80, exact bit synthesis can beat a decode LUT by a wide
+    margin.** V7-E6 exhaustively matched all 256 raw codes against PyTorch and
+    then removed hot-loop shared LUT reads. Long-context latency fell 43-44%,
+    instructions dropped from 1.093 B to 711.7 M, long-scoreboard stalls from
+    51.99% to 28.48%, and tensor activity rose to 1.51%, with no occupancy or
+    correctness regression. A tiny table is not automatically cheap when each
+    divergent byte creates a shared lookup and conflict; prove the finite/
+    subnormal/NaN bit mapping and prefer arithmetic when its ISA cost is lower.

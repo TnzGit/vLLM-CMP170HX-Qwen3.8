@@ -886,3 +886,36 @@ byte still performs a random shared LUT access.
 exhaustively validate and then substitute exact E4M3FN-to-BF16 bit conversion
 for the per-byte LUT lookup. This directly targets the unchanged conflict and
 instruction counters.
+
+## Milestone V7-E6 — exact bitwise E4M3FN decode (major accepted scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `cc04e4e`
+
+E6 replaced every hot-loop shared LUT lookup with pure integer synthesis of
+the BF16 bits. An exported CUDA helper exhaustively checked all 256 encodings
+against PyTorch: all finite values were bit-exact; `0x7f/0xff` matched `isnan`
+and canonicalized to `0x7fc0`. The 512-B LUT allocation stayed in place for a
+controlled occupancy comparison but is dead in the decode hot loop.
+
+Resources remained 79 registers/thread, zero spill, 81,664 B and two CTAs/SM.
+The complete correctness/high-block-ID gate passed at 0.0625 max error.
+
+| context | E5 shared LUT | E6 bit synthesis | change |
+|---:|---:|---:|---:|
+| 4K | 473.4 | 378.5 | -20.0% |
+| 70K | 7,984.3 | 4,957.3 | -37.9% |
+| 126K | 14,355.3 | 8,130.3 | -43.4% |
+| 200K | 22,863.6 | 12,845.7 | -43.8% |
+| 250K | 28,509.2 | 16,041.2 | -43.7% |
+
+NCU confirms the mechanism: executed instructions fell 1.093 B -> 711.7 M,
+shared-load conflicts 72.22 M -> 63.52 M, long-scoreboard stalls 51.99% ->
+28.48%, and tensor activity rose 0.88% -> 1.51%. Barrier stalls became the
+largest newly exposed structural cost at 19.23%.
+
+**Accepted as the new isolated scaffold, not production.** Next perform a
+controlled factorial that removes compact raw staging and its extra barriers
+while keeping E6 bit synthesis. That will distinguish global-load scoreboard
+cost from phase-barrier cost before attempting page carry or overlap.

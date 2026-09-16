@@ -44,7 +44,7 @@ constexpr int kKvMatrixElements = kTile * kWmmaLd;
 constexpr int kRawChunksPerMatrix = kKvElementsPerTile / kRawChunkBytes;
 constexpr int kRawChunksPerThread = kRawChunksPerMatrix / kThreads;
 constexpr int kRawStageBytes = kKvElementsPerTile * sizeof(unsigned char);
-// E5 retains E4a's padded physical BF16 WMMA rows and logical 256-wide
+// E6 retains E5's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -52,7 +52,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E5 keeps E4a's FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E6 keeps E5's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -73,47 +73,47 @@ static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
 static_assert(sizeof(uint4) == kRawChunkBytes,
-              "E5 raw K/V vector chunk must be 16 bytes");
+              "E6 raw K/V vector chunk must be 16 bytes");
 static_assert(alignof(uint4) == kRawChunkBytes,
-              "E5 raw K/V vector chunk must be 16-byte aligned");
+              "E6 raw K/V vector chunk must be 16-byte aligned");
 static_assert(kD % kRawChunkBytes == 0,
-              "E5 head dimension must contain whole vector chunks");
+              "E6 head dimension must contain whole vector chunks");
 static_assert(kRawChunksPerMatrix == 512,
-              "E5 one raw K/V matrix must contain 512 vector chunks");
+              "E6 one raw K/V matrix must contain 512 vector chunks");
 static_assert(kRawChunksPerThread == 4,
-              "E5 each thread must load four chunks per K/V matrix");
-static_assert(kWmmaLd == 264, "E5 WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E5 WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E5 WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E5 PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E5 PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E5 PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E5 PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E5 K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E5 accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E5 Q/P buffer must be 8,448 bytes");
+              "E6 each thread must load four chunks per K/V matrix");
+static_assert(kWmmaLd == 264, "E6 WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E6 WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E6 WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E6 PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E6 PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E6 PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E6 PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E6 K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E6 accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E6 Q/P buffer must be 8,448 bytes");
 static_assert(kRawStageBytes == 8192,
-              "E5 compact raw staging buffer must be 8,192 bytes");
+              "E6 compact raw staging buffer must be 8,192 bytes");
 static_assert(kRawStageBytes <= kQBytes,
-              "E5 raw staging must fit within the Q/P shared buffer");
+              "E6 raw staging must fit within the Q/P shared buffer");
 static_assert(kQSharedOffset + kRawStageBytes <= kTmpSharedOffset,
-              "E5 raw staging must not overlap temporary storage");
+              "E6 raw staging must not overlap temporary storage");
 static_assert(kQSharedOffset % kRawChunkBytes == 0,
-              "E5 raw staging base must be 16-byte aligned");
+              "E6 raw staging base must be 16-byte aligned");
 static_assert(kQSharedOffset >= kKvSharedOffset + kKvSharedBytes,
-              "E5 raw staging must not overlap decoded K/V output");
+              "E6 raw staging must not overlap decoded K/V output");
 static_assert(kTmpSharedOffset == 66816,
-              "E5 temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E5 temporary tile must be 14,336 bytes");
-static_assert(kFp8LutEntries == 256, "E5 LUT must have 256 entries");
-static_assert(kFp8LutBytes == 512, "E5 shared LUT must be 512 bytes");
+              "E6 temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E6 temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E6 LUT must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E6 shared LUT must be 512 bytes");
 static_assert(kFp8LutSharedOffset == 81152,
-              "E5 shared LUT offset must be 81,152 bytes");
+              "E6 shared LUT offset must be 81,152 bytes");
 static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
-              "E5 shared LUT must not overlap temporary storage");
-static_assert(kSharedBytes == 81664, "E5 shared layout must be 81,664 bytes");
+              "E6 shared LUT must not overlap temporary storage");
+static_assert(kSharedBytes == 81664, "E6 shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E5 shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E6 shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -131,6 +131,36 @@ __device__ __forceinline__ uint16_t float_to_bf16_bits(float value) {
 
 __device__ __forceinline__ uint16_t float_to_fp16_bits(float value) {
   return __half_as_ushort(__float2half_rn(value));
+}
+
+// Decode an E4M3FN byte without a table or floating-point instructions.  For
+// finite normal values, (8+m) * 2^(e-10) maps directly to BF16's exponent and
+// seven-bit fraction.  E4M3FN subnormals are still normal in BF16; normalize
+// the three-bit mantissa with its highest set bit.  PyTorch uses one canonical
+// quiet BF16 NaN for both signed E4M3FN NaN encodings, so follow that explicit
+// policy rather than attempting to preserve a NaN sign/payload.
+__device__ __forceinline__ uint16_t fp8_e4m3fn_to_bf16_bits(uint8_t code) {
+  const uint16_t sign = static_cast<uint16_t>(code & 0x80u) << 8;
+  const int exponent = static_cast<int>((code >> 3) & 0xFu);
+  const int mantissa = static_cast<int>(code & 0x7u);
+  if (exponent == 0xF && mantissa == 0x7) {
+    return 0x7FC0u;
+  }
+  if (exponent == 0) {
+    if (mantissa == 0) {
+      return sign;
+    }
+    const int top = 31 - __clz(static_cast<unsigned int>(mantissa));
+    const int bf16_exponent = top - 9 + 127;
+    const int bf16_fraction =
+        (mantissa - (1 << top)) << (7 - top);
+    return sign | static_cast<uint16_t>(bf16_exponent << 7) |
+           static_cast<uint16_t>(bf16_fraction);
+  }
+  const int bf16_exponent = exponent - 7 + 127;
+  const int bf16_fraction = mantissa << 4;
+  return sign | static_cast<uint16_t>(bf16_exponent << 7) |
+         static_cast<uint16_t>(bf16_fraction);
 }
 
 template <bool IsI64>
@@ -206,7 +236,6 @@ __device__ __forceinline__ void stage_raw_kv(
 __device__ __forceinline__ void decode_raw_kv(
     uint16_t* shared_kv,
     const unsigned char* raw_stage,
-    const uint16_t* fp8_lut_shared,
     bool is_v) {
   const int tid = threadIdx.x;
   for (int element = tid; element < kKvElementsPerTile;
@@ -215,7 +244,7 @@ __device__ __forceinline__ void decode_raw_kv(
     const int d = element % kD;
     const int physical = token_in_tile * kWmmaLd + d;
     shared_kv[(is_v ? kKvMatrixElements : 0) + physical] =
-        fp8_lut_shared[static_cast<int>(raw_stage[element])];
+        fp8_e4m3fn_to_bf16_bits(raw_stage[element]);
   }
 }
 
@@ -227,7 +256,6 @@ __device__ __forceinline__ void load_kv_bf16(
     unsigned char* raw_stage,
     const unsigned char* k_cache,
     const unsigned char* v_cache,
-    const uint16_t* fp8_lut_shared,
     int64_t tile_token,
     int64_t block_size,
     int64_t kvh,
@@ -247,12 +275,12 @@ __device__ __forceinline__ void load_kv_bf16(
 
   stage_raw_kv(raw_stage, k_cache, k_tile_base, k_stride_s, tile_token, kv_len);
   __syncthreads();
-  decode_raw_kv(shared_kv, raw_stage, fp8_lut_shared, false);
+  decode_raw_kv(shared_kv, raw_stage, false);
   __syncthreads();
 
   stage_raw_kv(raw_stage, v_cache, v_tile_base, v_stride_s, tile_token, kv_len);
   __syncthreads();
-  decode_raw_kv(shared_kv, raw_stage, fp8_lut_shared, true);
+  decode_raw_kv(shared_kv, raw_stage, true);
   __syncthreads();
 }
 
@@ -310,9 +338,10 @@ __global__ void v7_partial_kernel(
   const int lane = tid & 31;
   const int warp = tid >> 5;
 
-  // Stage the decode table once per CTA.  Exactly two entries are copied by
-  // each of the fixed 128 threads, and the existing accumulator-init barrier
-  // also publishes the shared LUT before the first K/V tile decode.
+  // Retain E5's 512-B shared LUT allocation and load it once per CTA so the
+  // shared-memory geometry stays comparable.  E6's hot decode path is pure
+  // bit arithmetic and deliberately does not read this table; the existing
+  // accumulator-init barrier still publishes the copied entries.
   const int lut_index = tid * 2;
   fp8_lut_shared[lut_index] = fp8_lut[lut_index];
   fp8_lut_shared[lut_index + 1] = fp8_lut[lut_index + 1];
@@ -381,9 +410,9 @@ __global__ void v7_partial_kernel(
     }
     __syncthreads();
     load_kv_bf16(
-        kv_shared, raw_stage, k_cache, v_cache, fp8_lut_shared, tile * kTile,
-        kBlockSize, kvh, block_id_shared, stride_kb, stride_ks, stride_kh,
-        stride_vb, stride_vs, stride_vh, kv_len);
+        kv_shared, raw_stage, k_cache, v_cache, tile * kTile, kBlockSize, kvh,
+        block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb, stride_vs,
+        stride_vh, kv_len);
 
     // The Q/P buffer is reused for each 16-row pack.  Loading Q once per pack
     // per tile is required because P occupies its first 32 columns.  This
@@ -665,6 +694,16 @@ __global__ void v7_combine_kernel(
   }
 }
 
+__global__ void v7_decode_e4m3fn_kernel(
+    const uint8_t* codes, uint16_t* out, int64_t count) {
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+                       threadIdx.x;
+       index < count;
+       index += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+    out[index] = fp8_e4m3fn_to_bf16_bits(codes[index]);
+  }
+}
+
 void check_common(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
 }
@@ -676,6 +715,31 @@ void check_sm80(const torch::Tensor& tensor) {
               props->major, ".", props->minor);
   TORCH_CHECK(tensor.get_device() == c10::cuda::current_device(),
               "all V7 tensors must be on the current CUDA device");
+}
+
+torch::Tensor decode_e4m3fn_bf16(const torch::Tensor& codes) {
+  check_common(codes, "codes");
+  check_sm80(codes);
+  TORCH_CHECK(codes.scalar_type() == at::kByte,
+              "codes must be uint8 E4M3FN encodings");
+  TORCH_CHECK(codes.dim() == 1 && codes.is_contiguous(),
+              "codes must be a contiguous 1-D tensor");
+  TORCH_CHECK(codes.numel() <= std::numeric_limits<int32_t>::max(),
+              "codes tensor is too large for the decoder helper");
+  auto out = at::empty(codes.sizes(), codes.options().dtype(at::kBFloat16));
+  const int64_t count = codes.numel();
+  if (count != 0) {
+    const int64_t blocks64 = (count + kThreads - 1) / kThreads;
+    TORCH_CHECK(blocks64 <= std::numeric_limits<unsigned int>::max(),
+                "codes tensor requires too many decoder blocks");
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream().stream();
+    v7_decode_e4m3fn_kernel<<<static_cast<unsigned int>(blocks64), kThreads,
+                              0, stream>>>(
+        codes.data_ptr<uint8_t>(), reinterpret_cast<uint16_t*>(out.data_ptr()),
+        count);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return out;
 }
 
 void check_partial_inputs(
@@ -978,4 +1042,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "V7 fixed SM80 FP8 split-KV combine (standalone prototype)");
   m.def("resources", &resources,
         "V7 partial kernel attributes and occupancy (standalone prototype)");
+  m.def("decode_e4m3fn_bf16", &decode_e4m3fn_bf16,
+        "V7 device E4M3FN-to-BF16 bit decoder exhaustive helper");
 }

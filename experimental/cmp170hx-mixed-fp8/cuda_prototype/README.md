@@ -32,15 +32,16 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
-The V7-E5 partial candidate keeps the same four-warp CTA and fixed geometry,
+The V7-E6 partial candidate keeps the same four-warp CTA and fixed geometry,
 but maps QK/PV to SM80 BF16 WMMA tensor cores.  Each tile is first decoded by
-the full CTA from raw FP8 bytes through the supplied BF16 LUT into one shared
-K/V tile; no double buffer is required.  At kernel entry, the 256-entry BF16
-decode LUT is staged into 512 B of shared memory by 128 threads (two entries
-per thread), using the same barrier as accumulator initialization.  Each K/V
-tile uses the compact first 8,192 B of the not-yet-loaded Q/P shared buffer as
-raw staging: K and V are each loaded as 512 aligned 16-byte chunks, four per
-thread, with a barrier before shared-LUT decode and another barrier before the
+the full CTA from raw FP8 bytes through an exact bitwise E4M3FN-to-BF16 helper
+into one shared K/V tile; no double buffer is required.  E5's 256-entry BF16
+decode LUT remains allocated and staged into 512 B of shared memory by 128
+threads (two entries per thread), using the same barrier as accumulator
+initialization, but E6 does not read it in the hot loop.  Each K/V tile uses
+the compact first 8,192 B of the not-yet-loaded Q/P shared buffer as raw
+staging: K and V are each loaded as 512 aligned 16-byte chunks, four per
+thread, with a barrier before bitwise decode and another barrier before the
 next matrix.  The 48 query/group rows are processed as three sequential
 16-row packs.  Q/K/V use a padded physical leading
 dimension of 264 elements while their logical head dimension remains 256:
@@ -56,9 +57,9 @@ tile.  Each phase merges `previous * alpha + tmp` into the unchanged all-row
 FP16 accumulator.  Empty/causal tails remain masked, and physical block IDs
 are loaded/promoted as `int64_t` before multiplication by cache strides.
 
-## V7-E5 staged-decode experiment (rejected for long-context admission)
+## V7-E6 bitwise-decode scaffold (hardware qualified, isolated only)
 
-The current source is the E5 tensor-core candidate.  Its fixed 81,664-byte
+The current source is the E6 tensor-core candidate.  Its fixed 81,664-byte
 dynamic shared-memory layout is:
 
 ```text
@@ -73,30 +74,49 @@ shared BF16 FP8 decode LUT [256]              512 B
 
 The 264-element leading dimensions add eight BF16 padding elements per
 physical WMMA row only; the logical D remains 256.  P is repacked densely as
-`[16,32]` with `ld=32`, and the Q/P pack's unused tail stores 16 FP32 alpha
+  `[16,32]` with `ld=32`, and the Q/P pack's unused tail stores 16 FP32 alpha
 values between softmax and PV fusion.  The FP32 scratch's main-phase rows use
 `ld=224`; the tail reuses its first 16x32 entries with `ld=32`.  The shared LUT
-is read by each raw FP8 decode.  E5 aliases the compact first 8,192 B of the
-Q/P buffer as raw staging while Q is not live.  For each tile, aligned 16-byte
+allocation is retained for geometry/occupancy comparability but is not read by
+the E6 raw-decode hot loop.  E6 aliases the compact first 8,192 B of the Q/P
+buffer as raw staging while Q is not live.  For each tile, aligned 16-byte
 `uint4` loads stage K, a barrier publishes the bytes, and all 128 threads
-decode the shared raw bytes through the shared LUT into padded BF16 K.  A
+decode each raw byte with pure integer bit synthesis into padded BF16 K.  A
 barrier then permits the same raw buffer to stage V; another barrier publishes
 V's raw bytes, and a final barrier publishes decoded V before Q loading starts.
 Invalid token tails are zero-filled.  An unaligned external cache base uses a
 safe scalar fallback rather than an unsafe vector read.  The raw staging alias
-does not overlap decoded K/V output or the LUT.  Accumulator, logical
+does not overlap decoded K/V output, temporary storage, or the retained LUT.
+For finite E4M3FN code `(s,e,m)`, normal values use `(8+m)*2^(e-10)` and map
+to BF16 exponent `e+120` with fraction `m<<4`; `e=0` subnormals are normalized
+from the highest set mantissa bit.  Both NaN encodings (`0x7f`, `0xff`)
+explicitly canonicalize to quiet BF16 `0x7fc0`.  The bench's exported CUDA
+helper exhaustively checks all 256 codes against PyTorch BF16 bits (finite
+bit-exact, NaNs by `isnan` plus canonical bits).  Accumulator, logical
 tmp/output indexing, launcher, current-stream selection, int64 index and
 block-table dispatch, page arithmetic, and flattened FP32 partial workspace
 ABI are unchanged.
 
-Hardware retained 79 registers/thread, zero spill, 81,664 B shared and two
+The device helper passed an exhaustive all-256-code comparison against
+PyTorch: every finite BF16 bit pattern was exact and both NaNs canonicalized
+to `0x7fc0`. Hardware retained 79 registers/thread, zero spill, 81,664 B shared
+and two CTAs/SM; complete correctness/high-block-ID passed. Five-tier latency
+was 378.5/4,957.3/8,130.3/12,845.7/16,041.2 us, improving E5 by
+20.0%/37.9%/43.4%/43.8%/43.7%. NCU instructions fell from 1.093 B to 711.7 M,
+long-scoreboard stalls from 51.99% to 28.48%, and tensor activity rose from
+0.88% to 1.51%. Barrier stalls rose to 19.23%, motivating a direct-load versus
+staged-load factorial next. E6 is accepted only as the next isolated scaffold.
+
+### E5 baseline (historical, not an E6 qualification)
+
+Hardware E5 retained 79 registers/thread, zero spill, 81,664 B shared and two
 CTAs/SM; full correctness/high-block-ID passed. Five-tier latency was
 473.4/7,984.3/14,355.3/22,863.6/28,509.2 us. This improved E4a at 4K/70K by
 1.2%/2.9% but was flat at 126K-250K. NCU also stayed flat at 1.093 B
 instructions, 51.99% long-scoreboard stalls, 0.88% tensor activity and
 72.22 M shared-load conflicts. It is rejected for long-context admission.
 
-### E4b baseline (historical, not an E5 qualification)
+### E4b baseline (historical, not an E6 qualification)
 
 Hardware E4b retained 79 registers/thread, zero local spill, 81,664 B shared and
 two CTAs/SM. Full correctness/high-block-ID passed. However,
@@ -105,10 +125,10 @@ two CTAs/SM. Full correctness/high-block-ID passed. However,
 and no meaningful long-context gain over E4a. NCU still measured 1.093 B
 instructions, 52.00% long-scoreboard stalls, 0.88% tensor activity and
 72.22 M shared-load conflicts. Direct vector load plus register unpack did not
-shorten the feed dependency chain; E5 replaces that path with shared raw
-staging and shared-LUT decode.
+shorten the feed dependency chain; E5 replaced that path with shared raw
+staging, and E6 replaces its shared-LUT hot read with bitwise decode.
 
-### E4a baseline (historical, not an E5 qualification)
+### E4a baseline (historical, not an E6 qualification)
 
 On CMP 170HX hardware E4a compiled to 79 registers/thread, zero local spill,
 81,664 B dynamic shared and two active CTAs/SM. The complete correctness and
@@ -120,7 +140,7 @@ NCU retained 51.97% long-scoreboard stalls, only 0.88% tensor-pipe activity,
 and 72.22 M shared-load conflicts. E4b changed only raw-load vectorization
 and per-tile address-base preparation; the measured result above rejected it.
 
-### E3b baseline (historical, not an E5 qualification)
+### E3b baseline (historical, not an E6 qualification)
 
 The E3b padded source used 81,152 B dynamic shared memory and two CTAs/SM.
 Full correctness/high-block-ID passed.  The five-tier scan at
@@ -130,7 +150,7 @@ faster than E2 at long contexts but 3% slower at 4K and still 18-19x behind
 Triton.  NCU retained 52.26% long-scoreboard stalls, motivating E4a's shared
 LUT feed change.
 
-### E3a baseline (historical, not an E5 qualification)
+### E3a baseline (historical, not an E6 qualification)
 
 The padded E3a source used the same Q/K/V physical leading dimension of 264
 but retained a 16x256 FP32 temporary, for 83,200 B total.  On hardware it
@@ -141,7 +161,7 @@ one.  It regressed at every tier: 4K/70K/126K/200K/250K measured
 882.3/13,220.8/23,600.3/37,307.3/46,681.1 us per layer.  E3b recovered 2,048 B
 of temporary storage while preserving padding and restored two CTAs/SM.
 
-### E2 baseline (historical, not an E5 qualification)
+### E2 baseline (historical, not an E6 qualification)
 
 The unpadded E2 source used 81,920 B of dynamic shared memory and passed the
 complete correctness/high-block-ID gate after correcting P's compact stride
@@ -198,6 +218,9 @@ The bench JIT-builds `v7_verifier.cu` with `-gencode=arch=compute_80,code=sm_80`
 and tests 895/896/897-token boundaries, a 4097-token request, mixed request
 lengths, and int64 index/block-table dispatch.  Set `TORCH_EXTENSIONS_DIR` to
 a writable build cache if the default PyTorch extension cache is unsuitable.
+Every non-build invocation first runs the exported CUDA E4M3FN decoder helper
+over all 256 encodings, requiring finite BF16 bit equality with PyTorch and
+`isnan` equality plus canonical `0x7fc0` NaN bits.
 
 On a non-CUDA or non-SM80 workstation the bench exits with an explicit `SKIP`;
 that is expected and is not a kernel qualification result.

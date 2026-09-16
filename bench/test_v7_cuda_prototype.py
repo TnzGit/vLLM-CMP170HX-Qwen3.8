@@ -45,19 +45,44 @@ def build_extension(verbose: bool):
 def e4m3_lut(device):
     import torch
 
-    values = []
-    for code in range(256):
-        sign = -1.0 if code & 0x80 else 1.0
-        exponent = (code >> 3) & 0xF
-        mantissa = code & 0x7
-        if exponent == 0xF and mantissa == 0x7:
-            value = 0.0
-        elif exponent == 0:
-            value = mantissa * (2.0**-9)
-        else:
-            value = (1.0 + mantissa * 0.125) * (2.0 ** (exponent - 7))
-        values.append(sign * value)
-    return torch.tensor(values, device=device, dtype=torch.bfloat16)
+    codes = torch.arange(256, device=device, dtype=torch.uint8)
+    return codes.view(torch.float8_e4m3fn).to(torch.bfloat16)
+
+
+def check_e4m3_decoder(ext, device):
+    """Compare the device bit decoder against PyTorch for every encoding."""
+    import torch
+
+    codes = torch.arange(256, device=device, dtype=torch.uint8)
+    expected = codes.view(torch.float8_e4m3fn).to(torch.bfloat16)
+    actual = ext.decode_e4m3fn_bf16(codes)
+    torch.cuda.synchronize()
+    # CUDA does not implement boolean indexing for UInt16.  The audit is only
+    # 256 entries, so copy the semantic mask and raw bits to CPU before exact
+    # comparison rather than casting away the bit representation.
+    expected_bits = expected.view(torch.uint16).cpu()
+    actual_bits = actual.view(torch.uint16).cpu()
+    expected_nan = torch.isnan(expected).cpu()
+    actual_nan = torch.isnan(actual).cpu()
+    if not torch.equal(expected_nan, actual_nan):
+        raise AssertionError("E4M3FN decoder NaN mask differs from PyTorch")
+    finite = ~expected_nan
+    if not torch.equal(expected_bits[finite], actual_bits[finite]):
+        mismatch = torch.nonzero(
+            finite & (expected_bits != actual_bits), as_tuple=False
+        ).flatten()
+        first = int(mismatch[0].item())
+        raise AssertionError(
+            "E4M3FN decoder finite bit mismatch at "
+            f"code=0x{first:02x}: expected=0x{int(expected_bits[first]):04x} "
+            f"actual=0x{int(actual_bits[first]):04x}"
+        )
+    if expected_nan.any() and not torch.all(actual_bits[expected_nan] == 0x7FC0):
+        raise AssertionError("E4M3FN decoder NaNs are not canonical BF16 0x7fc0")
+    print(
+        "PASS exhaustive E4M3FN[256] device decode: finite BF16 bits exact; "
+        "NaNs match isnan and canonicalize to 0x7fc0"
+    )
 
 
 def quantize_fp8(x, scale):
@@ -88,10 +113,11 @@ def make_case(
     # zero-copy view of PyTorch's E4M3 bytes, not a new cache format.
     if physical_block_base:
         # Avoid materializing full FP32 staging tensors for the 4 GiB high-ID
-        # case.  Every raw byte is valid input to the fail-closed LUT decoder.
+        # case.  Keep this address-only test finite-only so NaN propagation does
+        # not obscure the int64 block-id check.
         shape = (physical_blocks, BLOCK, H_KV, D)
-        k_cache = torch.randint(0, 256, shape, device=device, dtype=torch.uint8)
-        v_cache = torch.randint(0, 256, shape, device=device, dtype=torch.uint8)
+        k_cache = torch.randint(0, 127, shape, device=device, dtype=torch.uint8)
+        v_cache = torch.randint(0, 127, shape, device=device, dtype=torch.uint8)
     else:
         k_src = torch.randn(
             physical_blocks, BLOCK, H_KV, D, device=device, dtype=torch.float32
@@ -278,6 +304,7 @@ def main() -> int:
     if args.build_only:
         print(f"PASS: built {SRC}")
         return 0
+    check_e4m3_decoder(ext, torch.device("cuda"))
 
     run_case(ext, [895], [5])
     run_case(ext, [896], [8])
