@@ -1857,7 +1857,7 @@ dispatch. Reduction-order differences require reference-based tolerances.
 The next gate is matched NCU attribution plus real API, two-request and
 CUDA-Graph A/B validation.
 
-### E35 NCU attribution (matched 4K/q=8 partial launch)
+### E35-A1 NCU attribution (matched 4K/q=8 partial launch)
 
 Old Nsight Compute 2022.4 successfully sampled E21 and E35 with identical
 launch selection. Kernel duration was 202.912 us (E21) versus 195.136 us
@@ -1868,7 +1868,7 @@ threads/grid 140, 81.856 KiB dynamic shared and a two-CTA limit; registers
 were 133 versus 164 per thread. The attribution supports a softmax
 instruction/serialization reduction, not an occupancy or cache-policy win.
 
-## Milestone V7-E36 — two-request API-shaped A/B (accepted)
+## Milestone V7-E35-Q1 — two-request API-shaped qualification (accepted)
 
 **Date:** 2026-09-17
 
@@ -1879,7 +1879,7 @@ max-error was 0.000000/0.000015/0.000000. E35 retains its gain under two
 requests, but this fixed adapter test is not a scheduler/vLLM integration
 result.
 
-## Milestone V7-E37 — two-request CUDA Graph capture/replay (accepted)
+## Milestone V7-E35-Q2 — two-request CUDA Graph capture/replay qualification (accepted)
 
 **Date:** 2026-09-17
 
@@ -1888,7 +1888,7 @@ E21 and E35. Eager versus graph-replay max absolute difference was 0.000000
 for each candidate. This proves capture safety for the standalone ABI only;
 graph pools and eager fallback are still required for arbitrary shapes.
 
-### E35 long-context NCU attribution (126K)
+### E35-A2 long-context NCU attribution (126K)
 
 Matched sampling measured 2.5264 ms for E21 and 2.3367 ms for E35, a 7.5%
 reduction. Compute-memory/DRAM/L1-TEX throughput was 54.66%/59.11%,

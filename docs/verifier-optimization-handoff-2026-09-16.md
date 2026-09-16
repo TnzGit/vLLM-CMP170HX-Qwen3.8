@@ -318,7 +318,7 @@ Nsight Compute accepts an unambiguous option form, then measure E35 through
 the real SpecDecodeAttention API. Do not merge it into production from
 standalone timing alone.
 
-### E35 NCU attribution (matched 4K/q=8 partial launch)
+### E35-A1 NCU attribution (matched 4K/q=8 partial launch)
 
 The old Nsight Compute 2022.4 CLI works when the application name precedes
 its arguments; the earlier failures were option-parser misuse. Matched
@@ -332,7 +332,7 @@ Thus E35's isolated gain is not an occupancy change or a cache-policy
 change; it is consistent with doing less serial softmax work while retaining
 the same memory geometry. This is still not an end-to-end vLLM result.
 
-### E36 — two-request API-shaped A/B (accepted)
+### E35-Q1 — two-request API-shaped qualification (accepted)
 
 Using the same standalone `SpecDecodeAttention` ABI with two requests
 (`q=5+8`) and request-private block-table rows, E35 remained faster than
@@ -342,7 +342,7 @@ max-error was 0.000000, 0.000015 and 0.000000 respectively. This confirms
 the half-warp mapping is request-safe in the fixed ABI; it does not yet
 prove scheduler or vLLM integration safety.
 
-### E37 — two-request CUDA Graph capture/replay (accepted)
+### E35-Q2 — two-request CUDA Graph capture/replay qualification (accepted)
 
 With fixed cache, query, block-table and workspace addresses, both E21 and
 E35 captured and replayed the two-request (`q=5+8`, 4K) sequence. Each
@@ -350,7 +350,7 @@ replay matched its eager output with max absolute difference 0.000000.
 This is a capture-safety result for the standalone adapter only; arbitrary
 scheduler shapes still require a graph pool or eager fallback.
 
-### E35 long-context NCU attribution (126K)
+### E35-A2 long-context NCU attribution (126K)
 
 Matched legacy Nsight Compute sampling of the same partial launch measured
 2.5264 ms for E21 and 2.3367 ms for E35 (7.5% lower). Compute-memory

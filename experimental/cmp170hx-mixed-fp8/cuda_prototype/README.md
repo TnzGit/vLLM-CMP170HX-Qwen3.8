@@ -675,7 +675,7 @@ Locked 1350MHz q=8/NSEG=35 medians improved 3.2%/6.6%/6.4% at
 4K/126K/250K. This is an isolated candidate only; matched API, multi-request
 and CUDA-Graph validation are required before dispatch integration.
 
-### E35 NCU attribution
+### E35-A1 NCU attribution
 
 Matched Nsight Compute sampling at locked 1350MHz measured 202.912 us for
 E21 and 195.136 us for E35 on the same 4K/q=8 partial launch. Compute-memory
@@ -685,7 +685,7 @@ L1/L2 hit rates 87.86%/87.93% and 55.19%/54.96% (E21/E35). Both retained
 133/164. The result supports a softmax-serialization reduction, not an
 occupancy or cache-policy change.
 
-### E36/E37 validation
+### E35-Q1/Q2 validation
 
 Two-request (`q=5+8`) E21/E35 A/B retained 6.60%/6.67%/6.75% E35 gains at
 4K/126K/250K with maximum reference error 0.000015. Fixed-address CUDA
@@ -693,7 +693,7 @@ Graph capture/replay passed for both candidates with maxdiff 0.000000.
 These are standalone ABI gates; scheduler shape management and production
 dispatch remain unvalidated.
 
-### 126K NCU attribution
+### E35-A2 126K NCU attribution
 
 Matched samples measured 2.5264 ms (E21) versus 2.3367 ms (E35). Throughput
 and cache metrics moved consistently with the 4K sample while launch/shared

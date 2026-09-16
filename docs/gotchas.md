@@ -1065,9 +1065,9 @@ spills) but improved locked-clock latency by only 1.8%/1.1%/1.2% at
     worked and showed the E35 gain without an occupancy or cache-policy
     change.
 
-98. **A standalone two-request pass is not scheduler integration.** V7-E36
+98. **A standalone two-request pass is not scheduler integration.** E35-Q1
     kept E35's 6.60%/6.67%/6.75% gain at 4K/126K/250K with private block
-    rows and max reference error 0.000015, while V7-E37 captured/replayed
+    rows and max reference error 0.000015, while E35-Q2 captured/replayed
     the fixed two-request shape with zero diff. These results justify keeping
     E35 as a research baseline, but production dispatch still needs shape-keyed
     graph handling, request-state refresh and an eager fallback.
