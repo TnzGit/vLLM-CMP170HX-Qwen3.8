@@ -1080,3 +1080,48 @@ E6 as the base for the next structural experiment. The next high-value target
 is repeated Q conversion/loading: each tile currently rebuilds all three
 16-row Q groups. A persistent-Q fragment design should be isolated from page
 staging so its register/residency trade is measurable.
+
+## Milestone V7-E11 — persistent Q WMMA fragments (major accepted scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `b35f4db`
+
+E11 returned to E6's per-tile page lookup, four-phase raw K/V staging and
+exact fail-closed bitwise FP8 decode, isolating one factor: Q preparation.
+Warps 0..2 each own one 16-row query group, convert Q once, load sixteen K16
+BF16 WMMA A fragments once, and keep those fragments in registers across the
+entire KV scan. Each owner warp computes both N16 score tiles; the three
+`16x32` score packs share the former raw-stage lifetime before per-group
+softmax and PV.
+
+The resource risk proved acceptable on CMP 170HX: 166 registers/thread, zero
+local bytes/spills, 81,664 bytes dynamic shared and two active CTAs/SM. The
+exhaustive decoder, q=5/6/7/8, page boundaries, mixed requests, int32/int64,
+8K/32K/65K and 4-GiB high-block-ID tests all passed; high-ID max error remained
+0.0625 (<0.08).
+
+| context | E6 repeated Q prep | E11 persistent Q | change |
+|---:|---:|---:|---:|
+| 4K | 378.5 | 346.5 first run; 272.4/326.4 repeats | no regression; noisy gain |
+| 70K | 4,957.3 | 3,397.3; 2,854.1; 3,129.6 | about -37% median |
+| 126K | 8,130.3 | 5,020.4; 5,012.3; 5,011.8 | about -38.3% |
+| 200K | 12,845.7 | 7,841.9; 7,859.0; 7,854.6 | about -38.9% |
+| 250K | 16,041.2 | 9,791.5; 9,787.3; 9,795.7 | about -38.9% |
+
+NCU at 126K confirmed the expected mechanism. Executed instructions fell
+711.7 M -> 447.44 M (-37.1%); long-scoreboard stalls fell 28.48% -> 9.28%;
+tensor-pipe activity rose 1.51% -> 2.41%. Tensor instruction count remained
+6.049 M and DRAM reads stayed about 258.24 MB, so the result did not come from
+skipping arithmetic or cache data. The newly exposed costs are barrier stalls
+at 29.52% and short-scoreboard stalls at 13.97%; shared-load/store conflicts
+remain about 63.514 M/31.097 M.
+
+**Accepted as the new isolated CUDA scaffold, not production dispatch.** E11
+passes the isolated admission threshold by a large margin, but remains roughly
+6.3x slower than the qualified Triton verifier at 126K/250K. The next
+scientific target is no longer page metadata or Q conversion: it is the
+serialized group softmax/PV/barrier schedule and short shared-memory
+dependency chain. Any E12 change must preserve E11's persistent fragments and
+measure barrier, short-scoreboard, tensor-active and conflict counters before
+production integration is considered.

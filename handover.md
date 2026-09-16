@@ -1352,6 +1352,7 @@ Completed milestones:
 | V7-E8 dual staging | current milestone | correct; 1-2% long gain, +7.7% 4K, rejected |
 | V7-E9b FP8x2-half bridge | current milestone | correct; -8.3% 4K but +2.8-3.0% long, rejected |
 | V7-E10a page-base staging | current milestone | correct; ~0.7-0.9% stable long gain, rejected |
+| V7-E11 persistent Q | current milestone | correct; ~38-39% stable long gain, accepted isolated scaffold |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
@@ -1364,10 +1365,14 @@ CUDA 13.0 toolkit has only FP8x2-to-half, not direct FP8x2-to-BF16: the bridge
 improved 4K 8.3% but regressed 126K-250K 2.8-3.0% and is rejected. E10a then
 tested split-local page bases independently. It passed every gate and retained
 two CTAs/SM, but the stable 126K-250K gain was only 0.7-0.9%, so it is also
-rejected for production admission. The next isolated target is persistent Q
-preparation/fragments: the current kernel reloads and rescales all three
-16-row Q groups for every KV tile. Do not combine that factor with E10a before
-it is independently qualified.
+rejected for production admission. E11 then isolated persistent Q preparation:
+166 registers/thread, zero spill, two CTAs/SM and all correctness/high-ID gates
+passed. It reduced stable 126K/200K/250K latency from E6's
+8.13/12.85/16.04 ms per layer to about 5.01/7.85/9.79 ms, with instructions
+down 37.1% and long-scoreboard stalls down to 9.28%. E11 is now the accepted
+isolated CUDA scaffold, not a production dispatch. The next owner should
+preserve persistent Q and target the newly dominant 29.52% barrier and 13.97%
+short-scoreboard costs in the serialized softmax/PV group schedule.
 Admission remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and
 <=2% 4K regression before full-model/CUDA Graph A/B.
 

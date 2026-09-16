@@ -865,3 +865,14 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     dominant feed cost; repeated Q preparation and FP8 decode remain much
     larger. Do not infer a large benefit merely because an independent kernel
     stages page IDs. Measure the fraction of instructions and stalls removed.
+
+72. **For small-query long-context verify, Q preparation must be outside the
+    KV-tile loop.** V7-E11 assigned one 16-row Q group to each of three warps
+    and retained sixteen BF16 WMMA A fragments per owner warp across the scan.
+    Despite rising from 79 to 166 registers/thread, shared memory remained the
+    occupancy limiter, so the kernel kept two CTAs/SM with zero spill. Stable
+    126K-250K latency improved about 38-39%, instructions fell 37%, and
+    long-scoreboard stalls fell 28.48% -> 9.28%. Register count by itself is
+    not a rejection criterion; calculate the actual occupancy limiter and
+    verify local bytes/spills. The next bottleneck is now barrier/short
+    dependency cost, not Q reload or global scoreboard.
