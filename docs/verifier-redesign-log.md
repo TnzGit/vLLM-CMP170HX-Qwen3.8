@@ -221,3 +221,66 @@ internal producer/consumer or row strip-mining scheme that continues to load
 each K/V tile once.  Before writing that larger kernel, close the cheap test
 gaps for q=6/7, production 896-page boundaries, and mixed query lengths so V2
 has a stronger admission harness.
+
+## Milestone V2 — strengthen the isolated correctness gate
+
+**Date:** 2026-09-16
+
+**Parent commit:** `958cd6d`
+
+**Changed file:** `bench/test_spec_decode_fp8_sm80.py`
+
+### Objective
+
+Close the low-cost correctness gaps identified during V0 before accepting a
+larger kernel redesign.  This milestone changes only the test harness; it does
+not modify or restart the qualified verifier implementation.
+
+### Added coverage
+
+- q=6 and q=7, covering both sides of the q8/GQA6 32+16 row split;
+- per-request mixed query lengths through explicit cumulative query offsets;
+- production page-boundary mode that defaults to and enforces block size 896;
+- a production-page mixed batch: KV lengths 895/896/897/4097 with query
+  lengths 5/8/6/1;
+- a high physical block ID derived from the actual block stride instead of a
+  block-size-64 constant;
+- VRAM estimation and a clear skip result if the high-ID allocation cannot fit.
+
+The enhanced high-ID test computes the first block whose element offset is
+above signed int32.  With the production geometry this is block 2341 at a
+917,504-element stride and about 4.00 GiB for the synthetic K/V allocations.
+
+### GPU result
+
+The baseline verifier passed on the CMP 170HX with:
+
+```bash
+python bench/test_spec_decode_fp8_sm80.py \
+  --production-page-boundaries --high-block-id
+```
+
+Key results:
+
+| case | maximum absolute error | result |
+|---|---:|---|
+| 895 / q5 | 0.00069 | pass |
+| 896 / q8 | 0.00078 | pass |
+| 897 / q8 | 0.00079 | pass |
+| mixed KV 895/896/897/4097, q 5/8/6/1 | 0.00066 | pass |
+| q6 | 0.00066 | pass |
+| q7 | 0.00054 | pass |
+| mixed KV 4097/1300/8192/64, q 5/8/6/1 | 0.00200 | pass |
+| 65,536 / q16 | 0.00011 | pass |
+| high block 2341, page 896 / q5 | 0.00096 | pass |
+
+All cases were below the existing 0.08 admission threshold.  The process
+completed without CUDA OOM or illegal access.  This milestone does not yet add
+automated Xid collection or true CUDA Graph capture/replay parity; those remain
+runtime gates for a candidate that survives isolated performance testing.
+
+### Handover
+
+This enhanced harness is now the minimum isolated correctness command for V3
+and later candidates.  A candidate must run from an isolated module/test-site;
+the production 896-page flag must not be omitted.
