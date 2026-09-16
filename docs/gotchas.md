@@ -983,3 +983,11 @@ occupancy. Correctness passed, but fixed-clock scans regressed 4K by about
 3.3% and improved 20K-250K by less than 1%, below the acceptance gate. Keep
 the compact E21 LUT representation unless a new access pattern changes this
 balance.
+
+85. **Overlapping V staging with owner compute is not useful if the copy loses
+parallelism.** V7-E24 used idle warp 3 to stage V while the owner warps ran
+QK/softmax, but that made the copy four times less parallel than the original
+all-thread stage. Correctness remained exact, yet fixed-clock latency regressed
+about 25% at 20K-250K. Keep E21's K-only prefetch and all-thread V stage unless
+a true multi-warp/double-buffer design preserves copy bandwidth without
+losing two-CTA occupancy.

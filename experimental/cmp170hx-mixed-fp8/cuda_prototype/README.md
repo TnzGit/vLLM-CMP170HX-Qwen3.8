@@ -591,3 +591,10 @@ reclaiming 512 bytes from the reserved temporary tail, preserving 81,856 B
 and two CTAs/SM. Correctness and high-ID checks passed, but three locked-clock
 scans regressed 4K by about 3.3% and improved 20K-250K by less than 1% versus
 E21. It is rejected and is not present in the current source.
+
+## V7-E24 warp-3 V prefetch (rejected)
+
+This candidate overlapped a warp-3 V copy with owner QK/softmax work, but the
+single-warp copy throughput was insufficient: two locked-clock scans regressed
+roughly 25% at medium/long context (about 5.29 ms/layer at 250K versus E21's
+4.22 ms). Correctness passed, but the source was restored to E21.

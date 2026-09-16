@@ -1608,3 +1608,28 @@ us/layer:
 The small long-context difference is below the single-factor acceptance gate,
 while the short-tier regression is clear enough to reject the candidate. The
 source and accepted isolated scaffold remain E21; no production code changed.
+
+## Milestone V7-E24 — warp-3 V prefetch (rejected negative control)
+
+**Date:** 2026-09-16
+
+E24 moved V staging after K decode and used idle warp 3 to copy the current
+tile's V bytes while owner warps computed QK/softmax, followed by a barrier and
+V decode before PV. The candidate passed exhaustive decoding, mixed-request,
+int64/high-ID and numerical checks with unchanged 133 registers/thread,
+81,856 B shared and two CTAs/SM.
+
+Two locked-1350MHz scans nevertheless showed a large, repeatable regression:
+
+| context | E21 | E24 | change |
+|---:|---:|---:|---:|
+| 4K | 186.1 | 192.2 | +3.3% |
+| 20K | 479.0 | 556.8 | +16.2% |
+| 60K | 1,136.3 | 1,389.5 | +22.3% |
+| 126K | 2,205.6 | 2,740.4 | +24.2% |
+| 200K | 3,403.6 | 4,252.4 | +24.9% |
+| 250K | 4,218.6 | 5,288.1 | +25.3% |
+
+The single-warp V copy loses the original all-thread staging bandwidth; the
+overlap does not compensate. **Rejected.** The source was restored to E21 and
+no production code changed.

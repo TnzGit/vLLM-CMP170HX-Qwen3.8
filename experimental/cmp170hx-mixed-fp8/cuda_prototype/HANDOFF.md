@@ -433,3 +433,13 @@ us/layer at 4K/20K/60K/126K/200K/250K was 192.2/475.0/1,128.5/2,188.2/
 3,375.9/4,182.8 versus E21's 186.1/479.0/1,136.3/2,205.6/3,403.6/4,218.6:
 long-context change was only 0.7-0.9% while 4K regressed 3.3%. The candidate
 is rejected as below the single-factor gate; source remains E21.
+
+## V7-E24 warp-3 V prefetch (rejected negative control)
+
+E24 moved V staging after K decode and let warp 3 copy the current tile's V
+bytes while owner warps computed QK/softmax, then decoded V before PV. Full
+correctness and high-ID checks passed with unchanged 133-register, 81,856-B,
+two-CTA resources. However, a single warp's V copy is four times less
+parallel than the original all-thread stage; two locked-clock scans regressed
+about 25% at 20K-250K (250K about 5.29 ms/layer versus E21's 4.22 ms).
+The candidate is rejected and the isolated source has been restored to E21.
