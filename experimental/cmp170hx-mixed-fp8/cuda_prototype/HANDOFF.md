@@ -483,6 +483,13 @@ Only the q8 K/V tile width changed to 64. Locked-1350MHz q=8/NSEG=35
 latency was 59.5/1278.5/2502.7 us/layer versus 53.6/775.7/1533.3 at
 4K/126K/250K, with identical output. The wider tile is rejected.
 
+## V7-E30 q8 arithmetic E4M3 decode (rejected)
+
+Replacing the q8 256-entry LUT with arithmetic sign/exponent/mantissa decode
+passed finite output checks but regressed locked-clock latency by 12% at 4K
+and 73-75% at 126K/250K (64.2/1349.6/2658.2 versus 57.1/772.2/1532.7
+us/layer). No source change kept.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with

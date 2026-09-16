@@ -1728,6 +1728,26 @@ Outputs were identical, but the wider tile increased register/live-state
 pressure and was much slower. The candidate is rejected; TILE=32 remains
 qualified.
 
+## Milestone V7-E30 — q8 arithmetic E4M3 decode (rejected)
+
+**Date:** 2026-09-16
+
+To reduce LUT traffic, an isolated module replaced the q8 kernel's 256-entry
+E4M3FN LUT lookup with integer sign/exponent/mantissa extraction and `exp2`.
+Global K/V loads, four-warps launch, TILE=32, NSEG=35 and the attention
+algorithm were unchanged. At locked 1350MHz (q=8, 30 warmups, 100
+iterations), latency in us/layer was:
+
+| context | LUT | arithmetic | change |
+|---:|---:|---:|---:|
+| 4K | 57.1 | 64.2 | +12.4% |
+| 126K | 772.2 | 1,349.6 | +74.8% |
+| 250K | 1,532.7 | 2,658.2 | +73.4% |
+
+The arithmetic module produced finite, internally consistent outputs, but the
+extra integer/exp2 instructions overwhelm any LUT-load reduction. It is
+rejected and no qualified source changed.
+
 ## Milestone V7-E25 — cp.async K prefetch (rejected negative control)
 
 **Date:** 2026-09-16

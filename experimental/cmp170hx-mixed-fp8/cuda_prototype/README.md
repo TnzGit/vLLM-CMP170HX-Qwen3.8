@@ -634,3 +634,8 @@ Eight warps were 22-78% slower than the qualified four-warps launch across
 
 TILE=64 was 11% slower at 4K and about 63-65% slower at 126K/250K under
 locked clocks, with identical output. The qualified TILE=32 source remains.
+
+## V7-E30 q8 arithmetic E4M3 decode (rejected)
+
+Arithmetic E4M3FN decoding was 12% slower at 4K and about 73-75% slower at
+126K/250K under locked clocks. The LUT path remains qualified.
