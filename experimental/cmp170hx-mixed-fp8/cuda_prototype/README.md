@@ -624,3 +624,8 @@ staging, rather than occupancy, is the likely cost center.
 An isolated `.cg` modifier on the q8 global K/V loads was numerically
 identical but changed locked-clock latency by only -0.2%/-1.2%/+0.5% at
 4K/126K/250K. It is not present in the qualified source.
+
+## V7-E28 q8 warp count 4→8 (rejected)
+
+Eight warps were 22-78% slower than the qualified four-warps launch across
+4K/126K/250K at locked clocks, with identical output. No source change kept.

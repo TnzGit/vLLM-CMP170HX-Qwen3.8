@@ -1010,3 +1010,8 @@ dispatch.
 V7-E27 applied `.cg` only to the q8 global K/V loads. Locked-clock results
 changed by -0.2%/-1.2%/+0.5% at 4K/126K/250K, with identical output. Keep the
 existing cache policy unless a workload-specific trace shows L1 pollution.
+
+89. **More warps can be a severe regression for the q8 specialization.**
+V7-E28 changed only the launch from four to eight warps; locked-clock latency
+was 22-78% worse at 4K/126K/250K with identical output. Keep four warps and
+measure resource/launch effects before increasing parallelism.

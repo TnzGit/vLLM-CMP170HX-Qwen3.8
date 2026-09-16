@@ -462,6 +462,13 @@ the same numerical output. Locked-1350MHz q=8/NSEG=35 results (us/layer)
 were 53.7/774.6/1529.6 current versus 53.6/765.2/1537.2 with `.cg` at
 4K/126K/250K. The mixed ±1.2% result is below the gate; source remains E21.
 
+## V7-E28 q8 warp count 4→8 (rejected)
+
+Changing only the q8 launch to eight warps produced 66.4/1379.2/2708.1
+us/layer versus 54.6/776.1/1548.1 at 4K/126K/250K (locked 1350MHz,
+q=8/NSEG=35). Output was identical, but the candidate regressed 22-78% and
+was rejected.
+
 NCU on the same partial launch measured Triton q8 at 895 us, 73.53% memory
 throughput and 16.30% DRAM throughput, versus E21 at 2.52 ms, 54.65% and
 5.79%. Both were 128-thread/grid-140 launches with 12.5% theoretical

@@ -1681,6 +1681,24 @@ Outputs were numerically identical. The long-context change is below the
 2% acceptance gate and the direction is not consistent across lengths, so
 the candidate is rejected; the qualified q8 source remains unchanged.
 
+## Milestone V7-E28 — q8 warp count 4→8 (rejected)
+
+**Date:** 2026-09-16
+
+This isolated test changed only the q8 Triton launch from four warps to eight;
+the kernel code, global FP8/LUT loads, TILE=32 and NSEG=35 were unchanged.
+At locked 1350MHz (q=8, 30 warmups, 100 iterations), results in us/layer
+were:
+
+| context | 4 warps | 8 warps | change |
+|---:|---:|---:|---:|
+| 4K | 54.6 | 66.4 | +21.6% |
+| 126K | 776.1 | 1,379.2 | +77.7% |
+| 250K | 1,548.1 | 2,708.1 | +74.9% |
+
+Numerical output was identical. The larger launch is a clear regression and
+was rejected; the qualified source remains four warps.
+
 An NCU default-set sample of the same partial launch (126K, q=8, NSEG=35)
 explains the gap. Triton q8 took 895 us under profiling with 73.53% memory
 throughput, 16.30% DRAM throughput, 252 registers/thread and 57.34 KiB dynamic
