@@ -1241,3 +1241,42 @@ the 5% gate from 20K through 250K and does not regress 4K/10K. The earlier
 unlocked run that appeared to regress 4K/70K was discarded as a clock-state
 confounder. Production integration is still a separate milestone because the
 standalone V7 kernel remains disconnected from dispatch.
+
+## Milestone V7-E14 — padded BF16 P rows (accepted secondary scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `7fefb58`
+
+E14 preserves E13b's FP32 score `ld=36` and changes only the logical BF16 P
+operand used by the PV WMMA loads. Each `[16,32]` P group is physically
+`[16,40]`, with `ld=40` valid for BF16 WMMA. The three padded packs consume
+3,840 bytes inside the retained 14,336-byte temporary allocation; ABI,
+logical output and total dynamic shared memory are unchanged.
+
+Resources remained 164 registers/thread, zero local bytes/spills, 81,664
+bytes shared and two active CTAs/SM. Exhaustive decode, full correctness and
+the 4-GiB high-block-ID test passed.
+
+The final A/B locked graphics clocks at 1350MHz and used 300 timed iterations:
+
+| context | E13b median us/layer | E14 median us/layer | change |
+|---:|---:|---:|---:|
+| 4K | 245.7 | 240.1 | -2.3% |
+| 20K | 778.5 | 751.8 | -3.4% |
+| 60K | 2,032.1 | 1,966.0 | -3.3% |
+| 126K | 4,075.0 | 3,945.8 | -3.2% |
+| 200K | 6,367.0 | 6,172.1 | -3.1% |
+| 250K | 7,927.3 | 7,689.2 | -3.0% |
+
+NCU at 126K measured 447.13 M instructions, 6.049 M tensor instructions,
+3.33% tensor activity, 14.62% barrier, 10.83% long scoreboard, 14.80% short
+scoreboard, 0.09% MIO throttle, 9.081 M/14.486 M shared load/store conflicts
+and 258.53 MB DRAM read. Relative to E13b, shared-load conflicts fell about
+67% and store conflicts about 39%; the runtime gain is smaller because the
+remaining time is dominated by global K/V feed and WMMA work.
+
+**Accepted as a secondary isolated scaffold.** The incremental gain is below
+the original 5% single-factor gate, but it is repeatable, has no correctness
+or occupancy cost, and compounds with E13b to roughly 9-10% over E12. Keep it
+isolated until the remaining accumulator-store dependency is measured.

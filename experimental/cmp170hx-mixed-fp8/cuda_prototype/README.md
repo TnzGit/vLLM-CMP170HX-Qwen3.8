@@ -54,6 +54,21 @@ scoreboard, 0.10% MIO throttle, 27.230 M/23.571 M shared load/store conflicts
 and 258.22 MB DRAM read. E13b is accepted as the new isolated scaffold, but
 remains disconnected from production dispatch.
 
+## V7-E14 padded BF16 P rows (accepted secondary scaffold)
+
+E14 keeps E13b's FP32 score `ld=36` and pads each logical BF16 P row from 32 to
+40 elements (`ld=40`) for the PV WMMA loads. The three physical P packs occupy
+3,840 B within the existing 14,336-B temporary allocation. Resources remain
+164 registers/thread, zero local bytes/spills, 81,664 B shared and two CTAs/SM;
+all correctness and high-block-ID gates pass.
+
+With graphics clocks locked at 1350MHz, the E14 medians (us/layer) were 240.1
+(4K), 751.8 (20K), 1,966.0 (60K), 3,945.8 (126K), 6,172.1 (200K) and 7,689.2
+(250K), a further 2.3-3.4% over E13b. NCU at 126K measured 9.081 M shared
+loads and 14.486 M stores, 3.33% tensor activity, 14.62% barrier and 14.80%
+short-scoreboard stalls. E14 is accepted as an isolated secondary scaffold,
+not production dispatch.
+
 ## V7-E13a padded PV scratch (correct; rejected)
 
 E13a changed only each owner warp's FP32 WMMA scratch from physical

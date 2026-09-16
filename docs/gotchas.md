@@ -902,3 +902,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     falsely suggested short-tier regressions because Boost state differed. Lock
     or interleave clocks for kernel A/B; never choose dispatch from sequential
     auto-Boost samples.
+
+76. **P-row padding can remove shared conflicts without changing KV traffic.**
+    V7-E14 kept score `ld=36` and padded the BF16 P operand from `ld=32` to
+    `ld=40`. At 126K, shared-load conflicts fell 67% and store conflicts 39%,
+    while latency improved a further 3.2% with identical resources and exact
+    outputs. The smaller wall-time gain shows that conflict counters are a
+    bottleneck diagnostic, not a direct speedup forecast.
