@@ -456,3 +456,80 @@ shared memory while leaving the persistent 48x256 accumulator intact.
 lifetime.  The patch remains outside the active series.  V6 tests an explicit
 16+16+16 row organization in one Triton program; acceptance depends entirely
 on generated resources and isolated latency, not source-level appearance.
+
+## Milestone V6 — explicit 16+16+16 row split (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `dbb30ef`
+
+**Candidate patch:**
+
+```text
+experimental/cmp170hx-mixed-fp8/candidates/
+  spec-decode-fp8-q8-3x16.patch
+```
+
+### Hypothesis
+
+The qualified q8/GQA6 verifier keeps a 32-row and a 16-row accumulator alive
+through the KV loop.  Re-expressing the same 48 rows as three explicit 16-row
+groups might let Triton schedule shorter score/softmax temporaries while still
+loading each K/V tile exactly once.  The launch stayed at 4 warps, NSEG35 and
+`num_stages=1`; page carry, int64 block IDs and the external workspace were
+unchanged.
+
+### Correctness gate
+
+The candidate passed the strengthened isolated suite on the CMP 170HX:
+
+- q=5/6/7/8 and the generic q=16 path;
+- KV lengths 895/896/897 around the production 896-token page boundary;
+- mixed request/query batches;
+- 65,536-token KV and q=16;
+- physical block ID 2341, which places the synthetic cache above a signed
+  int32 element offset and requires about 4.00 GiB.
+
+Maximum absolute error remained <=0.00200 and no CUDA illegal access or OOM
+occurred.
+
+### Generated resources
+
+| kernel | registers/thread | local/stack | dynamic shared |
+|---|---:|---:|---:|
+| qualified 32+16 | 250 | 0 | 43,008 B |
+| candidate 16+16+16 | 248 | 0 | 57,344 B |
+
+The source-level grouping did not shorten the persistent accumulator lifetime:
+all three 16x256 accumulators coexist for the full KV loop.  It saved only two
+registers/thread and caused Triton to allocate 14,336 additional shared bytes.
+
+### Interleaved performance
+
+Values are microseconds per layer, 10 warmups and 100 measured iterations.
+
+| round | 126K baseline | candidate | 250K baseline | candidate |
+|---:|---:|---:|---:|---:|
+| 1 | 759.1 | 833.1 | 1529.4 | 1662.1 |
+| 2 | 814.6 | 1010.7 | 1540.2 | 1848.9 |
+| 3 | 842.9 | 981.8 | 1540.5 | 1781.9 |
+
+The three-round mean regressed by about 16.9% at 126K and 14.8% at 250K.
+An initial five-context scan also lost at every tier: 56.2/477.4/842.2/
+1291.9/1690.2 us at 4K/70K/126K/200K/250K.
+
+### Decision
+
+**Rejected before full-model or CUDA Graph testing.**  Merely changing the
+source grouping does not alter the lifetime of the 48x256 running state.  The
+candidate is retained as an auditable negative result and remains outside the
+active series.
+
+### Next milestone
+
+The remaining material path is no longer another Triton launch hint.  V7 is a
+standalone fixed-geometry CUDA C++ prototype that explicitly separates FP8 K/V
+staging from the 48-row computation and exposes the real resource budget.  It
+must first reproduce the enhanced correctness suite and report registers,
+shared memory, local spill and eligible-warps behavior before any vLLM dispatch
+integration.  The qualified Triton verifier remains the service baseline.

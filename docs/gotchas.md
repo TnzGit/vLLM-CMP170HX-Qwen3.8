@@ -751,3 +751,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     still spans the whole loop; compiler scheduling hints cannot make that state
     disappear.  Keep normal LICM and move structural experiments to explicit
     row partitioning or a custom CUDA producer/consumer kernel.
+
+59. **Three smaller source groups are still one long-lived 48-row state.**  A
+    q8/GQA6 rewrite from 32+16 rows to 16+16+16 passed every strengthened
+    correctness case, but Triton kept all three 16x256 accumulators live across
+    the KV loop.  It compiled to 248 registers/thread and 57,344 bytes shared,
+    versus 250 and 43,008 for the qualified kernel, then regressed interleaved
+    126K/250K latency by about 16.9%/14.8%.  Source grouping is not lifetime
+    control; further work needs an explicit storage/synchronization design.

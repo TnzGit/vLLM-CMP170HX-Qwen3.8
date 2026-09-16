@@ -1320,3 +1320,33 @@ Before declaring production-ready or removing Draft status:
 4. preserve and publish raw benchmark/log artifacts for the longer tiers;
 5. decide whether the explicit FULL graph flag should remain experimental by
    default (recommended) or graduate into a shipped CMP profile.
+
+## 18. Verifier redesign handover (2026-09-16)
+
+The qualified 4-warp/NSEG35 Triton verifier remains unchanged.  The redesign
+work is append-only and each experiment is preserved as a candidate patch plus
+measured decision in `docs/verifier-redesign-log.md`.
+
+Completed milestones:
+
+| milestone | commit | result |
+|---|---|---|
+| V0 baseline freeze | `1231ccf` | verifier share and roofline frozen |
+| V1 Triton stages 2/3 | `958cd6d` | rejected; shared-memory growth |
+| V2 correctness gate | `030f941` | accepted test-only improvement |
+| V3 8-warp/NSEG factorial | `f75a362` | rejected; one CTA/SM |
+| V4 FP16 partial workspace | `e327b48` | rejected; 5-15% slower |
+| V5 disable LICM | `dbb30ef` | rejected; no occupancy change |
+| V6 explicit 3x16 rows | current milestone | rejected; 15-17% slower |
+
+The service was deliberately stopped for isolated GPU testing.  Restore
+`cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
+finished.  No rejected candidate is present in the active patch series or the
+qualified service tree.
+
+The next owner should begin with V7 as a standalone fixed-geometry CUDA C++
+prototype, not by editing the production dispatch.  Required gates are the V2
+correctness suite, zero local spill, a credible two-CTA resource budget, >=5%
+isolated gain at 126K/250K, <=2% 4K regression, then full-model and CUDA Graph
+A/B.  If the prototype cannot meet the isolated gate, stop without touching
+the qualified service.
