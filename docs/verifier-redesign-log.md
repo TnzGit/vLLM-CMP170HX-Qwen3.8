@@ -1581,3 +1581,30 @@ launch geometry. A vLLM adapter must maintain graph variants keyed by capture
 shape, refresh request-local block tables before replay, and use eager fallback
 for unsupported scheduler shapes. This is a validation gate, not a production
 integration or throughput claim.
+
+## Milestone V7-E23 — aligned 32-bit LUT container (rejected negative control)
+
+**Date:** 2026-09-16
+
+E23 changed only the shared LUT representation: each BF16 value was stored in
+an aligned 32-bit slot, while 512 bytes were reclaimed from the reserved
+temporary tail so the total dynamic shared allocation remained 81,856 B and
+two CTAs/SM. Exhaustive decoding, mixed requests and the high-ID case passed
+(maximum error 0.0625, below the 0.08 threshold); resources remained 133
+registers/thread, zero local bytes/spills and two active CTAs/SM.
+
+Three locked-1350MHz scans (query=8, 300 iterations) produced medians in
+us/layer:
+
+| context | E21 | E23 | change |
+|---:|---:|---:|---:|
+| 4K | 186.1 | 192.2 | +3.3% |
+| 20K | 479.0 | 475.0 | -0.8% |
+| 60K | 1,136.3 | 1,128.5 | -0.7% |
+| 126K | 2,205.6 | 2,188.2 | -0.8% |
+| 200K | 3,403.6 | 3,375.9 | -0.8% |
+| 250K | 4,218.6 | 4,182.8 | -0.8% |
+
+The small long-context difference is below the single-factor acceptance gate,
+while the short-tier regression is clear enough to reject the candidate. The
+source and accepted isolated scaffold remain E21; no production code changed.

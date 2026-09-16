@@ -583,3 +583,11 @@ windows, softcaps, ALiBi, sinks, DCP, CUDA graph integration, or FlashInfer
 dispatch.  The high-block-ID arithmetic is present and int64-dispatched, but a
 true sparse high-ID GPU run needs a physically large/specially allocated KV
 pool and is not fabricated by the local bench.
+
+## V7-E23 aligned 32-bit LUT container (rejected)
+
+E23 stored each BF16 LUT entry in an aligned 32-bit shared slot while
+reclaiming 512 bytes from the reserved temporary tail, preserving 81,856 B
+and two CTAs/SM. Correctness and high-ID checks passed, but three locked-clock
+scans regressed 4K by about 3.3% and improved 20K-250K by less than 1% versus
+E21. It is rejected and is not present in the current source.

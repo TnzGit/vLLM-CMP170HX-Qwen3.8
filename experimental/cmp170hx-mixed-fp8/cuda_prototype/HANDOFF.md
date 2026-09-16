@@ -419,3 +419,17 @@ q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic
 
 No production files, active-series entries or qualified test-site files were
 changed.
+
+## V7-E23 aligned 32-bit LUT container (rejected negative control)
+
+E23 repacked each BF16 LUT value into an aligned 32-bit shared slot, reclaiming
+the unused 512-byte temporary tail so total dynamic shared memory and
+occupancy stayed unchanged. Full correctness, mixed requests and the high
+block-ID gate passed (maximum error 0.0625, below the 0.08 limit), with 133
+registers/thread, 81,856 B shared and two CTAs/SM.
+
+Three locked-1350MHz scans were not a meaningful improvement over E21. Median
+us/layer at 4K/20K/60K/126K/200K/250K was 192.2/475.0/1,128.5/2,188.2/
+3,375.9/4,182.8 versus E21's 186.1/479.0/1,136.3/2,205.6/3,403.6/4,218.6:
+long-context change was only 0.7-0.9% while 4K regressed 3.3%. The candidate
+is rejected as below the single-factor gate; source remains E21.

@@ -975,3 +975,11 @@ captured the E21 `partial`+`combine` sequence for two requests
 not that one graph can serve arbitrary scheduler batches. Integration must
 maintain a graph pool keyed by capture shape (and refresh request-local block
 tables before replay), with eager fallback for misses.
+
+84. **Aligning LUT entries is not automatically worth a shared-memory budget
+trade.** V7-E23 repacked the 256 BF16 entries into aligned 32-bit slots and
+reclaimed the reserved temporary tail, preserving 81,856 B and two-CTA
+occupancy. Correctness passed, but fixed-clock scans regressed 4K by about
+3.3% and improved 20K-250K by less than 1%, below the acceptance gate. Keep
+the compact E21 LUT representation unless a new access pattern changes this
+balance.
