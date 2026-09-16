@@ -894,10 +894,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     favorable. Measure the whole producer/consumer chain; do not optimize one
     side's bank map in isolation.
 
-75. **Score-row padding can be a long-context win and a short-context loss.**
-    V7-E13b padded FP32 score rows from 32 to 36 columns while restoring E12's
-    dense PV scratch. At 126K, shared-load conflicts fell about 61%,
-    short-scoreboard stalls fell 21.01% -> 15.85%, and 126K-250K latency
-    improved 6.7-6.9%. Fixed overhead and extra addressing made 4K/70K
-    14-20% slower. Qualify a context-length crossover and dispatch by shape;
-    do not promote a long-scan layout globally.
+75. **Score-row padding is only measurable under controlled clocks.** V7-E13b
+    padded FP32 score rows from 32 to 36 columns while restoring E12's dense PV
+    scratch. With the CMP170HX locked at 1350MHz, latency improved 3.7-6.8%
+    from 4K through 250K; at 126K shared-load conflicts fell about 61% and
+    short-scoreboard stalls fell 21.01% -> 15.85%. An earlier unlocked run
+    falsely suggested short-tier regressions because Boost state differed. Lock
+    or interleave clocks for kernel A/B; never choose dispatch from sequential
+    auto-Boost samples.

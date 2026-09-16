@@ -1,10 +1,11 @@
 # V7 prototype handoff
 
-Status: V7-E13b padded-score-row factorial is accepted as a long-context-only
-candidate. It restores E12's dense PV scratch and changes only FP32 score rows
-from `ld=32` to `ld=36`. Stable 126K-250K latency improves 6.7-6.9%, but
-4K/70K regress 14-20%; measure the 80K-120K crossover before considering
-length-aware dispatch. Production dispatch remains untouched.
+Status: V7-E13b padded-score-row factorial is accepted as the new isolated
+scaffold. It restores E12's dense PV scratch and changes only FP32 score rows
+from `ld=32` to `ld=36`. A locked-clock A/B improved every tested tier by
+3.7-6.8% (4K through 250K), with full correctness and resource gates passing.
+The earlier unlocked short-tier regression was a Boost-state confounder and is
+not evidence against E13b. Production dispatch remains untouched.
 
 Files:
 

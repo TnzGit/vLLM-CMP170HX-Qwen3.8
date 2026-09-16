@@ -1196,7 +1196,7 @@ correctness and the 4-GiB high-block-ID test passed.
 less favorable bank phase. Restore E12 and target the FP32 score-pack read
 layout independently; do not combine score and scratch padding in one factor.
 
-## Milestone V7-E13b — padded FP32 score rows (accepted long-context candidate)
+## Milestone V7-E13b — padded FP32 score rows (accepted isolated scaffold)
 
 **Date:** 2026-09-16
 
@@ -1206,19 +1206,27 @@ E13b restores E12's dense `ld=16` PV scratch and changes only the FP32 score
 pack. Each logical `[16,32]` group uses physical `ld=36`; WMMA stores and the
 scalar online-softmax reads share that stride. The four-column pad rotates
 successive rows across shared-memory banks. Three packs occupy 6,912 bytes and
-still end at byte 7,936 of the 8,192-byte raw-stage alias.
+still end at byte 7,936 of the 8,192-byte raw-stage alias. The final A/B was
+run with graphics clocks locked to 1350MHz so automatic Boost could not bias
+the comparison; the lock was removed after testing.
 
 Resources remained 164 registers/thread, zero local bytes/spills, 81,664
 bytes shared and two active CTAs/SM. Exhaustive decode, full correctness and
 the 4-GiB high-block-ID test passed.
 
-| context | E12 median us/layer | E13b median us/layer | change |
+| context | E12 @1350 median us/layer | E13b @1350 median us/layer | change |
 |---:|---:|---:|---:|
-| 4K | 241.7 | 290.4 | +20.1% |
-| 70K | 2,382.8 | 2,713.9 | +13.9% |
-| 126K | 4,046.5 | 3,767.8 | -6.9% |
-| 200K | 6,304.6 | 5,883.6 | -6.7% |
-| 250K | 7,876.7 | 7,348.3 | -6.7% |
+| 4K | 255.2 | 245.7 | -3.7% |
+| 10K | 482.1 | 460.4 | -4.5% |
+| 20K | 823.2 | 778.5 | -5.4% |
+| 40K | 1,495.2 | 1,406.6 | -5.9% |
+| 60K | 2,168.3 | 2,032.1 | -6.3% |
+| 64K | 2,316.5 | 2,169.7 | -6.3% |
+| 70K | 2,502.9 | 2,343.3 | -6.4% |
+| 90K | 3,175.2 | 2,964.6 | -6.6% |
+| 126K | 4,371.4 | 4,075.0 | -6.8% |
+| 200K | 6,824.2 | 6,367.0 | -6.7% |
+| 250K | 8,499.7 | 7,927.3 | -6.7% |
 
 NCU at 126K validates the mechanism. Shared-load conflicts fell
 69.558 M -> 27.230 M (-60.9%), short-scoreboard stalls fell
@@ -1228,7 +1236,8 @@ NCU at 126K validates the mechanism. Shared-load conflicts fell
 436.54 M -> 447.13 M, but the dependency reduction more than paid for the
 extra padded addressing at long context.
 
-**Accepted only as a long-context candidate.** It clears the 5% gate from
-126K through 250K but regresses 4K/70K. Before any production integration,
-measure the 80K-120K crossover and add length-aware dispatch between E12 and
-E13b; do not replace E12 globally.
+**Accepted as the new isolated scaffold.** Under controlled clocks it clears
+the 5% gate from 20K through 250K and does not regress 4K/10K. The earlier
+unlocked run that appeared to regress 4K/70K was discarded as a clock-state
+confounder. Production integration is still a separate milestone because the
+standalone V7 kernel remains disconnected from dispatch.

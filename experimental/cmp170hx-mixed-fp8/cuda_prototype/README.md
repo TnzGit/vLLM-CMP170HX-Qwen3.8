@@ -32,7 +32,7 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
-## V7-E13b padded score rows (accepted long-context candidate)
+## V7-E13b padded score rows (accepted isolated scaffold)
 
 E13b restores E12's dense FP32 PV scratch and changes only each owner's score
 pack from logical/physical `[16,32]` to logical `[16,32]`, physical
@@ -41,17 +41,18 @@ Resources stayed at 164 registers/thread, zero local bytes/spills, 81,664 B
 shared and two CTAs/SM; full correctness and the 4-GiB high-block-ID gate
 passed.
 
-Three 4K/70K/126K/200K/250K runs measured
-290.6/2,663.4/3,763.4/5,883.6/7,348.3 us,
-286.8/2,713.9/3,767.8/5,907.6/7,350.2 us and
-290.4/2,747.5/3,782.5/5,882.1/7,341.0 us per layer. Relative to E12 medians,
-126K/200K/250K improve 6.9%/6.7%/6.7%, while 4K/70K regress 20.1%/13.9%.
+With graphics clocks locked to 1350MHz, three high-iteration runs measured
+the following E13b medians (us/layer): 4K 245.7, 10K 460.4, 20K 778.5,
+40K 1,406.6, 60K 2,032.1, 64K 2,169.7, 70K 2,343.3, 90K 2,964.6,
+126K 4,075.0, 200K 6,367.0 and 250K 7,927.3. Against matched E12 lock
+baselines, the gains are 3.7-6.8% at every tier. An earlier unlocked run was
+discarded because Boost-state drift reversed the short-tier comparison.
 
 At 126K, NCU measured 447.13 M instructions, 6.049 M tensor instructions,
 3.24% tensor activity, 14.83% barrier, 11.46% long scoreboard, 15.85% short
 scoreboard, 0.10% MIO throttle, 27.230 M/23.571 M shared load/store conflicts
-and 258.22 MB DRAM read. E13b is accepted only as a long-context candidate;
-measure the 80K-120K crossover before any length-aware production dispatch.
+and 258.22 MB DRAM read. E13b is accepted as the new isolated scaffold, but
+remains disconnected from production dispatch.
 
 ## V7-E13a padded PV scratch (correct; rejected)
 
