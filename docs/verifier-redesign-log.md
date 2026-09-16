@@ -1015,3 +1015,25 @@ when the public API stops at half2. Preserve E6 as the performance base and
 E8's corrected invalid-code semantics. The next independent experiment is
 split-local physical-page/base staging; do not combine it with this rejected
 conversion bridge.
+
+## Reference audit — `Ithrial/ninfer-cmp170hx`
+
+**Date:** 2026-09-16
+
+This repository is a genuine SM80 build/runtime port, but it is not an FP8
+verifier source. Its Qwen3.8 path uses groupwise integer weights and BF16 or
+INT8-G64 KV attention. The source contains the useful independent topology of
+one CTA per KV head, all six GQA query heads, split-KV partial/reduce, 32/64-key
+tiles, online softmax and segment-local physical-page ID staging.
+
+The port must not be copied as a performance implementation. Its current
+geometry still defines `DecodeSplits = 85` and retains comments/policies tuned
+for a 170-SM parent GPU rather than this 70-SM CMP. Public controlled A/B data
+also reports about 38.16 tok/s with MTP versus 138.6 tok/s for the vLLM+DFlash2
+control. It has no SM80 FP8 KV/verifier kernel; later native FP8 MMA paths in
+the NInfer lineage are Blackwell-only.
+
+Use it as a correctness and dataflow reference for CTA ownership, page-list
+staging and an optional INT8 control. Do not transplant its cache ABI, 64-token
+page geometry, groupwise quantization, split constants or native-FP8 path into
+the 896-token static-FP8 verifier.

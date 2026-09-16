@@ -1364,3 +1364,10 @@ improved 4K 8.3% but regressed 126K-250K 2.8-3.0% and is rejected. Next test
 split-local page IDs/bases as an independent factorial.
 Admission remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and
 <=2% 4K regression before full-model/CUDA Graph A/B.
+
+Reference note: `Ithrial/ninfer-cmp170hx` is a real SM80 serving port but its
+verifier is BF16/INT8-G64, not FP8. It independently validates the one-KV-head
+CTA, all-GQA-rows and split-local page-list topology, but retains split policy
+and limits from a 170-SM parent and is much slower than the measured vLLM
+control. Borrow only the dataflow/testing ideas; do not copy its cache ABI,
+64-token pages, INT8 scales or split constants.
