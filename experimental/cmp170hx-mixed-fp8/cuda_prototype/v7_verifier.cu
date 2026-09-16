@@ -34,12 +34,21 @@ constexpr int kThreads = kWarps * 32;
 constexpr int kRows = kGroup * kQmax;
 constexpr int kKvBytesPerTile = kTile * kD;
 constexpr int kKvStageBytes = 2 * kKvBytesPerTile;
-constexpr int kQBytes = kRows * kD * static_cast<int>(sizeof(float));
-constexpr int kSharedBytes = kQBytes + 2 * kKvStageBytes;
+// E1 keeps scaled Q in BF16 and gives the online value
+// accumulator a persistent FP16 shared-memory tile.  The two regions replace
+// E0's single FP32 Q tile byte-for-byte, so the 2-stage K/V budget is unchanged.
+constexpr int kQBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
+constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
+constexpr int kKvSharedOffset = kQBytes + kAccBytes;
+constexpr int kSharedBytes = kKvSharedOffset + 2 * kKvStageBytes;
+constexpr int kRowsPerWarp = kRows / kWarps;
 
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
+static_assert(kQBytes == 24576, "E1 Q tile must be 24,576 bytes");
+static_assert(kAccBytes == 24576, "E1 accumulator must be 24,576 bytes");
+static_assert(kSharedBytes == 81920, "E1 shared layout must remain 81,920 bytes");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -196,8 +205,9 @@ __global__ void v7_partial_kernel(
     int64_t stride_vh,
     int64_t stride_bt) {
   extern __shared__ unsigned char shared[];
-  float* q_shared = reinterpret_cast<float*>(shared);
-  unsigned char* kv_shared = shared + kQBytes;
+  uint16_t* q_shared = reinterpret_cast<uint16_t*>(shared);
+  uint16_t* acc_shared = q_shared + kRows * kD;
+  unsigned char* kv_shared = shared + kKvSharedOffset;
 
   const int req = static_cast<int>(blockIdx.x);
   const int kvh = static_cast<int>(blockIdx.y);
@@ -214,8 +224,12 @@ __global__ void v7_partial_kernel(
   const int64_t t0 = static_cast<int64_t>(seg) * tiles_per_seg;
   const int64_t t1 = min(t0 + tiles_per_seg, tiles_total);
 
-  // Load q into a compact FP32 shared tile.  The actual query tensor may be
-  // BF16 or FP16; V7's output dtype follows the input query dtype.
+  // Load q into a compact BF16 shared tile.  The actual query tensor may be
+  // BF16 or FP16, but the qualified Triton path applies
+  // ``(q * scale).to(bfloat16)`` in both cases.  Preserve that numerical
+  // contract while consuming exactly 24,576 bytes.  Initialize
+  // the persistent FP16 accumulator alongside it; every lane owns eight
+  // columns of each row assigned to its warp.
   for (int idx = tid; idx < kRows * kD; idx += blockDim.x) {
     const int row = idx / kD;
     const int d = idx % kD;
@@ -229,14 +243,13 @@ __global__ void v7_partial_kernel(
       q_value = QIsBF16 ? bf16_bits_to_float(q[q_offset])
                         : fp16_bits_to_float(q[q_offset]);
     }
-    // Match the existing q8 path's `(q * scale).to(bfloat16)` before the
-    // BF16 dot, including FP16-query callers.
-    q_shared[idx] = bf16_bits_to_float(float_to_bf16_bits(q_value * scale));
+    q_shared[idx] = float_to_bf16_bits(q_value * scale);
+    acc_shared[idx] = float_to_fp16_bits(0.0f);
   }
   __syncthreads();
 
-  const int row_begin = warp * (kRows / kWarps);
-  const int row_end = row_begin + (kRows / kWarps);
+  const int row_begin = warp * kRowsPerWarp;
+  const int row_end = row_begin + kRowsPerWarp;
   // Empty segments are common when context is short relative to NSEG.  Write
   // a canonical neutral partial so stale workspace values cannot leak into a
   // later standalone combine call.
@@ -278,6 +291,19 @@ __global__ void v7_partial_kernel(
   cp_async_wait();
   __syncthreads();
 
+  // m/l are one scalar per query/group row.  Only lane zero needs to retain
+  // them; each row's value is broadcast before its tile reduction and updated
+  // by lane zero after the reduction.  Keeping these arrays in registers
+  // removes all per-tile global workspace traffic without replicating another
+  // 48x256 state in shared memory.
+  float m_state[kRowsPerWarp];
+  float l_state[kRowsPerWarp];
+  #pragma unroll
+  for (int local_row = 0; local_row < kRowsPerWarp; ++local_row) {
+    m_state[local_row] = -CUDART_INF_F;
+    l_state[local_row] = 0.0f;
+  }
+
   for (int64_t tile = t0; tile < t1; ++tile) {
     const bool has_next = tile + 1 < t1;
     const int next_stage = stage ^ 1;
@@ -298,29 +324,23 @@ __global__ void v7_partial_kernel(
 
     unsigned char* k_shared = kv_shared + stage * kKvStageBytes;
     unsigned char* v_shared = k_shared + kKvBytesPerTile;
-    // Correctness scaffold: retain the established ABI by checkpointing the
-    // running state through part_o/m/l after each tile.  E1 should move this
-    // state on-chip; the extra global traffic is intentional in this version.
-    for (int row = row_begin; row < row_end; ++row) {
+    // Keep local_row compile-time constant so the twelve-element m/l arrays
+    // lower to registers rather than an indexed local-memory array.
+    #pragma unroll
+    for (int local_row = 0; local_row < kRowsPerWarp; ++local_row) {
+      const int row = row_begin + local_row;
       const int qi = row / kGroup;
       const bool row_ok = qi < q_len;
       const int64_t q_pos = kv_len - q_len + qi;
-      const int group = row % kGroup;
-      const int h = kvh * kGroup + group;
-      const int64_t pi =
-          (static_cast<int64_t>(req) * kHq + h) * kQmax * kNseg +
-          static_cast<int64_t>(qi) * kNseg + seg;
-      float m = lane == 0
-          ? (tile == t0 ? -CUDART_INF_F : part_m[pi])
-          : 0.0f;
-      float l = lane == 0 ? (tile == t0 ? 0.0f : part_l[pi]) : 0.0f;
+      float m = lane == 0 ? m_state[local_row] : 0.0f;
+      float l = lane == 0 ? l_state[local_row] : 0.0f;
       m = __shfl_sync(0xffffffffu, m, 0);
       l = __shfl_sync(0xffffffffu, l, 0);
       float acc[8];
       #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int d = lane + 32 * j;
-        acc[j] = tile == t0 ? 0.0f : part_o[pi * kD + d];
+        acc[j] = fp16_bits_to_float(acc_shared[row * kD + d]);
       }
 
       // The four warps each own 12 query/group rows.  Within a row, every
@@ -332,7 +352,8 @@ __global__ void v7_partial_kernel(
       if (row_ok && token < kv_len && token <= q_pos) {
         float dot = 0.0f;
         for (int d = 0; d < kD; ++d) {
-          dot += q_shared[row * kD + d] *
+          const float q_value = bf16_bits_to_float(q_shared[row * kD + d]);
+          dot += q_value *
                  lut_decode(fp8_lut, k_shared[token_lane * kD + d]);
         }
         score = dot * static_k_scale;
@@ -361,15 +382,17 @@ __global__ void v7_partial_kernel(
       }
       m = m_new;
 
-      // Each lane writes eight of the 256 output columns.  m/l are identical
-      // across the warp after the reductions, so lane zero writes the scalar
-      // partial metadata once.
+      // Persist the FP16 accumulator on chip between tiles.  m/l are identical
+      // across the warp after the reductions, but only lane zero owns their
+      // register state.
+      #pragma unroll
       for (int j = 0; j < 8; ++j) {
-        part_o[pi * kD + lane + 32 * j] = acc[j];
+        const int d = lane + 32 * j;
+        acc_shared[row * kD + d] = float_to_fp16_bits(acc[j]);
       }
       if (lane == 0) {
-        part_m[pi] = m;
-        part_l[pi] = l;
+        m_state[local_row] = m;
+        l_state[local_row] = l;
       }
     }
 
@@ -378,6 +401,29 @@ __global__ void v7_partial_kernel(
       __syncthreads();
       stage = next_stage;
       current_block_id = next_block_id;
+    }
+  }
+
+  // All rows now have their final online state.  Publish the established
+  // FP32 workspace ABI once per segment; no part_o/m/l traffic occurs inside
+  // the tile loop.
+  __syncthreads();
+  #pragma unroll
+  for (int local_row = 0; local_row < kRowsPerWarp; ++local_row) {
+    const int row = row_begin + local_row;
+    const int qi = row / kGroup;
+    const int group = row % kGroup;
+    const int h = kvh * kGroup + group;
+    const int64_t pi =
+        (static_cast<int64_t>(req) * kHq + h) * kQmax * kNseg +
+        static_cast<int64_t>(qi) * kNseg + seg;
+    for (int j = 0; j < 8; ++j) {
+      const int d = lane + 32 * j;
+      part_o[pi * kD + d] = fp16_bits_to_float(acc_shared[row * kD + d]);
+    }
+    if (lane == 0) {
+      part_m[pi] = m_state[local_row];
+      part_l[pi] = l_state[local_row];
     }
   }
 }

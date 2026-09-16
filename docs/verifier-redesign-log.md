@@ -601,3 +601,40 @@ V7-E1 must move the repeated global accumulator traffic on chip without
 exceeding 81,920 dynamic shared bytes, retain zero local spill and two CTAs/SM,
 then pass the complete V2 correctness/high-block-ID suite.  Only after that
 does it earn an interleaved 4K/126K/250K throughput comparison.
+
+## Milestone V7-E1 — shared accumulator with scalar CUDA math (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `36bff72`
+
+E1 replaced per-tile global accumulator checkpoints without increasing the
+81,920-byte shared allocation: scaled BF16 Q and the persistent FP16
+accumulator use 24,576 bytes each, while raw FP8 K/V double buffering uses
+32,768 bytes.  Each warp owns 12 rows; per-row `m/l` remains in registers and
+`part_o/m/l` is written once after the segment.
+
+The canonical specialization compiled to 126 registers/thread, zero stack and
+spill, 16 static shared bytes, 81,920 dynamic shared bytes and two active
+CTAs/SM.  The complete standalone correctness/high-block-ID gate passed; the
+largest error was 0.0625 at physical block 2341 (<0.08).
+
+| context | V7-E1 us/layer | qualified Triton reference us/layer | ratio |
+|---:|---:|---:|---:|
+| 4K | 997.9 | about 52-54 | about 19x slower |
+| 70K | 12503.7 | about 434-450 | about 28x slower |
+| 126K | 22347.6 | about 760-805 | about 28x slower |
+| 200K | 35337.5 | about 1194-1245 | about 29x slower |
+| 250K | 44185.7 | about 1530-1545 | about 29x slower |
+
+**Rejected as a throughput implementation.**  Shared-state lifetime and CTA
+residency are solved, but QK and PV remain scalar CUDA loops.  Triton's
+`tl.dot` uses tensor cores, so launch or memory tuning cannot close this
+19-29x arithmetic gap.
+
+The next candidate must map QK and PV to SM80 BF16 tensor cores.  A feasible
+two-CTA layout is: one expanded BF16 K/V tile (32 KiB), all-row FP16
+accumulator (24 KiB), one 16-row BF16 Q/P buffer (8 KiB), and one 16x256 FP32
+WMMA workspace (16 KiB), totaling 80 KiB.  Process the three 16-row groups
+sequentially, reuse the FP32 region for scores/output, and reuse Q for P after
+scores are formed.

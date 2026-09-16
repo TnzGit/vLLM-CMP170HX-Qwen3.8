@@ -39,12 +39,24 @@ stage is issued before the current stage is computed.  Empty/causal tails are
 zero-filled, and physical block IDs are loaded/promoted as `int64_t` before
 multiplication by cache strides.
 
-The current candidate is correctness-first: while K/V double-buffering is
-present, the online `m/l/acc` state is read/written through the global
-`part_o/m/l` workspace at each tile.  This preserves the contract and keeps
-register use bounded, but it is deliberately not the final E1 performance
-design.  A follow-up E1 should keep those states resident per warp (or use a
-dedicated shared accumulator) while retaining the same final workspace ABI.
+## E1 on-chip accumulator result (rejected for throughput)
+
+The current source is the E1 structural candidate.
+Shared memory is fixed at 81,920 bytes: scaled Q is a BF16 raw-`uint16` tile
+(48 x 256 x 2 = 24,576 B), matching the Triton conversion for both BF16 and
+FP16 callers; the persistent value accumulator is an FP16
+raw-`uint16` tile of the same size, and the two K/V stages use 32,768 B.  The
+online `m/l` state is retained in per-warp lane-zero register arrays and
+broadcast for each row.  `part_o/m/l` remain the existing FP32 workspace ABI,
+but are written only once per segment after the tile loop; there is no
+per-tile global workspace traffic.
+
+E1 compiled and passed the complete correctness gate on the CMP 170HX.  It used
+126 registers/thread, zero local spill and two CTAs/SM, but scalar QK/PV math
+made it about 19x slower at 4K and 28-29x slower at 70K-250K than the qualified
+Triton verifier.  E1 is therefore a documented structural scaffold, not a
+throughput candidate.  The next implementation must use SM80 BF16 tensor-core
+MMA while retaining the workspace/addressing contract.
 
 `resources()` reports `cudaFuncGetAttributes` and an occupancy estimate for the
 canonical BF16/int32 specialization after applying the dynamic shared-memory
@@ -73,7 +85,7 @@ a writable build cache if the default PyTorch extension cache is unsuitable.
 On a non-CUDA or non-SM80 workstation the bench exits with an explicit `SKIP`;
 that is expected and is not a kernel qualification result.
 
-## E0 qualification result
+## E0 qualification result (historical baseline)
 
 The out-of-tree extension was compiled on the CMP 170HX using Torch
 2.13.0+cu130, CUDA 13.0.88 and G++ 13.3.  The canonical BF16/int32 partial
@@ -102,6 +114,15 @@ python bench/test_v7_cuda_prototype.py --full --high-block-id
 
 It passed on the CMP 170HX; the high-ID case allocated 4.00 GiB across the two
 raw caches and produced maximum absolute error 0.031250 (<0.08).
+
+For isolated latency against the qualified Triton module:
+
+```bash
+python bench/spec_attn_fp8_ctx_scan.py \
+  --contexts 4096,70000,126000,200000,250000 \
+  --queries 8 --segments 35 --warmup 10 --iters 50 \
+  --module experimental/cmp170hx-mixed-fp8/cuda_prototype/spec_decode_attn_v7.py
+```
 
 ## Scope and limitations
 

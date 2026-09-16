@@ -1338,7 +1338,9 @@ Completed milestones:
 | V4 FP16 partial workspace | `e327b48` | rejected; 5-15% slower |
 | V5 disable LICM | `dbb30ef` | rejected; no occupancy change |
 | V6 explicit 3x16 rows | `d2f42c9` | rejected; 15-17% slower |
-| V7-E0 CUDA scaffold | current milestone | build/ABI smoke accepted |
+| V7-E0 CUDA scaffold | `5e76c2a` | build/ABI smoke accepted |
+| V7 full correctness gate | `36bff72` | high-block-ID accepted |
+| V7-E1 shared accumulator | current milestone | correct, scalar math 19-29x slower |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is

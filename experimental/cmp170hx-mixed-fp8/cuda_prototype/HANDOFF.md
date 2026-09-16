@@ -1,8 +1,8 @@
 # V7 prototype handoff
 
-Status: E0 source/build/ABI smoke passed on the CMP 170HX.  The workstation
-that authored the prototype has no CUDA device, but the isolated remote build
-used Torch 2.13.0+cu130 and CUDA 13.0.88 successfully.
+Status: E1 compiled and passed correctness on the CMP 170HX, but was rejected
+for throughput.  The workstation that authored the source has no CUDA device;
+all measurements below came from the isolated remote test directory.
 
 Files:
 
@@ -12,6 +12,20 @@ Files:
   boundary cases, mixed lengths, and int32/int64 index variants.
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
+
+E1 candidate layout in `v7_verifier.cu`:
+
+- Q shared: scaled BF16 raw `uint16` for both BF16 and FP16 callers,
+  24,576 B, matching the qualified Triton conversion;
+- persistent FP16 shared accumulator `[48, 256]`, 24,576 B;
+- double-buffered raw K/V staging: 32,768 B;
+- total dynamic shared: 81,920 B;
+- `m/l` retained in per-warp lane-zero register state;
+- `part_o/m/l` published once per segment after all tiles, preserving the ABI.
+
+Measured E1 resources are 126 registers/thread, zero stack/spill, 81,920 bytes
+dynamic shared and two active CTAs/SM.  The full gate passed with maximum error
+0.0625, but latency was 19-29x worse than Triton because QK/PV are scalar.
 
 Review/qualification checklist on the CMP host:
 
@@ -29,10 +43,9 @@ Known risks:
 - The candidate uses explicit BF16 LUT conversion and FP16 running `part_o`
   updates to mirror the existing static-FP8 q8 path; tensor-core instruction
   selection and numerical ordering can differ from Triton's `tl.dot`.
-- Although K/V are double-buffered and all four partial warps participate, the
-  current online state is deliberately read/written through global `part_o/m/l`
-  once per tile.  This is a correctness scaffold, not the final E1 throughput
-  implementation; moving state on-chip is the next optimization step.
+- K/V are double-buffered and accumulator state is on chip, but the current QK
+  and PV loops do not use tensor cores.  WMMA is mandatory before another
+  performance qualification.
 - `cp.async` assumes SM80 and 16-byte-aligned contiguous D rows.  The launcher
   rejects non-contiguous caches and requests the required dynamic shared-memory
   carveout.
