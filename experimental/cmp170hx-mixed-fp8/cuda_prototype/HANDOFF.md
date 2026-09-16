@@ -1,10 +1,11 @@
 # V7 prototype handoff
 
-Status: V7-E11 persistent-Q structural candidate hardware-qualified as the
-new accepted isolated scaffold. It starts from the E6 pure-bit/four-phase
-baseline. E10a's
-segment-local page/base staging is removed from the active source so factors
-remain isolated. The prototype remains disconnected from production dispatch.
+Status: V7-E12 owner-local softmax/PV is hardware-qualified as the new
+independent prototype scaffold. It starts from E11 persistent-Q and changes
+only group softmax/PV synchronization and scratch ownership. E6's
+pure-bit/four-phase path, current-page block lookup, and E10a's removed
+segment-local page/base staging remain isolated. E12 remains disconnected
+from production dispatch.
 
 Files:
 
@@ -16,15 +17,17 @@ Files:
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
 
-V7-E11 candidate layout in `v7_verifier.cu`:
+V7-E12 candidate layout in `v7_verifier.cu`:
 
 - persistent all-row FP16 shared accumulator `[48, 256]`, 24,576 B;
 - one decoded BF16 K/V tile physically `[2, 32, 264]`, 33,792 B; only the
   first 256 elements of each row are logical K/V data;
-- one BF16 Q/P/raw alias physically `[16, 264]`, 8,448 B; its first 8,192 B
-  stage raw K or V before the decode barrier, then carries dense P `[16, 32]`
-  (1,024 B), three FP32 score packs `[3, 16, 32]` (6,144 B), and alpha;
-- one FP32 PV temporary `[16, 224]`, 14,336 B;
+- one BF16 Q/scores/raw alias physically `[16, 264]`, 8,448 B; its first 8,192 B
+  stage raw K or V before the decode barrier, then carries three disjoint
+  FP32 score packs `[3, 16, 32]` (6,144 B);
+- one retained FP32 temporary allocation, 14,336 B; its first 3,072 B hold
+  three disjoint dense BF16 P packs and its next three 1,024 B slices are
+  owner-warp `[16,16]` FP32 PV scratch;
 - one reused E6 LUT allocation, 512 B; it is copied once per CTA and remains
   outside the hot pure-bit decode path;
 - total dynamic shared: 81,664 B;
@@ -37,40 +40,42 @@ V7-E11 candidate layout in `v7_verifier.cu`:
   page-base prefetch is present;
 - warps 0..2 each own a 16-row Q group, convert/load Q once, and retain sixteen
   K16 row-major WMMA A fragments in registers across every KV tile;
-- measured register pressure is 166 registers/thread with zero local bytes or
-  spills; 81,664 B shared remains the occupancy limiter and keeps two CTAs/SM;
+- E12 measured 164 registers/thread with zero local bytes/spills. The
+  allocation remains 81,664 B and the driver reports two active CTAs/SM;
 - `decode_e4m3fn_bf16` is an exported CUDA helper used by the bench's exhaustive
   256-code device check; it requires 254 finite bit-exact results plus zero for
   `0x7f/0xff`;
-- `m/l` retained in registers, with each owning warp's lanes 0..15 holding one
-  row-pack state across the segment;
+- `m/l` and alpha are retained in owner-lane registers, with lanes 0..15
+  holding one row-pack state across the segment and warp shuffle supplying
+  alpha while merging each scratch tile;
 - `part_o/m/l` published once per segment after all tiles, preserving the ABI.
 
-E11 WMMA/decode mapping:
+E12 WMMA/decode and synchronization mapping:
 
 - QK uses two N16 tiles per 16-row pack: row-major BF16 Q with logical
   `[16,256]` and physical `ld=264`, and col-major BF16 K with logical
   `[256,32]` viewed from physical token-major rows with `ld=264`;
-- owners 0..2 write all three `[16,32]` FP32 score packs before the group-ordered
-  softmax/PV phase; each owner then performs its 32-score causal online
-  softmax, writes BF16 P with compact `ld=32`, and saves FP32 alpha;
-- PV main phase covers d=0..223 with fourteen N16 tiles: warps 0..2 own four
-  each and warp 3 owns two; stores and merge use the FP32 temporary `ld=224`.
-  After a barrier, warp 3 computes tail tiles d=224,240, stores them into the
-  temporary prefix as dense 16x32 with `ld=32`, and after another barrier the
-  whole CTA merges d=224..255.  Both phases apply `previous * alpha + tmp`.
+- owners 0..2 each write its own `[16,32]` FP32 score pack, perform causal
+  online softmax without a group CTA barrier, write BF16 P to its disjoint tmp
+  pack with compact `ld=32`, and complete all sixteen D16 PV tiles. Each WMMA
+  tile stores to that owner's private `[16,16]` FP32 scratch, executes
+  `__syncwarp()`, and the same owner merges only its 16 accumulator rows using
+  `previous * alpha + scratch`. Warp 3 is idle in this phase.
 - each tile uses E6's four phases: coalesced-stage raw K into Q/P's first
   8,192 B as aligned 16-byte `uint4` chunks, barrier, decode K, barrier, then
   repeat for V using the same alias.  An externally unaligned source uses the
   scalar fallback and invalid token tails are zero-filled.  The pure integer
   decoder maps `0x7f/0xff` to explicit BF16 zero.
-- each tile loads its current page's int32/int64 block id through the old E6
-  block-table path, promotes it to int64, and then applies cache strides;
-  there is no segment-page table or fallback path to qualify.
+- after all owners finish a tile, one CTA barrier is retained before the next
+  tile's raw stage can reuse `q_shared`; this prevents a fast owner from
+  overwriting a slower owner's score/P region. There are no inter-group CTA
+  barriers in softmax/PV. Each tile still loads its current page's int32/int64
+  block id through the old E6 block-table path, promotes it to int64, and then
+  applies cache strides; there is no segment-page table or fallback path.
   Finite normal codes map with `(8+m)*2^(e-10)` to BF16 exponent `e+120`/
   fraction `m<<4`; E4M3FN subnormals normalize from their highest mantissa bit.
 
-E11 qualification result:
+E11 baseline qualification result:
 
 - resources: 166 registers/thread, zero local bytes/spills, 81,664 B dynamic
   shared and two active CTAs/SM;
@@ -84,9 +89,30 @@ E11 qualification result:
   scoreboard, 63.514 M/31.097 M shared load/store conflicts and 258.24 MB
   DRAM read.
 
-Decision: accept E11 as the next isolated CUDA scaffold, not production. The
-next experiment should preserve persistent Q and target serialized group
-softmax/PV barriers and short shared-memory dependencies.
+E12 qualification result:
+
+- resources: 164 registers/thread, zero local bytes/spills, 81,664 B dynamic
+  shared and two active CTAs/SM;
+- exhaustive decoder, complete correctness and 4-GiB high-block-ID passed;
+- 4K/70K/126K/200K/250K first-run latency was
+  239.4/2,325.9/4,040.9/6,319.0/7,852.2 us per layer; two repeats were
+  241.7/2,382.8/4,056.4/6,304.6/7,885.7 us and
+  260.1/2,548.8/4,046.5/6,303.0/7,876.7 us;
+- versus E11, stable 126K/200K/250K latency improved about
+  19.2%/19.7%/19.5%;
+- NCU at 126K: 436.54 M instructions, 6.049 M tensor instructions, 3.01%
+  tensor active, 15.47% barrier, 10.74% long scoreboard, 21.01% short
+  scoreboard, 0.25% MIO throttle, 69.558 M/25.074 M shared load/store
+  conflicts and 258.22 MB DRAM read;
+- relative to E11, barrier stalls fell 29.52% -> 15.47% and tensor activity
+  rose 2.41% -> 3.01%. Short-scoreboard stalls and shared-load conflicts rose,
+  defining the next measurement-led optimization target;
+- no production files, active-series entries, or qualified test-site files
+  were changed.
+
+Decision: accept E12 as the new hardware-qualified isolated V7 scaffold. Any
+follow-up should preserve E12 correctness and target its 21.01%
+short-scoreboard/shared-load boundary before production integration.
 
 Historical E2 baseline: the unpadded candidate compiled to 88 registers/thread,
 zero local spill, 81,920 B dynamic shared memory and two CTAs/SM.  Its complete

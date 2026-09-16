@@ -1125,3 +1125,44 @@ serialized group softmax/PV/barrier schedule and short shared-memory
 dependency chain. Any E12 change must preserve E11's persistent fragments and
 measure barrier, short-scoreboard, tensor-active and conflict counters before
 production integration is considered.
+
+## Milestone V7-E12 — owner-local softmax/PV (major accepted scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `1c0856c`
+
+E12 preserves E11's persistent Q fragments and E6's exact four-phase FP8
+decode, but removes the three serialized CTA-wide group softmax/PV phases.
+Warps 0..2 retain ownership of one 16-row group apiece. Each computes its two
+QK tiles, online softmax and all sixteen D16 PV tiles independently, using a
+disjoint BF16 P pack and FP32 `16x16` scratch slice. Group-local ordering uses
+`__syncwarp()`; one CTA barrier remains at the tile tail before raw K/V staging
+can reuse the shared alias. Scores and compact P use separate storage, avoiding
+the cross-lane overwrite race caught during source audit.
+
+The kernel compiled to 164 registers/thread, zero local bytes/spills, 81,664
+bytes dynamic shared and two active CTAs/SM. Exhaustive E4M3FN decode, all
+reference/boundary/mixed-length cases and the 4-GiB high-block-ID test passed.
+
+| context | E11 persistent Q | E12 owner-local PV | change |
+|---:|---:|---:|---:|
+| 4K | 346.5 first; 272.4/326.4 repeats | 239.4; 241.7; 260.1 | faster, short-tier noise |
+| 70K | 3,397.3; 2,854.1; 3,129.6 | 2,325.9; 2,382.8; 2,548.8 | about -20% median |
+| 126K | 5,020.4; 5,012.3; 5,011.8 | 4,040.9; 4,056.4; 4,046.5 | about -19.2% |
+| 200K | 7,841.9; 7,859.0; 7,854.6 | 6,319.0; 6,304.6; 6,303.0 | about -19.7% |
+| 250K | 9,791.5; 9,787.3; 9,795.7 | 7,852.2; 7,885.7; 7,876.7 | about -19.5% |
+
+NCU at 126K measured 436.54 M instructions, 6.049 M tensor instructions,
+3.01% tensor activity, 15.47% barrier, 10.74% long scoreboard, 21.01% short
+scoreboard, 0.25% MIO throttle, 69.558 M/25.074 M shared load/store conflicts
+and 258.22 MB DRAM read. Against E11, barrier stalls nearly halved from 29.52%
+and tensor activity rose from 2.41%, directly validating the experimental
+hypothesis. Short-scoreboard stalls and shared-load conflicts increased, so
+the next factorial should target owner-warp P/V dependency and shared access,
+not reintroduce CTA group serialization.
+
+**Accepted as the new isolated CUDA scaffold, not production dispatch.** The
+change is correct and repeatably clears the 5% admission threshold. Production
+integration remains a separate milestone because the standalone V7 kernel is
+still materially slower than the qualified Triton path.

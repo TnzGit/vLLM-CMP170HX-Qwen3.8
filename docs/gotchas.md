@@ -876,3 +876,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     not a rejection criterion; calculate the actual occupancy limiter and
     verify local bytes/spills. The next bottleneck is now barrier/short
     dependency cost, not Q reload or global scoreboard.
+
+73. **Independent GQA groups should not serialize CTA-wide softmax/PV.**
+    V7-E12 kept E11's three persistent-Q owner warps but gave each a disjoint
+    BF16 P pack and FP32 PV scratch slice. Replacing three group-level CTA
+    phases with warp-local work plus one tile-tail barrier improved stable
+    126K-250K latency by about 19-20%. NCU barrier stalls fell 29.52% -> 15.47%
+    and tensor activity rose 2.41% -> 3.01%. Keep score and compact-P storage
+    disjoint: in-place FP32-to-BF16 compaction creates a cross-lane overwrite
+    race even when every warp owns a separate group.
