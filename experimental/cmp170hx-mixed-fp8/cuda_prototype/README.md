@@ -645,3 +645,9 @@ Arithmetic E4M3FN decoding was 12% slower at 4K and about 73-75% slower at
 Removing the two explicit q8 block-ID int64 conversions gave no repeatable
 long-context gain and noisy 4K deltas across 500-iteration repeats. The
 qualified address path remains unchanged.
+
+## V7-E32 q8 next-page block-table prefetch (rejected)
+
+Prefetching the next page's block-table ID one tile early was numerically
+identical and changed locked-clock latency by only -0.8%/-0.7%/+0.6% at
+4K/126K/250K. The qualified q8 path remains unchanged.

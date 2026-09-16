@@ -1030,3 +1030,9 @@ the table lookup is the dominant cost.
 V7-E31's q8 int32 block-ID fast path showed sub-0.5% long-context change and
 unstable 4K deltas across 500-iteration repeats. Do not keep a short-tier
 fast-path on a single noisy scan.
+
+93. **One-tile page-table prefetch is not automatically useful.** V7-E32
+prefetched the next q8 page block ID before the boundary, but locked-clock
+latency moved only -0.8%/-0.7%/+0.6% at 4K/126K/250K with identical output.
+Reject below the measurement gate unless a trace shows address lookup is a
+real bottleneck.

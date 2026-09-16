@@ -234,3 +234,29 @@ Do not merge E21 into vLLM dispatch. The qualified production q8 Triton
 specialization is faster and numerically correct. Continue only with a
 q8-specific design that preserves its global-load/reuse behavior, and use
 this document as the handoff boundary for independent review.
+
+## Post-handoff milestones
+
+### E31 — q8 block-ID int32 fast path (rejected)
+
+Removing the two explicit q8 block-ID `int64` conversions produced no
+repeatable long-context gain (under 0.5%); interleaved 500-iteration 4K
+repeats ranged from -0.9% to +4.6% to +2.0%. The qualified path was restored.
+
+### E32 — q8 next-page block-table prefetch (rejected)
+
+Prefetching the next page block ID one tile early gave 55.9/55.3 us at 4K,
+775.8/770.4 us at 126K and 1533.7/1543.2 us at 250K (baseline/candidate,
+locked 1350MHz, q=8, NSEG=35). Output was identical, but the deltas (-0.8%,
+-0.7%, +0.6%) are below the 2% gate. No source change was kept.
+
+### Current handoff decision
+
+E27–E32 found no durable one-knob improvement. NCU attributes the gap to
+execution/resource behavior rather than an obvious cache-policy or address
+conversion issue: the qualified Triton q8 path has high L1 reuse and better
+effective memory behavior than the E21 shared-staging candidate, while both
+have similarly low achieved occupancy. The next justified work is either a
+q8-specific structural kernel design that preserves global FP8/LUT reuse, or
+end-to-end telemetry to prove that verifier attention is the dominant wall
+time before changing it. Production dispatch remains untouched.

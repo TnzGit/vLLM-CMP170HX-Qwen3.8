@@ -496,6 +496,14 @@ Removing only the two explicit q8 block-ID int64 conversions changed long
 latency by under 0.5%; repeated 500-iteration 4K pairs varied from -0.9% to
 +4.6% to +2.0%, so the short result was noise. No source change kept.
 
+## V7-E32 q8 next-page block-table prefetch (rejected)
+
+The candidate loaded the next page block ID one tile before the page
+boundary and consumed it at the boundary. Locked-1350MHz q=8/NSEG=35 scans
+were 55.9/55.3 us at 4K, 775.8/770.4 us at 126K and 1533.7/1543.2 us at
+250K (baseline/candidate). Output was identical; deltas (-0.8%, -0.7%,
++0.6%) are below the 2% gate, so no source change was kept.
+
 ## V7-E25 cp.async K prefetch (rejected negative control)
 
 E25 replaced E21's warp-3 synchronous vector loads for the next K tile with

@@ -1793,3 +1793,15 @@ Removing only the two explicit q8 block-ID `int64` conversions changed long
 latency by under 0.5%; repeated 500-iteration 4K pairs varied from -0.9% to
 +4.6% to +2.0%. The short result was noise, so the qualified source remains
 unchanged.
+
+## Milestone V7-E32 — q8 next-page block-table prefetch (rejected)
+
+**Date:** 2026-09-16
+
+The isolated candidate prefetched the next page's block-table ID one tile
+before the boundary, then consumed that value at the boundary. K/V loads,
+E4M3 LUT decode, four-warps launch, `TILE=32` and `NSEG=35` were unchanged.
+At locked 1350MHz the baseline/candidate latency was 55.9/55.3 us at 4K,
+775.8/770.4 us at 126K and 1533.7/1543.2 us at 250K. Changes were -0.8%,
+-0.7% and +0.6%, with identical output. The candidate is below the 2% gate
+and is rejected; no qualified or production source changed.
