@@ -713,3 +713,39 @@ remove shared-bank conflicts with padded/swizzled Q/K/V layouts while retaining
 two CTAs/SM.  Only then should it optimize page carry, vectorized raw loads,
 shared/read-only LUT access and redundant Q/P fragment loads.  The next
 milestone must publish the same NCU A/B counters, not only wall-clock latency.
+
+## Milestone V7-E3a — padded WMMA leading dimensions (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `e81c5fd`
+
+E3a changed only the physical BF16 shared leading dimensions for Q/K/V from
+256 to 264.  Logical D=256, compact P `ld=32`, accumulator, temporary, grid,
+workspace ABI and attention arithmetic were unchanged.  This adds a 16-byte
+bank phase shift to consecutive physical rows.
+
+The layout grew from 81,920 to 83,200 B.  It compiled to 79 registers/thread
+with zero spill and passed the complete ordinary/high-block-ID correctness
+gate, but runtime occupancy fell from two CTAs/SM to one.
+
+| context | E2 unpadded us/layer | E3a padded us/layer | change |
+|---:|---:|---:|---:|
+| 4K | 488.2 | 882.3 | +80.7% |
+| 70K | 8,546.7 | 13,220.8 | +54.7% |
+| 126K | 15,269.0 | 23,600.3 | +54.6% |
+| 200K | 24,167.6 | 37,307.3 | +54.4% |
+| 250K | 30,208.5 | 46,681.1 | +54.5% |
+
+NCU at 126K confirmed that the padding did reduce shared-load bank conflicts
+from 190.54 M to 63.51 M.  It did not address the scalar feed chain:
+long-scoreboard stalls remained 49.01%, shared-store conflicts remained
+31.00 M, and tensor-pipe activity fell from 0.82% to 0.53% with half the CTA
+residency.
+
+**Rejected.**  Padding is directionally correct but cannot consume extra
+shared memory past the two-CTA cliff.  E3b must retain padded Q/K/V while
+recovering at least 1,280 B from the FP32 PV temporary.  A testable option is
+a 224-column main PV phase plus a 32-column tail phase; it must prove that the
+additional barriers cost less than the recovered occupancy and conflict
+reduction.

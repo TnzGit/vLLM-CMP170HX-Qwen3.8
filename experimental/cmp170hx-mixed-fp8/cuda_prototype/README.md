@@ -32,50 +32,67 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
-The V7-E2 partial candidate keeps the same four-warp CTA and fixed geometry,
+The V7-E3a partial candidate keeps the same four-warp CTA and fixed geometry,
 but maps QK/PV to SM80 BF16 WMMA tensor cores.  Each tile is first decoded by
 the full CTA from raw FP8 bytes through the supplied BF16 LUT into one shared
 K/V tile; no double buffer is required.  The 48 query/group rows are processed
-as three sequential 16-row packs.  QK uses two N16 WMMA tiles (`A` row-major
-16x256, `B` col-major 256x32 with `ld=256`) and stores scores in the first
-2 KiB of the FP32 temporary tile.  Warp 0 lanes 0..15 run the 32-item causal
-online softmax, write BF16 P, and preserve FP32 alpha.  PV uses four warps,
-four N16 output tiles per warp (`A` row-major 16x32, `B` row-major 32x256),
-then fuses the FP32 result into the all-row FP16 accumulator.  Empty/causal
-tails remain masked, and physical block IDs are loaded/promoted as `int64_t`
-before multiplication by cache strides.
+as three sequential 16-row packs.  Q/K/V use a padded physical leading
+dimension of 264 elements while their logical head dimension remains 256:
+Q is `[16,264]`, and K/V are `[32,264]` token-major.  QK therefore uses two
+N16 WMMA tiles (`A` row-major logical 16x256, `B` col-major logical 256x32,
+both `ld=264`) and stores scores in the first 2 KiB of the unchanged FP32
+temporary tile.  Warp 0 lanes 0..15 run the 32-item causal online softmax,
+write dense BF16 P with `ld=32`, and preserve FP32 alpha.  PV uses four warps,
+four N16 output tiles per warp (`A` row-major 16x32 with `ld=32`, `B`
+row-major logical 32x256 with `ld=264`), then fuses the FP32 result into the
+all-row FP16 accumulator.  Empty/causal tails remain masked, and physical
+block IDs are loaded/promoted as `int64_t` before multiplication by cache
+strides.
 
-## V7-E2 WMMA candidate (qualified for correctness, rejected for throughput)
+## V7-E3a padded-WMMA candidate (correct, rejected for occupancy/throughput)
 
-The current source is the E2 tensor-core candidate.  Its fixed 81,920-byte
+The current source is the E3a tensor-core candidate.  Its fixed 83,200-byte
 dynamic shared-memory layout is:
 
 ```text
 all-row FP16 accumulator [48, 256]       24,576 B
-one decoded BF16 K/V tile [2, 32, 256]    32,768 B
-one BF16 Q/P pack [16, 256]                8,192 B
+one decoded BF16 K/V tile [2, 32, 264]    33,792 B
+one BF16 Q/P pack [16, 264]                8,448 B
 one FP32 score/PV temporary [16, 256]     16,384 B
                                            ------
-                                           81,920 B
+                                           83,200 B
 ```
 
-The Q/P pack's unused tail stores 16 FP32 alpha values between softmax and
-PV fusion.  `m/l` are retained in registers: each warp-0 lane 0..15 owns the
-three row-pack states.  The launcher, current-stream selection, int64 index
-and block-table dispatch, page arithmetic, and flattened FP32 partial
-workspace ABI are unchanged.
+The 264-element leading dimensions add eight BF16 padding elements per
+physical WMMA row only; the logical D remains 256.  P is repacked densely as
+`[16,32]` with `ld=32`, and the Q/P pack's unused tail stores 16 FP32 alpha
+values between softmax and PV fusion.  Accumulator/tmp indexing, launcher,
+current-stream selection, int64 index and block-table dispatch, page
+arithmetic, and flattened FP32 partial workspace ABI are unchanged.
 
-On the CMP 170HX this compiled to 88 registers/thread, zero spill, 81,920 B
-dynamic shared memory and two CTAs/SM.  After correcting P's compact stride
-from 256 to 32, the complete correctness/high-block-ID gate passed.  It is not
-a throughput candidate: 4K/126K/250K measured 488.2/15,269.0/30,208.5 us per
-layer, roughly 9-20x slower than the qualified Triton path.
+On hardware E3a compiled to 79 registers/thread with zero spill and passed the
+complete correctness/high-block-ID gate.  Padding reduced shared-load bank
+conflicts from 190.54 M to 63.51 M, proving the layout diagnosis, but 83,200 B
+reduced occupancy from two CTAs/SM to one.  It regressed at every tier:
+4K/70K/126K/200K/250K measured
+882.3/13,220.8/23,600.3/37,307.3/46,681.1 us per layer.  The next E3b must
+recover at least 1,280 B of temporary shared storage while preserving padding;
+accepting one CTA/SM is not an admissible solution.
+
+### E2 baseline (historical, not an E3a qualification)
+
+The unpadded E2 source used 81,920 B of dynamic shared memory and passed the
+complete correctness/high-block-ID gate after correcting P's compact stride
+from 256 to 32.  On the CMP 170HX it compiled to 88 registers/thread, zero
+spill, and two CTAs/SM, but was rejected for throughput: 4K/126K/250K measured
+488.2/15,269.0/30,208.5 us per layer, roughly 9-20x slower than the qualified
+Triton path.
 
 NCU confirmed that both paths execute 6,048,768 tensor-pipe instructions at
-126K, but E2 has 190.54 M shared-load bank conflicts versus Triton's 2.02 M,
+126K, but E2 had 190.54 M shared-load bank conflicts versus Triton's 2.02 M,
 51.20% versus 12.09% long-scoreboard stalls, and only 0.82% versus 17.21%
-tensor-pipe active time.  The next E3 experiment must fix the shared layout
-and scalar preparation path; merely adding more WMMA is not justified.
+tensor-pipe active time.  E3a changed only those BF16 shared leading
+dimensions; it reduced conflicts by about 3x but lost the second resident CTA.
 
 ## E1 on-chip accumulator result (rejected for throughput)
 

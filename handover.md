@@ -1341,19 +1341,21 @@ Completed milestones:
 | V7-E0 CUDA scaffold | `5e76c2a` | build/ABI smoke accepted |
 | V7 full correctness gate | `36bff72` | high-block-ID accepted |
 | V7-E1 shared accumulator | `73ed877` | correct, scalar math 19-29x slower |
-| V7-E2 BF16 WMMA | current milestone | correct; rejected, shared-feed path 9-20x slower |
+| V7-E2 BF16 WMMA | `e81c5fd` | correct; rejected, shared-feed path 9-20x slower |
+| V7-E3a padded WMMA | current milestone | conflicts -3x; rejected, occupancy fell to 1 CTA |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should continue from the standalone V7-E2 CUDA scaffold, not by
-editing production dispatch.  E2 passed correctness and produced HMMA, but NCU
-found 190.54 M shared-load bank conflicts, 51.20% long-scoreboard stalls and
-only 0.82% tensor-pipe activity at 126K.  E3 should first pad/swizzle Q/K/V
-shared layouts while preserving two CTAs/SM, then repeat the complete gate and
-the same counters.  Required admission remains zero spill, >=5% isolated gain
-at 126K/250K and <=2% 4K regression before full-model/CUDA Graph A/B.  If the
-prototype cannot meet the isolated gate, stop without touching the qualified
-service.
+The next owner should continue from standalone V7-E3a, not production
+dispatch.  Padding `ld=256 -> 264` reduced shared-load bank conflicts from
+190.54 M to 63.51 M and passed correctness, but 83,200 B left one CTA/SM and
+made latency about 55% worse at long contexts.  E3b should recover at least
+1,280 B from the FP32 PV temporary while retaining padding; a 224-column main
+phase plus 32-column tail is the current bounded design.  Repeat full
+correctness, five-context latency and identical NCU counters.  Admission
+remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K
+regression before full-model/CUDA Graph A/B.  If it fails, do not touch the
+qualified service.

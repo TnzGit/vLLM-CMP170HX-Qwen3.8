@@ -770,3 +770,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     to 0.82%.  Its scalar decode/feed path also executed 1.079 B instructions
     versus 126.0 M.  Validate shared layout, feed efficiency and stalls with
     counters; `mma_sync` in source or SASS is not a performance result.
+
+61. **Legal per-CTA shared memory can still cross a residency cliff.**  Padding
+    the V7 WMMA Q/K/V leading dimensions from 256 to 264 reduced shared-load
+    bank conflicts from 190.54 M to 63.51 M and passed full correctness, but
+    grew dynamic shared from 81,920 to 83,200 bytes.  The latter is legal for
+    one CTA yet reduced measured residency from two CTAs/SM to one on GA100.
+    Long-context latency regressed about 55%.  Always query active CTAs after
+    a shared-layout change; fitting below the per-block opt-in limit is not
+    evidence that the intended multi-CTA occupancy survives.

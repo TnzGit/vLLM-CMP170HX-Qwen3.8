@@ -35,14 +35,19 @@ constexpr int kThreads = kWarps * 32;
 constexpr int kRows = kGroup * kQmax;
 constexpr int kRowsPerGroup = 16;
 constexpr int kRowGroups = kRows / kRowsPerGroup;
+// Pad the physical BF16 WMMA rows by eight elements.  The logical head
+// dimension remains 256; P is a separate dense [16,32] operand below.
+constexpr int kWmmaLd = 264;
 constexpr int kKvElementsPerTile = kTile * kD;
-// E2 replaces E1's raw double-buffered K/V stages with one decoded BF16 tile.
-// The 16-row Q/P buffer is reused for each of the three row groups; its tail
-// also carries the FP32 alpha values between softmax and PV fusion.
-constexpr int kKvSharedBytes = 2 * kKvElementsPerTile *
+constexpr int kKvMatrixElements = kTile * kWmmaLd;
+// E3a pads the physical BF16 WMMA rows while retaining the logical 256-wide
+// matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
+// its tail also carries the FP32 alpha values between softmax and PV fusion.
+constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
                                static_cast<int>(sizeof(uint16_t));
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
-constexpr int kQBytes = kRowsPerGroup * kD * static_cast<int>(sizeof(uint16_t));
+constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
+                        static_cast<int>(sizeof(uint16_t));
 constexpr int kTmpBytes = kRowsPerGroup * kD * static_cast<int>(sizeof(float));
 constexpr int kKvSharedOffset = kAccBytes;
 constexpr int kQSharedOffset = kKvSharedOffset + kKvSharedBytes;
@@ -52,13 +57,16 @@ constexpr int kSharedBytes = kTmpSharedOffset + kTmpBytes;
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kRowsPerGroup == 16, "E2 WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E2 WMMA layout requires three row groups");
-static_assert(kKvSharedBytes == 32768, "E2 K/V tile must be 32,768 bytes");
-static_assert(kAccBytes == 24576, "E2 accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8192, "E2 Q/P buffer must be 8,192 bytes");
-static_assert(kTmpBytes == 16384, "E2 temporary tile must be 16,384 bytes");
-static_assert(kSharedBytes == 81920, "E2 shared layout must remain 81,920 bytes");
+static_assert(kWmmaLd == 264, "E3a WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E3a WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E3a WMMA layout requires three row groups");
+static_assert(kKvSharedBytes == 33792, "E3a K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E3a accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E3a Q/P buffer must be 8,448 bytes");
+static_assert(kTmpBytes == 16384, "E3a temporary tile must be 16,384 bytes");
+static_assert(kSharedBytes == 83200, "E3a shared layout must be 83,200 bytes");
+static_assert(kSharedBytes <= 98304,
+              "E3a shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -94,10 +102,12 @@ __device__ __forceinline__ int64_t load_block_id(
 }
 
 // Decode one raw FP8 tile directly into BF16 shared memory.  K and V are
-// adjacent [32, 256] token-major matrices, so the resulting K matrix can be
-// viewed by WMMA as a [256, 32] column-major operand with ld=256.  Loading is
-// deliberately a full-CTA operation followed by a barrier: the E2 layout has
-// one K/V tile and does not rely on a second stage or cp.async overlap.
+// adjacent physical [32, 264] token-major matrices, with only the first 256
+// elements of each row logically populated.  The resulting K matrix can be
+// viewed by WMMA as a logical [256, 32] column-major operand with ld=264.
+// Loading is deliberately a full-CTA operation followed by a barrier: the
+// E3a layout has one K/V tile and does not rely on a second stage or cp.async
+// overlap.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
     const unsigned char* k_cache,
@@ -125,6 +135,7 @@ __device__ __forceinline__ void load_kv_bf16(
     const int local = element % kKvElementsPerTile;
     const int token_in_tile = local / kD;
     const int d = local % kD;
+    const int physical = token_in_tile * kWmmaLd + d;
     const int64_t token = tile_token + token_in_tile;
     uint16_t decoded = 0;
     if (token < kv_len) {
@@ -135,7 +146,7 @@ __device__ __forceinline__ void load_kv_bf16(
       const uint8_t raw = (is_v ? v_cache : k_cache)[base];
       decoded = fp8_lut[static_cast<int>(raw)];
     }
-    shared_kv[is_v ? kKvElementsPerTile + local : local] = decoded;
+    shared_kv[is_v ? kKvMatrixElements + physical : physical] = decoded;
   }
 }
 
@@ -177,7 +188,7 @@ __global__ void v7_partial_kernel(
   __nv_bfloat16* q_bf16 = reinterpret_cast<__nv_bfloat16*>(q_shared);
   __nv_bfloat16* k_bf16 = reinterpret_cast<__nv_bfloat16*>(kv_shared);
   __nv_bfloat16* v_bf16 =
-      reinterpret_cast<__nv_bfloat16*>(kv_shared + kKvElementsPerTile);
+      reinterpret_cast<__nv_bfloat16*>(kv_shared + kKvMatrixElements);
 
   const int req = static_cast<int>(blockIdx.x);
   const int kvh = static_cast<int>(blockIdx.y);
@@ -273,12 +284,14 @@ __global__ void v7_partial_kernel(
           q_value = QIsBF16 ? bf16_bits_to_float(q[q_offset])
                             : fp16_bits_to_float(q[q_offset]);
         }
-        q_shared[idx] = float_to_bf16_bits(q_value * scale);
+        q_shared[local_row * kWmmaLd + d] =
+            float_to_bf16_bits(q_value * scale);
       }
       __syncthreads();
 
       // QK: warps 0 and 1 each produce one 16-token N tile.  K is naturally
-      // token-major [32,256]; WMMA reads it as col-major [256,16] with ld=256.
+      // token-major logical [32,256] in physical rows of ld=264; WMMA reads
+      // it as logical col-major [256,16] with ld=264.
       if (warp < 2) {
         const int n_base = warp * 16;
         nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16,
@@ -292,9 +305,9 @@ __global__ void v7_partial_kernel(
         nvcuda::wmma::fill_fragment(c_frag, 0.0f);
         #pragma unroll
         for (int k0 = 0; k0 < kD; k0 += 16) {
-          nvcuda::wmma::load_matrix_sync(a_frag, q_bf16 + k0, kD);
+          nvcuda::wmma::load_matrix_sync(a_frag, q_bf16 + k0, kWmmaLd);
           nvcuda::wmma::load_matrix_sync(
-              b_frag, k_bf16 + n_base * kD + k0, kD);
+              b_frag, k_bf16 + n_base * kWmmaLd + k0, kWmmaLd);
           nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
         nvcuda::wmma::store_matrix_sync(
@@ -337,10 +350,10 @@ __global__ void v7_partial_kernel(
               : -CUDART_INF_F;
           const float p = valid ? __expf(score - max_base) : 0.0f;
           p_sum += p;
-          // Q occupied this buffer as [16, 256] for QK.  Q is dead after
-          // that WMMA pass, so repack P densely as [16, 32] for the PV
-          // operand.  Using the old 256-column stride here leaves every row
-          // except row zero outside the matrix consumed by WMMA.
+          // Q occupied this buffer as a physical [16,264] matrix for QK.  Q
+          // is dead after that WMMA pass, so repack P densely as [16,32] for
+          // the PV operand.  Using the old 256-column stride here leaves
+          // every row except row zero outside the matrix consumed by WMMA.
           q_shared[local_row * kTile + token_in_tile] =
               float_to_bf16_bits(p * static_v_scale);
         }
@@ -352,7 +365,8 @@ __global__ void v7_partial_kernel(
       __syncthreads();
 
       // PV: every warp owns four output N16 tiles.  A is P [16,32] row-major;
-      // B is the decoded V [32,256] row-major tile with ld=256.
+      // B is the decoded V logical [32,256] row-major tile with physical
+      // row stride ld=264.  P remains dense [16,32] with ld=32.
       {
         const int d_base = warp * 4 * 16;
         #pragma unroll
@@ -371,7 +385,7 @@ __global__ void v7_partial_kernel(
           for (int k0 = 0; k0 < 32; k0 += 16) {
             nvcuda::wmma::load_matrix_sync(a_frag, q_bf16 + k0, kTile);
             nvcuda::wmma::load_matrix_sync(
-                b_frag, v_bf16 + k0 * kD + d0, kD);
+                b_frag, v_bf16 + k0 * kWmmaLd + d0, kWmmaLd);
             nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
           }
           nvcuda::wmma::store_matrix_sync(
