@@ -284,3 +284,70 @@ runtime gates for a candidate that survives isolated performance testing.
 This enhanced harness is now the minimum isolated correctness command for V3
 and later candidates.  A candidate must run from an isolated module/test-site;
 the production 896-page flag must not be omitted.
+
+## Milestone V3 — eight-warp / segment-count factorial (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `030f941`
+
+**Candidate patch:**
+
+```text
+experimental/cmp170hx-mixed-fp8/candidates/spec-decode-fp8-q8-warp8.patch
+```
+
+### Hypothesis
+
+The four-warp q8 kernel uses 250 registers/thread.  An eight-warp compilation
+uses only 167 registers/thread with no local spill.  Pairing the larger CTA with
+17 segments gives 68 CTAs, close to one resident wave on 70 SMs, and might
+improve instruction-level scheduling without duplicating K/V reads.
+
+### Resource model
+
+| launch | threads/CTA | registers/thread | registers/CTA | likely CTA/SM |
+|---|---:|---:|---:|---:|
+| 4 warps | 128 | 250 | 32,000 | 2 |
+| 8 warps | 256 | 167 | 42,752 | 1 |
+
+Both cases expose about eight resident warps per SM.  The candidate therefore
+does not increase theoretical warp occupancy; it trades two independent CTAs
+for one larger CTA.  NSEG17 was tested because 4 KV heads x 17 segments = 68
+CTAs.  NSEG18 produces 72 CTAs and a two-CTA second-wave tail.
+
+### Isolated factorial
+
+All runs used the V1 production geometry, q=8, 10 warmups and 50 measured
+iterations.  Values are microseconds per layer.
+
+| context | 4w/35 baseline | 4w/17 | 4w/18 | 8w/35 | 8w/17 | 8w/18 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4K | 53.9 | 60.8 | 60.6 | 78.9 | 73.2 | 71.1 |
+| 70K | 433.5 | 772.2 | 920.9 | 914.7 | 916.2 | 1600.0 |
+| 126K | 760.1 | 1305.5 | 1338.4 | 1289.7 | 1332.0 | 2403.6 |
+| 200K | 1193.9 | 1719.6 | 2065.6 | 2043.7 | 2077.3 | 3697.7 |
+| 250K | 1476.1 | 2202.1 | 2588.3 | 2575.9 | 2644.8 | 4636.2 |
+
+Against 4w/NSEG35, the intended 8w/NSEG17 candidate was 35.8% slower at 4K,
+75.2% slower at 126K, and 79.2% slower at 250K.  Keeping NSEG35 with eight
+warps was also 69.7%/74.5% slower at 126K/250K.  NSEG18 confirmed the expected
+tail-wave pathology.
+
+The segment variants agreed within small FP16 partial-reduction ordering error
+(`maxdiff <= 0.000244` in the scan).  No full-model or Graph test was justified
+after the isolated regression.
+
+### Decision
+
+**Rejected.**  Lower registers/thread is not a useful objective when total
+registers per CTA remove the second resident CTA.  The eight-warp patch remains
+under `candidates/` for audit and is not added to the active series.
+
+### Next milestone
+
+Do not continue adjusting warp count or segment count.  The next throughput
+candidate must preserve the 4w/NSEG35 grid and attack accumulator live ranges
+inside the CTA.  FP16 `part_o` is a separate low-risk memory-headroom experiment
+but is expected to provide less than 1% whole-model throughput; it should not be
+confused with the main structural redesign.

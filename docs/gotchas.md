@@ -724,3 +724,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     36-40%, consistent with losing the two-resident-CTA geometry behind NSEG35.
     Keep stage 1.  Future latency hiding must control shared-memory lifetime and
     accumulator liveness explicitly rather than relying on a launch hint.
+
+56. **Lower registers/thread can still produce a worse verifier CTA.**  An
+    eight-warp q8/GQA6 build used 167 rather than 250 registers/thread and did
+    not spill, but its 256 threads consume about 42.8K registers per CTA.  That
+    permits only one CTA/SM instead of the baseline's two 4-warp CTAs, leaving
+    both layouts at roughly eight resident warps/SM while removing CTA-level
+    independence.  Pairing it with NSEG17 (68 CTAs for 70 SMs) did not rescue
+    it: isolated latency was 75% slower at 126K and 79% slower at 250K.  NSEG18
+    was worse because two CTAs formed a long second-wave tail.  Keep 4 warps and
+    NSEG35; optimize live ranges without changing this resident-grid geometry.
