@@ -855,3 +855,13 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     executed 783.4 M rather than E6's 711.7 M instructions. Check the target
     toolkit's actual header and end type; vector width alone is not a useful
     optimization if a scalar type bridge is inserted afterward.
+
+71. **Segment-local block metadata can be correct and measurable yet too small
+    to matter.** V7-E10a prefetched up to sixteen K/V physical page bases into
+    256 bytes of already-reserved shared memory and preserved a safe fallback
+    for wider segments. It passed every correctness/high-ID gate and reduced
+    126K instructions from about 711.7 M to 710.9 M, but improved stable
+    126K-250K latency by only 0.7-0.9%. The block-table/address work was not the
+    dominant feed cost; repeated Q preparation and FP8 decode remain much
+    larger. Do not infer a large benefit merely because an independent kernel
+    stages page IDs. Measure the fraction of instructions and stalls removed.

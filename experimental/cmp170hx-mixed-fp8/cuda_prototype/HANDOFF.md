@@ -1,10 +1,9 @@
 # V7 prototype handoff
 
-Status: V7-E9b CUDA FP8x2 intrinsic factorial hardware-qualified and rejected.
-It restores E6's four-phase compact staging and replaces only
-the hot per-byte decode with CUDA 13's available FP8x2-to-half intrinsic plus
-a raw-bit BF16 bridge. The preferred direct FP8x2-to-BF16 symbol is absent from
-the target CUDA 13.0 header. It remains
+Status: V7-E10a split-local physical page/base staging hardware-qualified and
+rejected by performance admission. It uses E6's four-phase compact staging and
+pure bitwise FP8-to-BF16 decode, while prefetching segment-local K/V page bases
+into the existing 512-B LUT allocation. It remains
 disconnected from production dispatch.
 
 Files:
@@ -17,7 +16,7 @@ Files:
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
 
-V7-E9b candidate layout in `v7_verifier.cu`:
+V7-E10a candidate layout in `v7_verifier.cu`:
 
 - persistent all-row FP16 shared accumulator `[48, 256]`, 24,576 B;
 - one decoded BF16 K/V tile physically `[2, 32, 264]`, 33,792 B; only the
@@ -25,21 +24,23 @@ V7-E9b candidate layout in `v7_verifier.cu`:
 - one BF16 Q/P pack physically `[16, 264]`, 8,448 B; logical Q is 256-wide
   and P is repacked densely as `[16, 32]` with `ld=32`;
 - one FP32 score/PV temporary `[16, 224]`, 14,336 B;
-- one shared BF16 FP8 decode LUT `[256]`, 512 B;
+- one reused LUT/page-base allocation, 512 B; sixteen K/V int64 base pairs
+  occupy 256 B and the remainder stays reserved;
 - total dynamic shared: 81,664 B;
 - the first 8,192 B of the Q/P allocation aliases one raw K/V matrix at a
   time before Q is loaded; K and V do not require separate raw buffers;
-- the shared 256-entry BF16 LUT remains allocated and populated once at kernel
-  entry for geometry/occupancy comparability, but E9b's hot decode does not read
-  it;
+- `fp8_lut` remains a public ABI argument, but E10a's pure bit decoder does not
+  read it;
+- segment start prefetches the contiguous physical K/V page bases once when
+  the segment spans at most sixteen pages;
 - `decode_e4m3fn_bf16` is an exported CUDA helper used by the bench's exhaustive
-  256-code device check; it exercises the same FP8x2 intrinsic and requires 254
-  finite bit-exact results plus zero for `0x7f/0xff`;
+  256-code device check; it requires 254 finite bit-exact results plus zero for
+  `0x7f/0xff`;
 - `m/l` retained in registers, with warp-0 lanes 0..15 owning three row-pack
   states each;
 - `part_o/m/l` published once per segment after all tiles, preserving the ABI.
 
-E9b WMMA/decode mapping:
+E10a WMMA/decode mapping:
 
 - QK uses two N16 tiles per 16-row pack: row-major BF16 Q with logical
   `[16,256]` and physical `ld=264`, and col-major BF16 K with logical
@@ -54,13 +55,15 @@ E9b WMMA/decode mapping:
 - each tile uses E6's four phases: coalesced-stage raw K into Q/P's first
   8,192 B as aligned 16-byte `uint4` chunks, barrier, decode K, barrier, then
   repeat for V using the same alias.  An externally unaligned source uses the
-  scalar fallback and invalid token tails are zero-filled.  Each decode loop
-  consumes adjacent D-byte pairs through
-  `__nv_cvt_fp8x2_to_halfraw2(..., __NV_E4M3)`, converts each `__half2_raw`
-  lane to BF16 raw bits with CUDA intrinsics (without Torch-disabled C++
-  conversion operators), and pre-masks `0x7f/0xff` to explicit BF16 zero.
-  The pure integer helper is retained for device-side reference/contrast, but
-  is not the hot path.
+  scalar fallback and invalid token tails are zero-filled.  The pure integer
+  decoder maps `0x7f/0xff` to explicit BF16 zero.
+- at segment start, up to sixteen contiguous block-table pages are loaded once
+  into the former LUT allocation as `block_id * stride_{k,v}b + kvh *
+  stride_{k,v}h`; tile loads read the local page entry and add only
+  `tile_slot * stride_{k,v}s`.
+- a segment spanning more than sixteen pages takes the correctness-preserving
+  old per-tile block-table load plus barrier path, with no truncation or
+  out-of-range page-base lookup.
   Finite normal codes map with `(8+m)*2^(e-10)` to BF16 exponent `e+120`/
   fraction `m<<4`; E4M3FN subnormals normalize from their highest mantissa bit.
 
@@ -167,17 +170,21 @@ Historical E8 measured result:
 - NCU instructions improved 711.7 M -> 675.1 M, but barrier stalls stayed
   19.31%, long scoreboard was 29.11%, and tensor activity 1.53%.
 
-E9b handoff checklist:
+E10a qualification result:
 
-1. Preserve E6 four-phase staging and the corrected fail-closed decoder test.
-2. Qualify CUDA 13's `cuda_fp8.h` declaration for
-   `__nv_cvt_fp8x2_to_halfraw2`, the raw half-to-BF16 bridge, and SM80 lowering
-   on the target host.
-3. Compare the intrinsic against pure bit synthesis over all 254 finite codes,
-   explicitly requiring `0x7f/0xff` to return zero.
-4. Keep production disconnected until the absolute Triton gap closes.
+1. Resources: 86 registers/thread, zero local bytes, 81,664 B dynamic shared,
+   two active CTAs/SM.
+2. Exhaustive decode, complete correctness and 4-GiB high-block-ID passed.
+3. Three-run long tiers were stable at about 8.06/12.76/15.91 ms per layer for
+   126K/200K/250K, only 0.7-0.9% faster than E6.
+4. NCU at 126K: 710.90 M instructions, 19.02% barrier, 28.08% long
+   scoreboard, 1.52% tensor active and 258.26 MB DRAM read.
 
-Measured E9b result:
+Decision: reject E10a for production admission; preserve it as a correct
+measured factorial. Keep production disconnected and start the next structural
+experiment from E6 semantics, targeting repeated Q preparation/fragments.
+
+Historical measured E9b result:
 
 - resources: 79 registers/thread, zero local bytes, 81,664 B dynamic shared,
   two active CTAs/SM;
@@ -189,10 +196,10 @@ Measured E9b result:
   shared-store conflicts, 18.73% barrier, 27.36% long scoreboard, 1.46%
   tensor active and 258.26 MB DRAM read.
 
-Decision: reject E9b for the long-context objective. The CUDA 13.0 public API
+Historical decision: reject E9b for the long-context objective. The CUDA 13.0 public API
 ends at half2, and its half-to-float-to-BF16 bridge costs more instructions
 than E6 exact bit synthesis over long scans. Preserve this source as a measured
-factorial; start split-local page/base staging from E6, not E9b.
+factorial; E10a starts split-local page/base staging from E6, not E9b.
 
 Known risks:
 
@@ -203,6 +210,10 @@ Known risks:
   intended two-CTA residency was measured successfully.
 - E8 reduced instructions but not barrier stalls and missed admission; phase
   count alone is not the relevant synchronization cost.
+- E10a's page-base table is deliberately capped at sixteen pages (256 B inside
+  the retained 512-B allocation); oversized segments take the old per-tile
+  block-table/barrier fallback rather than truncating or indexing past the
+  prefetched entries.
 - The launcher rejects non-contiguous caches and requests the required
   dynamic shared-memory carveout; WMMA is compiled only for SM80.
 - `part_o/m/l` are the established flattened workspace contract, but the
@@ -215,7 +226,7 @@ Known risks:
 Measured E0 resources were 48 registers/thread, 81,920 bytes dynamic shared,
 zero local bytes and two active CTAs/SM.  The 895/896/897/4097 correctness
 smoke passed at max absolute error 0.000977.  These are historical E0/E1
-results and do not qualify the E9b WMMA scaffold by themselves.
+results and do not qualify the E10a WMMA scaffold by themselves.
 
 `bench/test_v7_cuda_prototype.py --full --high-block-id` subsequently passed
 q=6/7, mixed queries, 8K/32K/65K KV and physical block ID 2341.  The synthetic

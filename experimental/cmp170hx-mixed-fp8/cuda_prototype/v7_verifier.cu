@@ -6,15 +6,6 @@
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
-#if defined(__has_include)
-#if __has_include(<cuda_fp8.h>)
-#include <cuda_fp8.h>
-#else
-#error "V7-E9b requires CUDA cuda_fp8.h for __nv_cvt_fp8x2_to_halfraw2"
-#endif
-#else
-#include <cuda_fp8.h>
-#endif
 #include <cuda_fp16.h>
 #include <math_constants.h>
 #include <mma.h>
@@ -53,7 +44,7 @@ constexpr int kRawStageBytes = kKvElementsPerTile * sizeof(unsigned char);
 constexpr int kRawChunkBytes = 16;
 constexpr int kRawChunksPerMatrix = kRawStageBytes / kRawChunkBytes;
 constexpr int kRawChunksPerThread = kRawChunksPerMatrix / kThreads;
-// E9b retains E6's padded physical BF16 WMMA rows and logical 256-wide
+// E10a retains E6's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -61,7 +52,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E9b keeps E6's FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E10a keeps E6's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -75,63 +66,69 @@ constexpr int kQSharedOffset = kKvSharedOffset + kKvSharedBytes;
 constexpr int kTmpSharedOffset = kQSharedOffset + kQBytes;
 constexpr int kFp8LutEntries = 256;
 constexpr int kFp8LutBytes = kFp8LutEntries * static_cast<int>(sizeof(uint16_t));
+// E10a repurposes the existing 512-B LUT allocation for segment-local page
+// bases. Sixteen pages cover 262K tokens divided over NSEG=35; larger
+// segments use the correctness-preserving per-tile fallback below.
+constexpr int kMaxSegmentPages = 16;
+constexpr int kPageBaseBytes = 2 * kMaxSegmentPages *
+                               static_cast<int>(sizeof(int64_t));
 constexpr int kFp8LutSharedOffset = kTmpSharedOffset + kTmpBytes;
 constexpr int kSharedBytes = kFp8LutSharedOffset + kFp8LutBytes;
 
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kWmmaLd == 264, "E9b WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E9b WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E9b WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E9b PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E9b PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E9b PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E9b PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E9b K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E9b accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E9b Q/P buffer must be 8,448 bytes");
+static_assert(kWmmaLd == 264, "E10a WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E10a WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E10a WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E10a PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E10a PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E10a PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E10a PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E10a K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E10a accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E10a Q/P buffer must be 8,448 bytes");
 static_assert(kRawStageBytes == 8192,
-              "E9b raw staging buffer must be 8,192 bytes");
+              "E10a raw staging buffer must be 8,192 bytes");
 static_assert(kRawChunkBytes == sizeof(uint4),
-              "E9b raw staging chunks must use 16-byte uint4 vectors");
-static_assert(sizeof(__nv_fp8x2_storage_t) == 2,
-              "E9b FP8x2 intrinsic storage must contain two bytes");
-static_assert(sizeof(__half2_raw) == 4,
-              "E9b FP8x2 half bridge must contain two raw halves");
-static_assert(sizeof(__nv_bfloat162_raw) == 4,
-              "E9b BF16x2 raw result must contain two raw halves");
+              "E10a raw staging chunks must use 16-byte uint4 vectors");
 static_assert(alignof(uint4) == kRawChunkBytes,
-              "E9b uint4 vector loads must be naturally 16-byte aligned");
+              "E10a uint4 vector loads must be naturally 16-byte aligned");
 static_assert(kRawChunksPerMatrix == 512,
-              "E9b raw staging requires 512 vector chunks per matrix");
+              "E10a raw staging requires 512 vector chunks per matrix");
 static_assert(kRawChunksPerThread == 4,
-              "E9b raw staging assigns four chunks per thread");
-static_assert(kD % 2 == 0,
-              "E9b FP8x2 pairs must fit whole contiguous D rows");
+              "E10a raw staging assigns four chunks per thread");
 static_assert(kD % kRawChunkBytes == 0,
-              "E9b raw vector chunks must not cross a logical D row");
+              "E10a raw vector chunks must not cross a logical D row");
 static_assert(kQSharedOffset % kRawChunkBytes == 0,
-              "E9b raw alias must be 16-byte aligned");
+              "E10a raw alias must be 16-byte aligned");
 static_assert(kRawStageBytes <= kQBytes,
-              "E9b raw staging must fit within the Q/P shared buffer");
+              "E10a raw staging must fit within the Q/P shared buffer");
 static_assert(kQSharedOffset + kRawStageBytes <=
                   kQSharedOffset + kQBytes,
-              "E9b raw alias must remain within the Q/P allocation");
+              "E10a raw alias must remain within the Q/P allocation");
 static_assert(kQSharedOffset >= kKvSharedOffset + kKvSharedBytes,
-              "E9b raw alias must not overlap decoded K/V output");
+              "E10a raw alias must not overlap decoded K/V output");
 static_assert(kTmpSharedOffset == 66816,
-              "E9b temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E9b temporary tile must be 14,336 bytes");
-static_assert(kFp8LutEntries == 256, "E9b LUT must have 256 entries");
-static_assert(kFp8LutBytes == 512, "E9b shared LUT must be 512 bytes");
+              "E10a temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E10a temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E10a LUT allocation must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E10a LUT allocation must be 512 bytes");
+static_assert(kMaxSegmentPages == 16,
+              "E10a page-base prefetch must cap segments at sixteen pages");
+static_assert(kPageBaseBytes == 256,
+              "E10a sixteen K/V page bases must occupy 256 bytes");
+static_assert(kPageBaseBytes <= kFp8LutBytes,
+              "E10a page-base table must fit the retained LUT allocation");
+static_assert(kFp8LutSharedOffset % sizeof(int64_t) == 0,
+              "E10a page-base table must be int64 aligned");
 static_assert(kFp8LutSharedOffset == 81152,
-              "E9b shared LUT offset must be 81,152 bytes");
+              "E10a retained LUT/page-base offset must be 81,152 bytes");
 static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
-              "E9b shared LUT must not overlap temporary storage");
-static_assert(kSharedBytes == 81664, "E9b shared layout must be 81,664 bytes");
+              "E10a retained LUT/page-base area must not overlap temporary storage");
+static_assert(kSharedBytes == 81664, "E10a shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E9b shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E10a shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -179,43 +176,6 @@ __device__ __forceinline__ uint16_t fp8_e4m3fn_to_bf16_bits(uint8_t code) {
   const int bf16_fraction = mantissa << 4;
   return sign | static_cast<uint16_t>(bf16_exponent << 7) |
          static_cast<uint16_t>(bf16_fraction);
-}
-
-__device__ __forceinline__ uint16_t half_raw_to_bf16_bits(uint16_t bits) {
-  // Avoid __half/__nv_bfloat16 C++ conversion operators: Torch's headers can
-  // disable those operators.  Raw half bits are converted through the CUDA
-  // intrinsics already used by this prototype.  Every finite E4M3FN value is
-  // exactly representable in half and FP32, so the RNE BF16 bridge preserves
-  // the qualified finite bits.
-  __half_raw half;
-  half.x = bits;
-  return __bfloat16_as_ushort(__float2bfloat16_rn(__half2float(half)));
-}
-
-__device__ __forceinline__ __nv_bfloat162_raw fp8_e4m3fn_x2_to_bf16_raw(
-    uint8_t code0, uint8_t code1) {
-  const bool invalid0 = (code0 & 0x7Fu) == 0x7Fu;
-  const bool invalid1 = (code1 & 0x7Fu) == 0x7Fu;
-  __nv_bfloat162_raw result = {0u, 0u};
-  if (!invalid0 || !invalid1) {
-    // __nv_fp8x2_storage_t stores the first byte in the low eight bits and
-    // the second byte in the high eight bits, matching raw token-major D.
-    const __nv_fp8x2_storage_t pair =
-        static_cast<__nv_fp8x2_storage_t>(
-            static_cast<uint16_t>(invalid0 ? 0 : code0) |
-            (static_cast<uint16_t>(invalid1 ? 0 : code1) << 8));
-    const __half2_raw half_pair =
-        __nv_cvt_fp8x2_to_halfraw2(pair, __NV_E4M3);
-    result.x = half_raw_to_bf16_bits(half_pair.x);
-    result.y = half_raw_to_bf16_bits(half_pair.y);
-    if (invalid0) {
-      result.x = 0u;
-    }
-    if (invalid1) {
-      result.y = 0u;
-    }
-  }
-  return result;
 }
 
 template <bool IsI64>
@@ -285,33 +245,25 @@ __device__ __forceinline__ void stage_raw_kv(
   }
 }
 
-// Intrinsic FP8x2 conversion for one raw pair.  E4M3FN's two invalid NaN
-// encodings are detected before the conversion and replaced with zero, so the
-// official intrinsic never gets to choose a NaN payload.  The pure integer
-// helper above remains available for device-side reference/contrast testing.
-__device__ __forceinline__ void decode_raw_kv_intrinsic(
+// Decode one staged raw FP8 tile through the exact E6 integer converter.
+// E4M3FN's two invalid NaN encodings are explicitly fail-closed to BF16 zero.
+__device__ __forceinline__ void decode_raw_kv(
     uint16_t* shared_kv,
     const unsigned char* raw_stage,
     bool is_v) {
   const int tid = threadIdx.x;
-  for (int element = tid * 2; element < kKvElementsPerTile;
-       element += blockDim.x * 2) {
+  for (int element = tid; element < kKvElementsPerTile;
+       element += blockDim.x) {
     const int token_in_tile = element / kD;
     const int d = element % kD;
-    // element is even and kD is even, so this pair remains in one token row.
     const int physical = token_in_tile * kWmmaLd + d;
-    const uint8_t code0 = raw_stage[element];
-    const uint8_t code1 = raw_stage[element + 1];
-    const __nv_bfloat162_raw converted =
-        fp8_e4m3fn_x2_to_bf16_raw(code0, code1);
-    const int matrix_offset = is_v ? kKvMatrixElements : 0;
-    shared_kv[matrix_offset + physical] = converted.x;
-    shared_kv[matrix_offset + physical + 1] = converted.y;
+    shared_kv[(is_v ? kKvMatrixElements : 0) + physical] =
+        fp8_e4m3fn_to_bf16_bits(raw_stage[element]);
   }
 }
 
 // Restore E6's four-phase K-stage/decode plus V-stage/decode sequence while
-// changing only the per-byte conversion to the official CUDA FP8x2 intrinsic.
+// retaining its pure bitwise FP8-to-BF16 conversion.
 // Block/head bases remain tile-hoisted.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
@@ -320,28 +272,22 @@ __device__ __forceinline__ void load_kv_bf16(
     const unsigned char* v_cache,
     int64_t tile_token,
     int64_t block_size,
-    int64_t kvh,
-    int64_t block_id,
-    int64_t k_stride_b,
+    int64_t k_page_base,
+    int64_t v_page_base,
     int64_t k_stride_s,
-    int64_t k_stride_h,
-    int64_t v_stride_b,
     int64_t v_stride_s,
-    int64_t v_stride_h,
     int64_t kv_len) {
   const int64_t tile_slot = tile_token % block_size;
-  const int64_t k_tile_base =
-      block_id * k_stride_b + tile_slot * k_stride_s + kvh * k_stride_h;
-  const int64_t v_tile_base =
-      block_id * v_stride_b + tile_slot * v_stride_s + kvh * v_stride_h;
+  const int64_t k_tile_base = k_page_base + tile_slot * k_stride_s;
+  const int64_t v_tile_base = v_page_base + tile_slot * v_stride_s;
 
   stage_raw_kv(raw_stage, k_cache, k_tile_base, k_stride_s, tile_token, kv_len);
   __syncthreads();
-  decode_raw_kv_intrinsic(shared_kv, raw_stage, false);
+  decode_raw_kv(shared_kv, raw_stage, false);
   __syncthreads();
   stage_raw_kv(raw_stage, v_cache, v_tile_base, v_stride_s, tile_token, kv_len);
   __syncthreads();
-  decode_raw_kv_intrinsic(shared_kv, raw_stage, true);
+  decode_raw_kv(shared_kv, raw_stage, true);
   __syncthreads();
 }
 
@@ -380,8 +326,6 @@ __global__ void v7_partial_kernel(
   // at a time.  The fourth-stage decode barrier ends this alias lifetime;
   // thereafter Q/P and tmp reclaim their normal WMMA/PV regions.
   unsigned char* raw_stage = reinterpret_cast<unsigned char*>(q_shared);
-  uint16_t* fp8_lut_shared = reinterpret_cast<uint16_t*>(
-      shared + kFp8LutSharedOffset);
   // The P matrix occupies the first 16x32 BF16 entries.  The remaining
   // buffer space carries alpha as exact FP32 values until the PV fusion.
   float* alpha_shared =
@@ -398,13 +342,15 @@ __global__ void v7_partial_kernel(
   const int lane = tid & 31;
   const int warp = tid >> 5;
 
-  // Retain E6's 512-B shared LUT allocation and load it once per CTA so the
-  // shared-memory geometry stays comparable.  E9b's FP8x2 hot decoder does not
-  // read this table in the hot loop; the accumulator-init barrier still
-  // publishes the copied entries for ABI/resource comparability.
-  const int lut_index = tid * 2;
-  fp8_lut_shared[lut_index] = fp8_lut[lut_index];
-  fp8_lut_shared[lut_index + 1] = fp8_lut[lut_index + 1];
+  // E10a reuses the existing 512-B LUT allocation for segment-local physical
+  // page bases.  The public fp8_lut argument remains in the ABI, but E6's
+  // exact bit decoder (below) does not read it.  Sixteen K/V base pairs use
+  // only 256 B; the remaining bytes stay reserved inside the same allocation.
+  int64_t* page_bases = reinterpret_cast<int64_t*>(
+      shared + kFp8LutSharedOffset);
+  int64_t* k_page_bases = page_bases;
+  int64_t* v_page_bases = page_bases + kMaxSegmentPages;
+  (void)fp8_lut;
 
   const int64_t q_start = load_index<IndexI64>(cu_q, req);
   const int64_t q_len = load_index<IndexI64>(cu_q, req + 1) - q_start;
@@ -413,6 +359,37 @@ __global__ void v7_partial_kernel(
   const int64_t tiles_per_seg = (tiles_total + kNseg - 1) / kNseg;
   const int64_t t0 = static_cast<int64_t>(seg) * tiles_per_seg;
   const int64_t t1 = min(t0 + tiles_per_seg, tiles_total);
+  const bool nonempty_segment = t0 < t1;
+  const int64_t first_page =
+      nonempty_segment ? (t0 * kTile) / kBlockSize : 0;
+  const int64_t last_page =
+      nonempty_segment ? ((t1 - 1) * kTile) / kBlockSize : 0;
+  const int64_t segment_pages =
+      nonempty_segment ? (last_page - first_page + 1) : 0;
+  const bool use_page_prefetch =
+      q_len > 0 && segment_pages >= 0 && segment_pages <= kMaxSegmentPages;
+
+  // Prefetch the contiguous page range once per segment.  The same barrier
+  // that publishes the initial accumulator also publishes these bases.  If a
+  // segment exceeds the fixed table, leave it untouched and use the old
+  // per-tile block-table path below; no page index is ever truncated.
+  if (use_page_prefetch) {
+    for (int index = tid; index < 2 * kMaxSegmentPages;
+         index += blockDim.x) {
+      const int local_page =
+          index < kMaxSegmentPages ? index : index - kMaxSegmentPages;
+      if (local_page < segment_pages) {
+        const int64_t page = first_page + local_page;
+        const int64_t block_id = load_block_id<BlockI64>(
+            block_table, static_cast<int64_t>(req) * stride_bt + page);
+        page_bases[index] =
+            block_id * (index < kMaxSegmentPages ? stride_kb : stride_vb) +
+            kvh * (index < kMaxSegmentPages ? stride_kh : stride_vh);
+      } else {
+        page_bases[index] = 0;
+      }
+    }
+  }
 
   // Persistent FP16 running value state is shared by all three row groups.
   // Warp 0 lanes 0..15 each own the three m/l states for one local row.
@@ -463,16 +440,31 @@ __global__ void v7_partial_kernel(
 
   __shared__ int64_t block_id_shared;
   for (int64_t tile = t0; tile < t1; ++tile) {
-    if (tid == 0) {
-      const int64_t page = (tile * kTile) / kBlockSize;
-      block_id_shared = load_block_id<BlockI64>(
-          block_table, static_cast<int64_t>(req) * stride_bt + page);
+    const int64_t page = (tile * kTile) / kBlockSize;
+    const int64_t local_page = page - first_page;
+    const bool page_in_prefetch =
+        use_page_prefetch && local_page >= 0 &&
+        local_page < segment_pages;
+    int64_t k_page_base = 0;
+    int64_t v_page_base = 0;
+    if (page_in_prefetch) {
+      k_page_base = k_page_bases[local_page];
+      v_page_base = v_page_bases[local_page];
+    } else {
+      // Correctness fallback for segments wider than the fixed prefetch table
+      // (or any impossible arithmetic mismatch): retain the old one-load,
+      // one-barrier block-table path without indexing page_bases.
+      if (tid == 0) {
+        block_id_shared = load_block_id<BlockI64>(
+            block_table, static_cast<int64_t>(req) * stride_bt + page);
+      }
+      __syncthreads();
+      k_page_base = block_id_shared * stride_kb + kvh * stride_kh;
+      v_page_base = block_id_shared * stride_vb + kvh * stride_vh;
     }
-    __syncthreads();
     load_kv_bf16(
-        kv_shared, raw_stage, k_cache, v_cache, tile * kTile, kBlockSize, kvh,
-        block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb, stride_vs,
-        stride_vh, kv_len);
+        kv_shared, raw_stage, k_cache, v_cache, tile * kTile, kBlockSize,
+        k_page_base, v_page_base, stride_ks, stride_vs, kv_len);
 
     // The Q/P buffer is reused for each 16-row pack.  Loading Q once per pack
     // per tile is required because P occupies its first 32 columns.  This
@@ -760,9 +752,7 @@ __global__ void v7_decode_e4m3fn_kernel(
                        threadIdx.x;
        index < count;
        index += static_cast<int64_t>(gridDim.x) * blockDim.x) {
-    const __nv_bfloat162_raw converted =
-        fp8_e4m3fn_x2_to_bf16_raw(codes[index], codes[index]);
-    out[index] = converted.x;
+    out[index] = fp8_e4m3fn_to_bf16_bits(codes[index]);
   }
 }
 

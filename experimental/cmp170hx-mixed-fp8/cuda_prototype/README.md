@@ -32,18 +32,17 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
-The V7-E9b partial candidate keeps the same four-warp CTA and fixed geometry,
-but maps QK/PV to SM80 BF16 WMMA tensor cores.  Each tile restores E6's
+The V7-E10a partial candidate keeps the same four-warp CTA and fixed geometry,
+but maps QK/PV to SM80 BF16 WMMA tensor cores.  Each tile uses E6's exact
 four-phase compact staging (K stage/decode, then V stage/decode) in the first
-8,192 B of the Q/P shared buffer.  CUDA 13.0 does not expose the preferred
-FP8x2-to-BF16 symbol, so the decode pass consumes adjacent raw D pairs through
-the available `__nv_cvt_fp8x2_to_halfraw2` intrinsic, then
-bridges the returned `__half2_raw` lane bits to BF16 raw bits using CUDA raw
-intrinsics.  The two qualified NaN encodings are explicitly pre-masked to
-BF16 zero.  The pure integer E4M3FN helper remains available for device-side
-contrast, while E9b's hot path uses FP8x2-to-half conversion plus the raw-bit
-bridge.  E6's 512 B LUT and all shared geometry remain fixed;
-the LUT is populated for resource comparability but not read in the hot loop.
+8,192 B of the Q/P shared buffer, with the pure bitwise E4M3FN-to-BF16 helper
+and qualified `0x7f/0xff` fail-closed zero semantics.  E10a repurposes the
+existing 512 B LUT shared allocation for segment-local physical K/V page
+bases: up to sixteen page base pairs are prefetched once at segment start,
+then each tile adds only its local `tile_slot * stride_s`.  Segments spanning
+more than sixteen pages use the prior per-tile block-table load as a
+correctness-preserving fallback.  The public `fp8_lut` argument remains in
+the ABI but is not read by the pure bit decoder.
 The 48
 query/group rows are processed as three sequential
 16-row packs.  Q/K/V use a padded physical leading
@@ -60,17 +59,17 @@ tile.  Each phase merges `previous * alpha + tmp` into the unchanged all-row
 FP16 accumulator.  Empty/causal tails remain masked, and physical block IDs
 are loaded/promoted as `int64_t` before multiplication by cache strides.
 
-## V7-E9b CUDA FP8x2 intrinsic factorial (correct; rejected)
+## V7-E10a split-local physical page/base staging (correct; rejected)
 
-The current source is the E9b tensor-core candidate.  Its fixed 81,664-byte
-dynamic shared-memory layout is:
+The current source is the E10a tensor-core candidate.  Its fixed 81,664-byte
+dynamic shared-memory layout is unchanged:
 
 ```text
 all-row FP16 accumulator [48, 256]       24,576 B
 one decoded BF16 K/V tile [2, 32, 264]    33,792 B
 one BF16 Q/P pack [16, 264]                8,448 B
 one FP32 score/PV temporary [16, 224]     14,336 B
-shared BF16 FP8 decode LUT [256]              512 B
+reused LUT/page-base allocation [256]        512 B
                                            ------
                                            81,664 B
 ```
@@ -79,19 +78,33 @@ The 264-element leading dimensions add eight BF16 padding elements per
 physical WMMA row only; the logical D remains 256.  P is repacked densely as
 `[16,32]` with `ld=32`, and the Q/P pack's unused tail stores 16 FP32 alpha
 values between softmax and PV fusion.  The FP32 scratch's main-phase rows use
-`ld=224`; the tail reuses its first 16x32 entries with `ld=32`.  The shared LUT
-allocation is retained for geometry/occupancy comparability but is not read by
-the E9b raw-decode hot loop.  Before Q/P is live, E9b aliases its first 8,192 B
-for one raw matrix at a time.  Each K/V pass coalesced-stages aligned 16-byte
-`uint4` chunks, with a safe scalar fallback for an unaligned external base and
-zero-fill for invalid token tails.  A barrier publishes each stage; the
-following element-pair loop detects `0x7f/0xff` before invoking
-`__nv_cvt_fp8x2_to_halfraw2` with `__NV_E4M3`, converts each returned half raw
-lane to BF16 bits using `__half2float` and `__float2bfloat16_rn`, and overrides
-invalid outputs to BF16 zero.  No Torch-disabled C++ conversion operators are
-used.  A final barrier publishes each decoded padded K/V matrix before Q/P and
-tmp return to their normal WMMA/PV roles.  The pure integer helper remains
-available as a device-side reference; it is not the hot path.
+`ld=224`; the tail reuses its first 16x32 entries with `ld=32`.  Before Q/P is
+live, E10a aliases its first 8,192 B for one raw matrix at a time.  Each K/V
+pass coalesced-stages aligned 16-byte `uint4` chunks, with a safe scalar
+fallback for an unaligned external base and zero-fill for invalid token tails.
+The four stage/decode barriers are unchanged from E6.  At segment start, the
+same initial accumulator barrier publishes up to sixteen K/V page bases stored
+in the former LUT allocation (256 B of the 512 B region).  Tile loads use the
+local page entry and only add `tile_slot * stride_s`; an oversized segment
+falls back to the old per-tile block-table load/barrier path without truncating
+its page index.  The pure bit decoder maps `0x7f/0xff` to BF16 zero, and the
+exported helper/test retains the 254-finite-bit-exact plus two-zero exhaustive
+contract.  Accumulator, logical tmp/output indexing, launcher, current-stream
+selection, int64 index and block-table dispatch, page arithmetic, and flattened
+FP32 partial workspace ABI are unchanged. On CMP 170HX, E10a used 86
+registers/thread, zero local bytes, 81,664 B shared and two active CTAs/SM.
+All exhaustive, full correctness and 4-GiB high-block-ID gates passed. Three
+performance runs showed only about 0.7-0.9% stable improvement at 126K-250K
+versus E6, below admission; NCU at 126K measured 710.90 M instructions, 19.02%
+barrier stalls, 28.08% long scoreboard and 1.52% tensor activity. It is
+retained as a measured factorial, not a production candidate.
+
+### E9b baseline (historical, hardware qualified but rejected)
+
+E9b was the preceding FP8x2-to-half intrinsic factorial.  It passed the
+exhaustive/correctness/resource gates but regressed the long-context tiers;
+its measured result is retained below for comparison.
+
 For finite E4M3FN code `(s,e,m)`, normal values use `(8+m)*2^(e-10)` and map
 to BF16 exponent `e+120` with fraction `m<<4`; `e=0` subnormals are normalized
 from the highest set mantissa bit.  Both NaN encodings (`0x7f`, `0xff`) follow
@@ -144,7 +157,7 @@ long-scoreboard stalls from 51.99% to 28.48%, and tensor activity rose from
 versus staged-load factorial. E6 remains an isolated hardware-qualified
 scaffold, not a production integration.
 
-### E5 baseline (historical, not an E9b qualification)
+### E5 baseline (historical, not an E10a qualification)
 
 Hardware E5 retained 79 registers/thread, zero spill, 81,664 B shared and two
 CTAs/SM; full correctness/high-block-ID passed. Five-tier latency was
@@ -153,7 +166,7 @@ CTAs/SM; full correctness/high-block-ID passed. Five-tier latency was
 instructions, 51.99% long-scoreboard stalls, 0.88% tensor activity and
 72.22 M shared-load conflicts. It is rejected for long-context admission.
 
-### E4b baseline (historical, not an E9b qualification)
+### E4b baseline (historical, not an E10a qualification)
 
 Hardware E4b retained 79 registers/thread, zero local spill, 81,664 B shared and
 two CTAs/SM. Full correctness/high-block-ID passed. However,
@@ -165,7 +178,7 @@ instructions, 52.00% long-scoreboard stalls, 0.88% tensor activity and
 shorten the feed dependency chain; E5 replaced that path with shared raw
 staging, and E6 replaces its shared-LUT hot read with bitwise decode.
 
-### E4a baseline (historical, not an E9b qualification)
+### E4a baseline (historical, not an E10a qualification)
 
 On CMP 170HX hardware E4a compiled to 79 registers/thread, zero local spill,
 81,664 B dynamic shared and two active CTAs/SM. The complete correctness and
@@ -177,7 +190,7 @@ NCU retained 51.97% long-scoreboard stalls, only 0.88% tensor-pipe activity,
 and 72.22 M shared-load conflicts. E4b changed only raw-load vectorization
 and per-tile address-base preparation; the measured result above rejected it.
 
-### E3b baseline (historical, not an E9b qualification)
+### E3b baseline (historical, not an E10a qualification)
 
 The E3b padded source used 81,152 B dynamic shared memory and two CTAs/SM.
 Full correctness/high-block-ID passed.  The five-tier scan at
@@ -187,7 +200,7 @@ faster than E2 at long contexts but 3% slower at 4K and still 18-19x behind
 Triton.  NCU retained 52.26% long-scoreboard stalls, motivating E4a's shared
 LUT feed change.
 
-### E3a baseline (historical, not an E9b qualification)
+### E3a baseline (historical, not an E10a qualification)
 
 The padded E3a source used the same Q/K/V physical leading dimension of 264
 but retained a 16x256 FP32 temporary, for 83,200 B total.  On hardware it
@@ -198,7 +211,7 @@ one.  It regressed at every tier: 4K/70K/126K/200K/250K measured
 882.3/13,220.8/23,600.3/37,307.3/46,681.1 us per layer.  E3b recovered 2,048 B
 of temporary storage while preserving padding and restored two CTAs/SM.
 
-### E2 baseline (historical, not an E9b qualification)
+### E2 baseline (historical, not an E10a qualification)
 
 The unpadded E2 source used 81,920 B of dynamic shared memory and passed the
 complete correctness/high-block-ID gate after correcting P's compact stride

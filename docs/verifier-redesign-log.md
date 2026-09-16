@@ -1037,3 +1037,46 @@ Use it as a correctness and dataflow reference for CTA ownership, page-list
 staging and an optional INT8 control. Do not transplant its cache ABI, 64-token
 page geometry, groupwise quantization, split constants or native-FP8 path into
 the 896-token static-FP8 verifier.
+
+## Milestone V7-E10a — split-local physical page/base staging (correct; rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `297e00e`
+
+E10a applied the safest useful idea from `Ithrial/ninfer-cmp170hx` without
+copying its incompatible cache ABI. It reuses the retained 512-byte LUT
+allocation to prefetch up to sixteen K/V physical page bases once per segment.
+The tile loop then adds only `tile_slot * stride_s`; a segment wider than the
+fixed table takes the original per-tile block-table path without truncation.
+E10a otherwise restores E6's four-phase staging and exact fail-closed bitwise
+E4M3FN decode.
+
+The extension compiled to 86 registers/thread, zero local bytes, 81,664 bytes
+dynamic shared memory and two active CTAs/SM. The exhaustive 256-code test,
+q=5/6/7/8, int32/int64, page boundaries, mixed requests, 8K/32K/65K and the
+4-GiB physical block-ID 2341 case all passed. The largest high-ID error was
+0.0625 (<0.08).
+
+| context | E6 per-tile block lookup | E10a page-base prefetch | change |
+|---:|---:|---:|---:|
+| 4K | 378.5 | 387.8 first run; 342.2/356.6 repeats | noisy |
+| 70K | 4,957.3 | 4,938.3; 4,719.1; 4,577.3 | noisy improvement |
+| 126K | 8,130.3 | 8,055.0; 8,056.6; 8,065.3 | about -0.9% |
+| 200K | 12,845.7 | 12,762.6; 12,757.5; 12,756.9 | about -0.7% |
+| 250K | 16,041.2 | 15,915.4; 15,913.9; 15,913.0 | about -0.8% |
+
+NCU at 126K measured 710.90 M executed instructions, 6.049 M tensor
+instructions, 1.52% tensor-pipe activity, 63.515 M shared-load conflicts,
+31.213 M shared-store conflicts and 258.26 MB DRAM reads. Relative to E6,
+barrier stalls moved 19.23% -> 19.02% and long-scoreboard stalls 28.48% ->
+28.08%. The saved block-table/address work is therefore real, but it is a
+small fraction of the remaining feed cost; register use also rose 79 -> 86.
+
+**Rejected by the production admission thresholds.** The stable long-context
+gain is below 1%, not the required 5%, and short tiers are noisy. Preserve
+E10a as a correct measured factorial and NInfer-derived design check, but keep
+E6 as the base for the next structural experiment. The next high-value target
+is repeated Q conversion/loading: each tile currently rebuilds all three
+16-row Q groups. A persistent-Q fragment design should be isolated from page
+staging so its register/residency trade is measurable.

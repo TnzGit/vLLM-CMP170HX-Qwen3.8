@@ -1351,6 +1351,7 @@ Completed milestones:
 | V7-E7 direct global load | `b6980c6` | correct; rejected, 28-69% slower than staged E6 |
 | V7-E8 dual staging | current milestone | correct; 1-2% long gain, +7.7% 4K, rejected |
 | V7-E9b FP8x2-half bridge | current milestone | correct; -8.3% 4K but +2.8-3.0% long, rejected |
+| V7-E10a page-base staging | current milestone | correct; ~0.7-0.9% stable long gain, rejected |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
@@ -1360,8 +1361,13 @@ qualified service tree.
 The next owner should use E6 four-phase staging as the performance baseline
 but preserve E8's corrected NaN fail-closed contract. E9b proved the target
 CUDA 13.0 toolkit has only FP8x2-to-half, not direct FP8x2-to-BF16: the bridge
-improved 4K 8.3% but regressed 126K-250K 2.8-3.0% and is rejected. Next test
-split-local page IDs/bases as an independent factorial.
+improved 4K 8.3% but regressed 126K-250K 2.8-3.0% and is rejected. E10a then
+tested split-local page bases independently. It passed every gate and retained
+two CTAs/SM, but the stable 126K-250K gain was only 0.7-0.9%, so it is also
+rejected for production admission. The next isolated target is persistent Q
+preparation/fragments: the current kernel reloads and rescales all three
+16-row Q groups for every KV tile. Do not combine that factor with E10a before
+it is independently qualified.
 Admission remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and
 <=2% 4K regression before full-model/CUDA Graph A/B.
 
