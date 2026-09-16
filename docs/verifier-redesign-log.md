@@ -1195,3 +1195,40 @@ correctness and the 4-GiB high-block-ID test passed.
 5% admission gate. Padding this WMMA store cannot pay for the scalar merge's
 less favorable bank phase. Restore E12 and target the FP32 score-pack read
 layout independently; do not combine score and scratch padding in one factor.
+
+## Milestone V7-E13b — padded FP32 score rows (accepted long-context candidate)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `a2681c3`
+
+E13b restores E12's dense `ld=16` PV scratch and changes only the FP32 score
+pack. Each logical `[16,32]` group uses physical `ld=36`; WMMA stores and the
+scalar online-softmax reads share that stride. The four-column pad rotates
+successive rows across shared-memory banks. Three packs occupy 6,912 bytes and
+still end at byte 7,936 of the 8,192-byte raw-stage alias.
+
+Resources remained 164 registers/thread, zero local bytes/spills, 81,664
+bytes shared and two active CTAs/SM. Exhaustive decode, full correctness and
+the 4-GiB high-block-ID test passed.
+
+| context | E12 median us/layer | E13b median us/layer | change |
+|---:|---:|---:|---:|
+| 4K | 241.7 | 290.4 | +20.1% |
+| 70K | 2,382.8 | 2,713.9 | +13.9% |
+| 126K | 4,046.5 | 3,767.8 | -6.9% |
+| 200K | 6,304.6 | 5,883.6 | -6.7% |
+| 250K | 7,876.7 | 7,348.3 | -6.7% |
+
+NCU at 126K validates the mechanism. Shared-load conflicts fell
+69.558 M -> 27.230 M (-60.9%), short-scoreboard stalls fell
+21.01% -> 15.85%, barrier stalls fell 15.47% -> 14.83%, MIO throttle fell
+0.25% -> 0.10%, and tensor activity rose 3.01% -> 3.24%. DRAM remained
+258.22 MB and tensor instructions remained 6.049 M. Executed instructions rose
+436.54 M -> 447.13 M, but the dependency reduction more than paid for the
+extra padded addressing at long context.
+
+**Accepted only as a long-context candidate.** It clears the 5% gate from
+126K through 250K but regresses 4K/70K. Before any production integration,
+measure the 80K-120K crossover and add length-aware dispatch between E12 and
+E13b; do not replace E12 globally.

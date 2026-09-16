@@ -1,4 +1,4 @@
-// Standalone V7-E13a fixed-geometry persistent-Q verifier prototype.
+// Standalone V7-E13b fixed-geometry persistent-Q verifier prototype.
 //
 // This file intentionally has no vLLM/FlashInfer dependency and is not wired
 // into any production dispatch.  It mirrors the split-KV partial/combine
@@ -76,18 +76,22 @@ constexpr int kQPackElements = kRowsPerGroup * kTile;
 constexpr int kQElements = kRowsPerGroup * kD;
 constexpr int kQPackBytes = kQPackElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kScoreGroups = kRowGroups;
-constexpr int kScoreElements = kScoreGroups * kQPackElements;
+// E13b pads each FP32 score row from 32 to 36 columns. Scalar softmax reads
+// only the first 32 columns; the four-column pad rotates successive rows over
+// shared-memory banks instead of stacking all sixteen rows on one phase.
+constexpr int kScoreCols = kTile;
+constexpr int kScoreLd = 36;
+constexpr int kScorePackElements = kRowsPerGroup * kScoreLd;
+constexpr int kScoreElements = kScoreGroups * kScorePackElements;
 constexpr int kScoreBytes = kScoreElements * static_cast<int>(sizeof(float));
 constexpr int kScorePackBytes =
-    kQPackElements * static_cast<int>(sizeof(float));
+    kScorePackElements * static_cast<int>(sizeof(float));
 constexpr int kPGroupBytes =
     kQPackElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kPAllBytes = kRowGroups * kPGroupBytes;
-// E13a pads the FP32 WMMA scratch leading dimension from 16 to 20.  Float
-// accumulator stores permit ldm multiples of four; ld=20 separates the SM80
-// WMMA row-bank phases while preserving the logical 16x16 tile.
+// Restore E12's dense FP32 PV scratch so E13b isolates only score padding.
 constexpr int kPvScratchCols = 16;
-constexpr int kPvScratchLd = 20;
+constexpr int kPvScratchLd = 16;
 constexpr int kPvScratchLogicalElements =
     kRowsPerGroup * kPvScratchCols;
 constexpr int kPvScratchElements = kRowsPerGroup * kPvScratchLd;
@@ -97,7 +101,7 @@ constexpr int kPvScratchGroups = kRowGroups;
 constexpr int kPvScratchTotalBytes = kPvScratchGroups * kPvScratchBytes;
 // q_shared's raw alias is live only until the fourth decode barrier.  The
 // score region intentionally remains inside that former 8,192-B raw lifetime
-// so no shared-memory allocation grows for E13a.
+// so no shared-memory allocation grows for E13b.
 constexpr int kScoreSharedOffset = kQPackBytes;
 constexpr int kAlphaSharedOffset = kScoreSharedOffset + kScoreBytes;
 
@@ -146,19 +150,24 @@ static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
               "E12 retained LUT area must not overlap temporary storage");
 static_assert(kQPackBytes == 1024, "E12 dense P pack must occupy 1,024 bytes");
 static_assert(kQElements == 4096, "E12 Q conversion must cover 4,096 elements");
-static_assert(kScoreBytes == 6144, "E12 three score packs must occupy 6,144 bytes");
-static_assert(kScorePackBytes == 2048,
-              "E12 each FP32 score pack must occupy 2,048 bytes");
+static_assert(kScoreCols == 32,
+              "E13b each logical score row must contain 32 values");
+static_assert(kScoreLd == 36,
+              "E13b each physical score row must have leading dimension 36");
+static_assert(kScoreBytes == 6912,
+              "E13b three padded score packs must occupy 6,912 bytes");
+static_assert(kScorePackBytes == 2304,
+              "E13b each padded FP32 score pack must occupy 2,304 bytes");
 static_assert(kPGroupBytes == 1024,
               "E12 each BF16 P pack must occupy 1,024 bytes");
 static_assert(kPAllBytes == 3072,
               "E12 three disjoint BF16 P packs must occupy 3,072 bytes");
 static_assert(kPvScratchLogicalElements == 256,
-              "E13a each logical PV scratch tile must contain 256 values");
-static_assert(kPvScratchBytes == 1280,
-              "E13a each padded PV scratch tile must occupy 1,280 bytes");
-static_assert(kPvScratchTotalBytes == 3840,
-              "E13a must reserve three disjoint padded PV scratch tiles");
+              "E13b each logical PV scratch tile must contain 256 values");
+static_assert(kPvScratchBytes == 1024,
+              "E13b each dense PV scratch tile must occupy 1,024 bytes");
+static_assert(kPvScratchTotalBytes == 3072,
+              "E13b must reserve three disjoint dense PV scratch tiles");
 static_assert(kScoreSharedOffset + kScoreBytes <= kRawStageBytes,
               "E12 score packs must fit the raw-stage lifetime");
 static_assert(kPAllBytes + kPvScratchTotalBytes <= kTmpBytes,
@@ -504,7 +513,7 @@ __global__ void v7_partial_kernel(
     // pack.  The post-decode raw alias is not reused until the CTA barrier at
     // the bottom of this tile, so a faster owner cannot race a later raw load.
     if (warp < kRowGroups) {
-      float* group_scores = score_shared + warp * kQPackElements;
+      float* group_scores = score_shared + warp * kScorePackElements;
       #pragma unroll
       for (int n_base = 0; n_base < kTile; n_base += 16) {
         nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16,
@@ -522,7 +531,7 @@ __global__ void v7_partial_kernel(
               c_frag, q_a_fragments[fragment], b_frag, c_frag);
         }
         nvcuda::wmma::store_matrix_sync(
-            group_scores + n_base, c_frag, kTile,
+            group_scores + n_base, c_frag, kScoreLd,
             nvcuda::wmma::mem_row_major);
       }
       __syncwarp();
@@ -550,7 +559,7 @@ __global__ void v7_partial_kernel(
           const int64_t token = tile * kTile + token_in_tile;
           const bool valid = row_ok && token < kv_len && token <= q_pos;
           const float score = valid
-              ? group_scores[local_row * kTile + token_in_tile] *
+              ? group_scores[local_row * kScoreLd + token_in_tile] *
                     static_k_scale
               : -CUDART_INF_F;
           tile_max = fmaxf(tile_max, score);
@@ -565,7 +574,7 @@ __global__ void v7_partial_kernel(
           const int64_t token = tile * kTile + token_in_tile;
           const bool valid = row_ok && token < kv_len && token <= q_pos;
           const float score = valid
-              ? group_scores[local_row * kTile + token_in_tile] *
+              ? group_scores[local_row * kScoreLd + token_in_tile] *
                     static_k_scale
               : -CUDART_INF_F;
           const float p = valid ? __expf(score - max_base) : 0.0f;
@@ -578,11 +587,10 @@ __global__ void v7_partial_kernel(
       }
       __syncwarp();
 
-      // The owner performs all sixteen D16 PV tiles.  Its padded 1.25-KiB
-      // scratch slice uses ld=20 to reduce WMMA accumulator-store bank
-      // folding while preserving a logical 16x16 tile.  It is warp-disjoint:
-      // store -> warp sync -> merge into only this group's 16 rows of
-      // acc_shared.  No other group is read or written here.
+      // The owner performs all sixteen D16 PV tiles. Its dense 1-KiB scratch
+      // slice restores E12's ld=16 layout so score padding is the only E13b
+      // factor. It is warp-disjoint: store -> warp sync -> merge into only
+      // this group's 16 rows of acc_shared.
       float* group_scratch =
           reinterpret_cast<float*>(
               reinterpret_cast<unsigned char*>(tmp_shared) + kPAllBytes) +

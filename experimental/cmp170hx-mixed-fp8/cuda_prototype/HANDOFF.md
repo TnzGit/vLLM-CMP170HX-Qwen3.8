@@ -1,10 +1,10 @@
 # V7 prototype handoff
 
-Status: V7-E13a padded-PV-scratch factorial is correct but rejected. It starts
-from the hardware-qualified E12 owner-local softmax/PV scaffold and changes
-only the physical FP32 scratch stride from 16 to 20. Stable 126K-250K latency
-regressed 0.2-0.5%, so the next experiment must restore E12 before modifying
-the score layout. Production dispatch remains untouched.
+Status: V7-E13b padded-score-row factorial is accepted as a long-context-only
+candidate. It restores E12's dense PV scratch and changes only FP32 score rows
+from `ld=32` to `ld=36`. Stable 126K-250K latency improves 6.7-6.9%, but
+4K/70K regress 14-20%; measure the 80K-120K crossover before considering
+length-aware dispatch. Production dispatch remains untouched.
 
 Files:
 
