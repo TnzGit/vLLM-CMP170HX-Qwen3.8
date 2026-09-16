@@ -885,3 +885,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     and tensor activity rose 2.41% -> 3.01%. Keep score and compact-P storage
     disjoint: in-place FP32-to-BF16 compaction creates a cross-lane overwrite
     race even when every warp owns a separate group.
+
+74. **Fewer WMMA scratch-store bank conflicts need not improve the complete
+    store-to-merge chain.** V7-E13a padded each FP32 `16x16` PV scratch from
+    `ld=16` to `ld=20`. It preserved resources and correctness but slowed the
+    stable 126K-250K tiers by 0.2-0.5%. The padded row phase helps the opaque
+    WMMA store pattern while making the following scalar merge loads less
+    favorable. Measure the whole producer/consumer chain; do not optimize one
+    side's bank map in isolation.

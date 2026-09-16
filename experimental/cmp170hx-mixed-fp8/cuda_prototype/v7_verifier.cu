@@ -1,4 +1,4 @@
-// Standalone V7-E12 fixed-geometry persistent-Q verifier prototype.
+// Standalone V7-E13a fixed-geometry persistent-Q verifier prototype.
 //
 // This file intentionally has no vLLM/FlashInfer dependency and is not wired
 // into any production dispatch.  It mirrors the split-KV partial/combine
@@ -83,14 +83,21 @@ constexpr int kScorePackBytes =
 constexpr int kPGroupBytes =
     kQPackElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kPAllBytes = kRowGroups * kPGroupBytes;
-constexpr int kPvScratchElements = kRowsPerGroup * 16;
+// E13a pads the FP32 WMMA scratch leading dimension from 16 to 20.  Float
+// accumulator stores permit ldm multiples of four; ld=20 separates the SM80
+// WMMA row-bank phases while preserving the logical 16x16 tile.
+constexpr int kPvScratchCols = 16;
+constexpr int kPvScratchLd = 20;
+constexpr int kPvScratchLogicalElements =
+    kRowsPerGroup * kPvScratchCols;
+constexpr int kPvScratchElements = kRowsPerGroup * kPvScratchLd;
 constexpr int kPvScratchBytes =
     kPvScratchElements * static_cast<int>(sizeof(float));
 constexpr int kPvScratchGroups = kRowGroups;
 constexpr int kPvScratchTotalBytes = kPvScratchGroups * kPvScratchBytes;
 // q_shared's raw alias is live only until the fourth decode barrier.  The
 // score region intentionally remains inside that former 8,192-B raw lifetime
-// so no shared-memory allocation grows for E12.
+// so no shared-memory allocation grows for E13a.
 constexpr int kScoreSharedOffset = kQPackBytes;
 constexpr int kAlphaSharedOffset = kScoreSharedOffset + kScoreBytes;
 
@@ -146,10 +153,12 @@ static_assert(kPGroupBytes == 1024,
               "E12 each BF16 P pack must occupy 1,024 bytes");
 static_assert(kPAllBytes == 3072,
               "E12 three disjoint BF16 P packs must occupy 3,072 bytes");
-static_assert(kPvScratchBytes == 1024,
-              "E12 each PV scratch tile must occupy 1,024 bytes");
-static_assert(kPvScratchTotalBytes == 3072,
-              "E12 must reserve three disjoint PV scratch tiles");
+static_assert(kPvScratchLogicalElements == 256,
+              "E13a each logical PV scratch tile must contain 256 values");
+static_assert(kPvScratchBytes == 1280,
+              "E13a each padded PV scratch tile must occupy 1,280 bytes");
+static_assert(kPvScratchTotalBytes == 3840,
+              "E13a must reserve three disjoint padded PV scratch tiles");
 static_assert(kScoreSharedOffset + kScoreBytes <= kRawStageBytes,
               "E12 score packs must fit the raw-stage lifetime");
 static_assert(kPAllBytes + kPvScratchTotalBytes <= kTmpBytes,
@@ -569,9 +578,11 @@ __global__ void v7_partial_kernel(
       }
       __syncwarp();
 
-      // The owner performs all sixteen D16 PV tiles.  Its 1-KiB scratch slice
-      // is warp-disjoint: store -> warp sync -> merge into only this group's
-      // 16 rows of acc_shared.  No other group is read or written here.
+      // The owner performs all sixteen D16 PV tiles.  Its padded 1.25-KiB
+      // scratch slice uses ld=20 to reduce WMMA accumulator-store bank
+      // folding while preserving a logical 16x16 tile.  It is warp-disjoint:
+      // store -> warp sync -> merge into only this group's 16 rows of
+      // acc_shared.  No other group is read or written here.
       float* group_scratch =
           reinterpret_cast<float*>(
               reinterpret_cast<unsigned char*>(tmp_shared) + kPAllBytes) +
@@ -598,17 +609,22 @@ __global__ void v7_partial_kernel(
           nvcuda::wmma::mma_sync(c_frag, p_frag, v_frag, c_frag);
         }
         nvcuda::wmma::store_matrix_sync(
-            group_scratch, c_frag, 16, nvcuda::wmma::mem_row_major);
+            group_scratch, c_frag, kPvScratchLd,
+            nvcuda::wmma::mem_row_major);
         __syncwarp();
 
-        for (int index = lane; index < kPvScratchElements; index += 32) {
-          const int local_row = index / 16;
-          const int d = d0 + index % 16;
+        for (int index = lane; index < kPvScratchLogicalElements;
+             index += 32) {
+          const int local_row = index / kPvScratchCols;
+          const int local_col = index % kPvScratchCols;
+          const int d = d0 + local_col;
           const int row = warp * kRowsPerGroup + local_row;
           const float row_alpha = __shfl_sync(0xffffffffu, alpha, local_row);
           const float previous = fp16_bits_to_float(acc_shared[row * kD + d]);
           acc_shared[row * kD + d] =
-              float_to_fp16_bits(previous * row_alpha + group_scratch[index]);
+              float_to_fp16_bits(
+                  previous * row_alpha +
+                  group_scratch[local_row * kPvScratchLd + local_col]);
         }
         __syncwarp();
       }

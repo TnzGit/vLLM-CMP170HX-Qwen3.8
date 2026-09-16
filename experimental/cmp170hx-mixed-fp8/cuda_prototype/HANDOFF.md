@@ -1,11 +1,10 @@
 # V7 prototype handoff
 
-Status: V7-E12 owner-local softmax/PV is hardware-qualified as the new
-independent prototype scaffold. It starts from E11 persistent-Q and changes
-only group softmax/PV synchronization and scratch ownership. E6's
-pure-bit/four-phase path, current-page block lookup, and E10a's removed
-segment-local page/base staging remain isolated. E12 remains disconnected
-from production dispatch.
+Status: V7-E13a padded-PV-scratch factorial is correct but rejected. It starts
+from the hardware-qualified E12 owner-local softmax/PV scaffold and changes
+only the physical FP32 scratch stride from 16 to 20. Stable 126K-250K latency
+regressed 0.2-0.5%, so the next experiment must restore E12 before modifying
+the score layout. Production dispatch remains untouched.
 
 Files:
 

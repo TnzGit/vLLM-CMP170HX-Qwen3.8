@@ -1166,3 +1166,32 @@ not reintroduce CTA group serialization.
 change is correct and repeatably clears the 5% admission threshold. Production
 integration remains a separate milestone because the standalone V7 kernel is
 still materially slower than the qualified Triton path.
+
+## Milestone V7-E13a — padded FP32 PV scratch (correct; rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `04576bb`
+
+E13a isolated one bank-layout hypothesis from E12: each owner warp's FP32
+`16x16` WMMA scratch changed from `ld=16` to the legal float-accumulator
+`ld=20`. The three physical slices grew from 1,024 to 1,280 bytes each but
+remained inside the retained 14,336-byte allocation; ABI, total dynamic shared
+memory and logical merge remained unchanged.
+
+The extension still compiled to 164 registers/thread, zero local bytes/spills,
+81,664 bytes dynamic shared and two active CTAs/SM. Exhaustive decode, full
+correctness and the 4-GiB high-block-ID test passed.
+
+| context | E12 median us/layer | E13a median us/layer | change |
+|---:|---:|---:|---:|
+| 4K | 241.7 | 267.7 | noisy regression |
+| 70K | 2,382.8 | 2,623.5 | noisy regression |
+| 126K | 4,046.5 | 4,056.3 | +0.24% |
+| 200K | 6,304.6 | 6,335.7 | +0.49% |
+| 250K | 7,876.7 | 7,901.5 | +0.31% |
+
+**Rejected before NCU.** The stable long tiers are flat-to-slower and fail the
+5% admission gate. Padding this WMMA store cannot pay for the scalar merge's
+less favorable bank phase. Restore E12 and target the FP32 score-pack read
+layout independently; do not combine score and scratch padding in one factor.

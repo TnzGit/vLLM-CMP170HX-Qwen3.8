@@ -32,6 +32,23 @@ E4M3FN storage with NHD layout `[physical_block, 896, 4, 256]`; `fp8_lut` is
 the same 256-entry BF16 decode table used by the experimental Triton path.
 Static K and V scales are applied separately to scores and values.
 
+## V7-E13a padded PV scratch (correct; rejected)
+
+E13a changed only each owner warp's FP32 WMMA scratch from physical
+`[16,16]`, `ld=16` to `[16,20]`, `ld=20`. Float accumulator stores permit a
+leading dimension divisible by four, and all three padded slices still fit in
+the retained `tmp_shared` allocation. Resources remained 164 registers/thread,
+zero local bytes/spills, 81,664 B shared and two CTAs/SM; the full correctness
+and 4-GiB high-block-ID gates passed.
+
+Three 4K/70K/126K/200K/250K runs measured
+267.7/2,623.5/4,053.8/6,330.9/7,907.6 us,
+302.1/2,902.9/4,056.3/6,344.1/7,900.9 us and
+252.9/2,398.2/4,057.5/6,335.7/7,901.5 us per layer. Stable long-context tiers
+were 0.2-0.5% slower than E12, so E13a is rejected before NCU. The source in
+this milestone preserves the exact rejected factor for reproducibility; the
+next experiment must restore E12 before changing score layout.
+
 ## V7-E12 owner-local softmax/PV candidate (independent prototype)
 
 E12 is a single-variable follow-up to E11.  It preserves the exact pure-bit
