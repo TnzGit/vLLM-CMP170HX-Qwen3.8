@@ -1896,3 +1896,26 @@ reduction. Compute-memory/DRAM/L1-TEX throughput was 54.66%/59.11%,
 26.05%/26.06% (E21/E35). Both kept identical launch/shared geometry and
 133/164 registers per thread. The long-context gain is consistent with
 softmax serialization reduction rather than cache-residency changes.
+
+## Milestone V7-E36-A0 — explicit `mma.sync` score decomposition (rejected)
+
+**Date:** 2026-09-17
+
+An isolated SM80 BF16 probe verified that WMMA-loaded fragments can be packed
+into the documented `mma.sync.aligned.m16n8k16` operands and that the four
+accumulator registers map to the same 16x8 score tile. E36-A0 then replaced
+each E35 m16n16 QK operation with two explicit m16n8 operations, retaining
+shared FP8 decode, cooperative softmax, PV, `TILE=32`, `NSEG=35`, launch
+geometry and the workspace ABI. A first shared read-modify-write variant was
+discarded; the measured candidate kept both 8-column accumulators in registers
+across all 16 K sub-fragments and wrote scores once.
+
+At locked 1350 MHz, q=8/NSEG=35, the E35/E36-A0 medians (us/layer) were
+180.5/182.7 at 4K, 2064.7/2077.6 at 126K and 3947.1/3976.4 at 250K. E36-A0
+therefore regressed by 1.2%, 0.6% and 0.7%; all outputs had maxdiff
+0.000000. `ptxas` reported 165 registers/thread, zero spills, 81,856 B
+dynamic shared and the same two-CTA limit. The ABI and numerical path are
+correct, but decomposing WMMA alone has no performance value, so E36-A0 is
+rejected and no qualified/production source changed. The next candidate must
+change the K data flow itself (FP8 global/L1 decode directly into explicit
+register operands), not merely split the existing shared WMMA operation.

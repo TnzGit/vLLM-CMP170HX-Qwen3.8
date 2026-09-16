@@ -409,3 +409,32 @@ If the explicit SM80 operand mapping cannot be implemented without increasing
 registers enough to lose two-CTA residency, E36 should be marked blocked and
 the next work should return to the production Triton q8 path rather than
 force a WMMA/inline-PTX hybrid.
+
+### E36-A0 result — explicit `mma.sync` score path (rejected)
+
+**Date:** 2026-09-17
+
+The SM80 BF16 fragment ABI was first verified in isolation: WMMA-loaded
+operands fed to explicit `mma.sync.aligned.m16n8k16` produced identical
+accumulator values and the documented four-register output mapping. E36-A0
+then replaced each E35 m16n16 QK operation with two explicit m16n8 operations,
+while retaining E35's shared FP8 decode, cooperative softmax, PV path, shared
+geometry, `TILE=32`, `NSEG=35` and workspace ABI. The first implementation
+performed a shared read-modify-write for each K sub-fragment and was rejected
+after it regressed long-context latency. It was corrected to keep both 8-column
+accumulators in registers across all 16 K sub-fragments and write scores once.
+
+With clocks locked at 1350 MHz and identical `q=8`, `NSEG=35` inputs, the
+corrected E36-A0 measured E35/E36 latency (us/layer) of 180.5/182.7 at 4K,
+2064.7/2077.6 at 126K and 3947.1/3976.4 at 250K. The deltas are -1.2%,
+-0.6% and -0.7% for E36, respectively; all runs had `maxdiff=0.000000`.
+`ptxas` reported 165 registers/thread, zero spill stores/loads, 81,856 B
+dynamic shared and the same two-CTA residency target. Thus the explicit MMA
+ABI is correct but this decomposition has no performance value and is
+rejected. No production or qualified E35 source changed.
+
+The remaining E36 data-flow target is the actual NInfer-style change: remove
+decoded-K shared staging and feed BF16 K operands from a per-lane FP8 decode
+into registers, with an explicit operand mapping. That is a new candidate and
+must be benchmarked independently; E36-A0 must not be presented as evidence
+for or against that register-fed K design.
