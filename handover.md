@@ -1337,15 +1337,16 @@ Completed milestones:
 | V3 8-warp/NSEG factorial | `f75a362` | rejected; one CTA/SM |
 | V4 FP16 partial workspace | `e327b48` | rejected; 5-15% slower |
 | V5 disable LICM | `dbb30ef` | rejected; no occupancy change |
-| V6 explicit 3x16 rows | current milestone | rejected; 15-17% slower |
+| V6 explicit 3x16 rows | `d2f42c9` | rejected; 15-17% slower |
+| V7-E0 CUDA scaffold | current milestone | build/ABI smoke accepted |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should begin with V7 as a standalone fixed-geometry CUDA C++
-prototype, not by editing the production dispatch.  Required gates are the V2
+The next owner should continue V7-E1 from the standalone CUDA scaffold, not by
+editing the production dispatch.  Required gates are the V2
 correctness suite, zero local spill, a credible two-CTA resource budget, >=5%
 isolated gain at 126K/250K, <=2% 4K regression, then full-model and CUDA Graph
 A/B.  If the prototype cannot meet the isolated gate, stop without touching

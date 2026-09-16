@@ -533,3 +533,65 @@ staging from the 48-row computation and exposes the real resource budget.  It
 must first reproduce the enhanced correctness suite and report registers,
 shared memory, local spill and eligible-warps behavior before any vLLM dispatch
 integration.  The qualified Triton verifier remains the service baseline.
+
+## Milestone V7-E0 — out-of-tree CUDA build and contract smoke (accepted)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `d2f42c9`
+
+**Files:**
+
+```text
+experimental/cmp170hx-mixed-fp8/cuda_prototype/
+bench/test_v7_cuda_prototype.py
+```
+
+### Scope
+
+E0 deliberately does not modify vLLM, the active experimental series or the
+qualified 8002 test-site.  A JIT-built PyTorch CUDA extension fixes the geometry
+to SM80, q<=8, Hq/Hkv/D=24/4/256, page896, tile32 and NSEG35.  It exposes the
+existing `part_o/m/l` workspace ABI and a standalone combine kernel.
+
+K/V use a two-stage SM80 `cp.async` shared buffer.  All four warps participate
+in the row computation.  For this correctness scaffold, online accumulator
+state is intentionally read from and written to the global partial workspace
+for every tile; that choice bounds registers but is not expected to be fast.
+
+### Build and resource result
+
+The isolated extension compiled with Torch 2.13.0+cu130, CUDA 13.0.88 and G++
+13.3 on the CMP 170HX.  Runtime attributes for the canonical specialization:
+
+| metric | result |
+|---|---:|
+| threads/CTA | 128 |
+| registers/thread | 48 |
+| dynamic shared | 81,920 B |
+| static shared | 16 B |
+| local bytes | 0 |
+| active CTAs/SM | 2 |
+
+This exactly consumes the two-CTA dynamic-shared budget on an SM80 SM.  Future
+E1 changes cannot add shared memory without either shrinking another region or
+losing the required second resident CTA.
+
+### Correctness smoke
+
+| case | max absolute error | result |
+|---|---:|---|
+| 895 / q5 / int32 | 0.000977 | pass |
+| 896 / q8 / int32 | 0.000977 | pass |
+| mixed 897/q5 + 4097/q8 / int64 | 0.000977 | pass |
+
+No illegal access, Xid or OOM occurred.  The 256-code E4M3FN LUT test also
+passes and maps the two NaN encodings to zero.
+
+### Decision and next gate
+
+**E0 accepted as an isolated scaffold, not as a performance candidate.**
+V7-E1 must move the repeated global accumulator traffic on chip without
+exceeding 81,920 dynamic shared bytes, retain zero local spill and two CTAs/SM,
+then pass the complete V2 correctness/high-block-ID suite.  Only after that
+does it earn an interleaved 4K/126K/250K throughput comparison.
