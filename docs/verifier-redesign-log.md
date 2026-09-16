@@ -1280,3 +1280,37 @@ remaining time is dominated by global K/V feed and WMMA work.
 the original 5% single-factor gate, but it is repeatable, has no correctness
 or occupancy cost, and compounds with E13b to roughly 9-10% over E12. Keep it
 isolated until the remaining accumulator-store dependency is measured.
+
+## Milestone V7-E15 — persistent accumulator row padding (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `3e42331`
+
+E15 changed only the persistent FP16 accumulator's physical row stride from
+logical `ld=256` to `ld=258`; logical output indexing, the partial/combine ABI,
+P/score layouts, K/V traffic and synchronization were unchanged. The smaller
+two-element pad was chosen after rejecting `ld=264`, whose 82,432-byte layout
+would cross the allocator-rounded two-CTA residency budget. E15 uses 81,856
+bytes of dynamic shared memory (81,920-byte allocator round), 164 registers per
+thread, zero local bytes/spills and two active CTAs/SM.
+
+The complete exhaustive decoder, ordinary/mixed boundary suite, int32/int64
+indices and 4-GiB high-block-ID test all passed. Three locked-1350MHz runs
+with 300 iterations, contexts 4K/20K/60K/126K/200K/250K and query lengths 4/8
+were stable. Query-8 medians were 239.7/751.5/1,965.2/3,949.6/6,175.2/7,683.7
+us per layer (the corresponding E14 medians were 240.1/751.8/1,966.0/3,945.8/
+6,172.1/7,689.2). Differences stayed within about ±0.1% and did not form a
+repeatable gain.
+
+NCU at 126K confirmed why: E15 measured 9.079M shared-load conflicts and
+14.481M shared-store conflicts, 3.33% tensor activity, 14.63% barrier,
+10.84% long-scoreboard and 14.49% short-scoreboard stalls. These are
+effectively identical to E14 (9.081M/14.486M conflicts and 3.33%/14.62%/
+10.83%/14.80% stalls), so accumulator row padding did not move the dominant
+conflict/dependency boundary.
+
+**Rejected.** Keep E14 as the qualified isolated source of truth; retain E15
+only as a documented negative control. The next optimization must first
+attribute the remaining shared stores (for example with source-level NCU or
+SASS classification) before changing another layout factor.

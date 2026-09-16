@@ -3,9 +3,12 @@
 Status: V7-E14 padded-P-row factorial is accepted as a secondary isolated
 scaffold. It preserves E13b score `ld=36` and changes only logical BF16 P rows
 from `ld=32` to `ld=40`. A locked-clock A/B improved every tested tier by
-2.3-3.4%, with full correctness and resource gates passing. E13b+E14 is not
-connected to production dispatch; E15 should measure the remaining accumulator
-store conflicts.
+2.3-3.4%, with full correctness and resource gates passing. E15 tested only
+persistent accumulator padding (`ld=258`) and was rejected: correctness and
+resources passed, but three locked-clock runs and NCU were indistinguishable
+from E14. The source currently retains E15 as a negative control; restore E14
+before treating any later change as a qualified factor. E13b+E14 is not
+connected to production dispatch.
 
 Files:
 
@@ -16,6 +19,17 @@ Files:
   int32/int64 index variants.
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
+
+## V7-E15 negative control (rejected)
+
+E15 changed the persistent FP16 accumulator from physical `ld=256` to `ld=258`
+while retaining logical `D=256`. It compiled with 81,856B dynamic shared
+(81,920B allocator round), 164 registers/thread, zero local bytes/spills and
+two active CTAs/SM. Exhaustive correctness and high-block-ID gates passed.
+Three locked-1350MHz 300-iteration scans at 4K/20K/60K/126K/200K/250K showed
+no repeatable difference from E14 (within roughly ±0.1% at query=8). NCU at
+126K showed 9.079M shared-load and 14.481M shared-store conflicts, effectively
+the same as E14, so this factor did not alter the dominant dependency path.
 
 V7-E12 candidate layout in `v7_verifier.cu`:
 

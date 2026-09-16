@@ -69,6 +69,23 @@ loads and 14.486 M stores, 3.33% tensor activity, 14.62% barrier and 14.80%
 short-scoreboard stalls. E14 is accepted as an isolated secondary scaffold,
 not production dispatch.
 
+## V7-E15 persistent accumulator padding (rejected)
+
+E15 changed only the persistent FP16 accumulator's physical row stride from
+logical `ld=256` to `ld=258`; logical output indexing, K/V and P/score layouts,
+the ABI and barriers were unchanged. The resource-safe version compiled with
+81,856B dynamic shared (81,920B allocator round), 164 registers/thread, zero
+local bytes/spills and two active CTAs/SM. Exhaustive correctness, int32/int64
+and high-block-ID tests passed.
+
+At locked 1350MHz, three 300-iteration scans over 4K/20K/60K/126K/200K/250K
+were stable but indistinguishable from E14 (query-8 medians
+239.7/751.5/1,965.2/3,949.6/6,175.2/7,683.7 us/layer; all differences about
+±0.1%). NCU at 126K measured 9.079M shared-load and 14.481M shared-store
+conflicts, 3.33% tensor activity, 14.63% barrier, 10.84% long-scoreboard and
+14.49% short-scoreboard stalls—effectively the same profile as E14. E15 is
+retained only as a negative control and is not an accepted optimization.
+
 ## V7-E13a padded PV scratch (correct; rejected)
 
 E13a changed only each owner warp's FP32 WMMA scratch from physical

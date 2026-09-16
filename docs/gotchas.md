@@ -909,3 +909,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     while latency improved a further 3.2% with identical resources and exact
     outputs. The smaller wall-time gain shows that conflict counters are a
     bottleneck diagnostic, not a direct speedup forecast.
+
+77. **Accumulator row padding alone does not move the remaining conflict wall.**
+    V7-E15 changed only the persistent FP16 accumulator from physical `ld=256`
+    to `ld=258`, keeping logical D=256 and preserving two-CTA residency after
+    allocator rounding. Correctness/high-block-ID passed, but three locked-clock
+    scans stayed within about ±0.1% of E14. NCU at 126K remained at roughly
+    9.08M shared loads and 14.49M stores with 14.6% barrier and 14.5% short
+    scoreboard stalls. Attribute the specific shared-store instructions before
+    trying another accumulator layout; retain E15 only as a negative control.
