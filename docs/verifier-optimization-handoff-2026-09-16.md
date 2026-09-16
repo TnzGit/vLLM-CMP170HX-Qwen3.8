@@ -438,3 +438,42 @@ decoded-K shared staging and feed BF16 K operands from a per-lane FP8 decode
 into registers, with an explicit operand mapping. That is a new candidate and
 must be benchmarked independently; E36-A0 must not be presented as evidence
 for or against that register-fed K design.
+
+### E36-A1 result — direct global FP8 K feed (rejected)
+
+**Date:** 2026-09-17
+
+E36-A1 replaced E35's decoded-K shared read with per-owner-lane global FP8
+loads, LUT decode and explicit `mma.sync` BF16 operands. V/PV and E35's
+cooperative softmax were unchanged. Same-input correctness was exact at 4K,
+126K and 250K (`maxdiff=0.000000`, `meandiff=0.000000`). However, the three
+owner warps independently reloaded the same K tile, tripling global traffic
+and adding uncoalesced 64-bit address arithmetic.
+
+At locked 1350 MHz with q=8/NSEG=35, E35/E36-A1 medians (us/layer) were
+181.6/215.1 at 4K, 2065.6/3124.3 at 126K and 3949.2/6063.5 at 250K.
+E36-A1 was therefore 18.5%, 51.2% and 53.5% slower and is rejected. No
+qualified or production source changed. The next candidate must stage raw K
+once cooperatively (without a decoded-K matrix) before owner-local register
+decode; this is E36-A2.
+
+### E36-A2 result — cooperative raw-K shared staging (rejected)
+
+**Date:** 2026-09-17
+
+E36-A2 staged each raw FP8 K tile once across the CTA, decoded raw shared
+bytes through the LUT directly into owner-local BF16 MMA operands, then
+reused the alias for V staging/decoding after QK. This removed A1's repeated
+global reads while leaving E35's softmax, V/PV, workspace ABI and
+`TILE=32`/`NSEG=35` geometry intact. Same-input correctness was exact at 4K,
+126K and 250K (`maxdiff=0.000000`, `meandiff=0.000000`).
+
+At locked 1350 MHz with q=8/NSEG=35, E35/E36-A2 medians (us/layer) were
+181.5/214.3 at 4K, 2063.2/3221.4 at 126K and 3951.4/6291.6 at 250K.
+E36-A2 was 18.1%, 56.1% and 59.2% slower. The cooperative raw stage avoids
+the 3x global traffic but still makes each owner warp reread raw shared bytes
+and adds a serial K-stage/V-stage barrier; that cost dominates on this SM80
+path. E36-A2 is rejected and no source is promoted. The E36 register-fed-K
+direction is therefore closed for now; future work should target a genuinely
+cooperative producer/consumer schedule (or return to the production Triton q8
+path) rather than further tuning this owner-local raw-reader variant.

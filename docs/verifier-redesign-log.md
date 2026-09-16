@@ -1919,3 +1919,29 @@ correct, but decomposing WMMA alone has no performance value, so E36-A0 is
 rejected and no qualified/production source changed. The next candidate must
 change the K data flow itself (FP8 global/L1 decode directly into explicit
 register operands), not merely split the existing shared WMMA operation.
+
+## Milestone V7-E36-A1 — direct global register-fed K (rejected)
+
+**Date:** 2026-09-17
+
+The candidate loaded FP8 K directly from global memory in each owner warp,
+decoded through the shared LUT and emitted explicit BF16 `mma.sync` operands;
+E35 softmax and V/PV stayed unchanged. Correctness was exact against E35 at
+4K/126K/250K. Locked-1350 medians (E35/E36-A1, us/layer) were 181.6/215.1,
+2065.6/3124.3 and 3949.2/6063.5, i.e. 18.5%/51.2%/53.5% slower. Independent
+owner loads caused 3x K traffic and expensive address arithmetic. Rejected;
+no qualified or production dispatch changed.
+
+## Milestone V7-E36-A2 — cooperative raw-K stage with register decode (rejected)
+
+**Date:** 2026-09-17
+
+Raw FP8 K was cooperatively staged once into the compact shared alias, read by
+owner lanes for LUT→BF16 register decode and explicit `mma.sync`, then the
+alias was reused for V staging after QK. Correctness remained exact at
+4K/126K/250K. Locked-1350 medians (E35/E36-A2, us/layer) were 181.5/214.3,
+2063.2/3221.4 and 3951.4/6291.6, i.e. 18.1%/56.1%/59.2% slower. The design
+removed repeated global reads but owner-local rereads plus serialized K/V
+staging/barriers dominated. Rejected; no source promotion. A future E36
+successor requires a producer/consumer schedule that shares decoded operands,
+not another owner-local raw-reader variant.
