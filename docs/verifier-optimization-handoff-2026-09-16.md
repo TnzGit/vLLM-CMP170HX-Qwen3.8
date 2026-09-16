@@ -575,3 +575,36 @@ over E35. If the INT8 path fails its quality or resource gate, work should
 move to graph-stable adaptive NSEG and then representative Q4
 Linear+SwiGLU-vs-Marlin measurements; no candidate should be promoted merely
 because it is architecturally interesting.
+
+### E38-INT8-G64 initial result — promising standalone candidate
+
+**Date:** 2026-09-17
+
+The first E38 probe reused NInfer-CMP170HX's SM80 INT8-G64 decode kernel in a
+separate adapter. For the q8/G6 shape it stores K/V as signed INT8 with one
+FP16 scale per token and 64-dimension group, quantizes Q on chip with the
+same group contract, and uses native `mma.sync.aligned.m16n8k32.s8.s8.s32`
+for QK. V/PV remains the NInfer BF16 path. This is a standalone kernel
+experiment; it does not change E35, vLLM, or the production service.
+
+With identical q=8 shapes and random cache/query inputs, the E35 FP8 and E38
+INT8-G64 partial latencies (us/layer) were 213.50/192.38 at 4K,
+2391.21/1212.31 at 126K and 3757.29/1731.04 at 250K. E38 is therefore
+11.0%, 49.3% and 54.0% faster in this isolated comparison. The 4K and long
+context points pass the >=10%/126K exploration gate, though the cache dtype
+and quantization work are not yet an end-to-end model A/B.
+
+An FP32 oracle using the kernel's own Q8-G64 quantization and the dequantized
+INT8-G64 cache measured max/mean absolute error of 0.000169/3.01e-5,
+2.77e-5/5.57e-6 and 2.55e-5/3.98e-6 at 4K/126K/250K; all outputs were
+finite. A direct ptxas compile with the two-CTA launch bound and explicit
+`-maxrregcount=170` reported 168 registers/thread, 0 spill stores/loads and
+49,088 B shared memory (the initial JIT compile without the explicit cap had
+a 16-B spill). The explicit cap is therefore part of the candidate build,
+not an optional tuning detail.
+
+The candidate still needs mixed query lengths, two-request/batched launch,
+fixed-address graph capture/replay and a vLLM-compatible cache writer before
+it can be considered for integration. Cross-dtype differences against E35
+are expected quantization error and are not a quality oracle; the INT8-G64
+oracle and the model's task-level A/B must remain separate gates.

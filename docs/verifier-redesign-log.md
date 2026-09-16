@@ -1972,6 +1972,31 @@ E36 is closed with no source promotion. The next experiment is a separate
 producer/consumer warp ownership design (E37), not another register-PV
 variant with the same four owners.
 
+## Milestone V7-E38 — INT8-G64 QK standalone (promising, not integrated)
+
+**Date:** 2026-09-17
+
+The first INT8-G64 probe reused NInfer-CMP170HX's SM80 tiled kernel with the
+q8/G6 shape. K/V use signed INT8 plus FP16 per-token 64-dimension-group
+scales; Q is quantized on chip and QK uses native
+`mma.sync.aligned.m16n8k32.s8.s8.s32`. V/PV remains BF16. This is an isolated
+adapter and leaves E35, vLLM and production unchanged.
+
+At q=8, E35 FP8 versus E38 INT8-G64 partial medians (us/layer) were
+213.50/192.38 at 4K, 2391.21/1212.31 at 126K and 3757.29/1731.04 at
+250K (about 11.0%, 49.3% and 54.0% lower latency). An FP32 oracle using the
+same Q8-G64 quantization and dequantized INT8 cache measured max/mean error
+0.000169/3.01e-5, 2.77e-5/5.57e-6 and 2.55e-5/3.98e-6; outputs were finite.
+The ptxas resource check with explicit `-maxrregcount=170` reported 168
+registers/thread, zero spills and 49,088 B shared memory, preserving a
+two-CTA budget. The initial JIT build without the explicit cap had a 16-B
+spill and is not the accepted build configuration.
+
+This does not yet qualify an implementation: mixed query lengths, two-request
+and CUDA-Graph checks, cache-writer compatibility and model/task-level
+quality remain. Treat E38 as a high-priority research candidate, not a
+production or vLLM dispatch change.
+
 ## Milestone V7-E37 — producer/consumer split-D register PV (rejected)
 
 **Date:** 2026-09-17
