@@ -347,6 +347,20 @@ bottleneck.  Future material gains must reduce verifier KV-scan cost without
 duplicating reads, or change Marlin implementation/resource use more
 fundamentally than reordering its existing tile candidates.
 
+### Qualified 175 W efficiency point
+
+A same-process power A/B used identical exact-token prompts, output length and
+acceptance.  Lowering the cap from 180 W to 175 W changed step latency as follows:
+
+| input | 180 W ms/step | 175 W ms/step | slowdown |
+|---:|---:|---:|---:|
+| 4K | 22.315 | 22.634 | 1.43% |
+| 126K | 35.230 | 35.648 | 1.19% |
+
+The power cap falls 2.78% for only 1.2-1.4% less throughput, improving perf/W by
+roughly 1.4-1.6%.  Keep 180 W as the peak-throughput default; 175 W is the
+qualified low-noise/efficiency profile.  The test restored 180 W on exit.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:
