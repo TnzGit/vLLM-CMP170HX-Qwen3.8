@@ -825,3 +825,11 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     correctness regression. A tiny table is not automatically cheap when each
     divergent byte creates a shared lookup and conflict; prove the finite/
     subnormal/NaN bit mapping and prefer arithmetic when its ISA cost is lower.
+
+67. **Staging can be worth its barriers when it breaks a global scoreboard
+    chain.** V7-E7 removed E6's compact raw staging and cut barrier stalls from
+    19.23% to 11.19%, yet long-scoreboard stalls jumped from 28.48% to 54.34%
+    and 126K/250K latency regressed about 68%. Direct byte loads serialize the
+    decode feed despite fewer synchronizations. Preserve staged transport and
+    reduce its phase count or overlap it; do not optimize barrier percentage in
+    isolation.

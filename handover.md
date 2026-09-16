@@ -1347,18 +1347,18 @@ Completed milestones:
 | V7-E4a shared decode LUT | `0e09a1d` | correct, 2 CTA; 5.6-6.1% vs E2 long, scoreboard unchanged |
 | V7-E4b direct vector load | `4c83b37` | correct; rejected, +13% at 4K and flat long-context |
 | V7-E5 compact raw staging | `cc04e4e` | correct; -1.2/-2.9% at 4K/70K, flat long-context |
-| V7-E6 bitwise FP8 decode | current milestone | correct; 43-44% long gain, accepted isolated scaffold |
+| V7-E6 bitwise FP8 decode | `c732fe9` | correct; 43-44% long gain, accepted isolated scaffold |
+| V7-E7 direct global load | current milestone | correct; rejected, 28-69% slower than staged E6 |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
 finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
-The next owner should continue from standalone E6 only. Its exact integer
-E4M3FN decoder passed all 256 codes and improved 126K/250K 43-44%; NCU proved
-instruction, shared-conflict and long-scoreboard reductions. The newly exposed
-cost is 19.23% barrier stalls from compact raw staging. Next A/B direct scalar
-global raw loads plus E6 bit synthesis against staged E6, preserving every
-gate. This isolates barrier versus global-scoreboard cost. Admission remains
-zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and <=2% 4K regression
-before any full-model/CUDA Graph A/B.
+The next owner should branch from standalone E6, not E7. E7 proved removing
+staging lowers barrier stalls but more than doubles long-scoreboard pressure
+and regresses long contexts about 69%. Next alias raw K in Q/P shared and raw V
+in the idle tmp shared region, stage both concurrently, decode both after one
+barrier, then publish both with one final barrier. Preserve the exhaustive
+decoder and all gates. Admission remains zero spill, two CTAs/SM, >=5% isolated
+gain at 126K/250K and <=2% 4K regression before full-model/CUDA Graph A/B.

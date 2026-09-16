@@ -919,3 +919,30 @@ largest newly exposed structural cost at 19.23%.
 controlled factorial that removes compact raw staging and its extra barriers
 while keeping E6 bit synthesis. That will distinguish global-load scoreboard
 cost from phase-barrier cost before attempting page carry or overlap.
+
+## Milestone V7-E7 — direct global load factorial (rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `c732fe9`
+
+E7 retained the exact E6 bit decoder and identical 81,664-B resource geometry,
+but removed compact raw staging and reduced K/V publication to one final CTA
+barrier. Every exhaustive/correctness/resource gate remained green.
+
+| context | E6 staged bit decode | E7 direct global | regression |
+|---:|---:|---:|---:|
+| 4K | 378.5 | 484.6 | +28.0% |
+| 70K | 4,957.3 | 7,899.3 | +59.4% |
+| 126K | 8,130.3 | 13,663.6 | +68.1% |
+| 200K | 12,845.7 | 21,651.6 | +68.6% |
+| 250K | 16,041.2 | 27,041.6 | +68.6% |
+
+NCU proved the trade: barrier stalls fell 19.23% -> 11.19%, but long-scoreboard
+stalls jumped 28.48% -> 54.34%, tensor activity fell 1.51% -> 0.92%, and
+instructions rose 711.7 M -> 845.6 M.
+
+**Rejected.** Return to E6 staging. The next experiment should stage raw K and
+V concurrently in two otherwise-idle aliases (Q/P and tmp), then decode both
+after one publication barrier and use one final publication barrier. This
+targets barrier count without giving up the scoreboard benefit.

@@ -29,7 +29,6 @@ constexpr int kD = 256;
 constexpr int kQmax = 8;
 constexpr int kBlockSize = 896;
 constexpr int kTile = 32;
-constexpr int kRawChunkBytes = 16;
 constexpr int kNseg = 35;
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
@@ -41,10 +40,8 @@ constexpr int kRowGroups = kRows / kRowsPerGroup;
 constexpr int kWmmaLd = 264;
 constexpr int kKvElementsPerTile = kTile * kD;
 constexpr int kKvMatrixElements = kTile * kWmmaLd;
-constexpr int kRawChunksPerMatrix = kKvElementsPerTile / kRawChunkBytes;
-constexpr int kRawChunksPerThread = kRawChunksPerMatrix / kThreads;
 constexpr int kRawStageBytes = kKvElementsPerTile * sizeof(unsigned char);
-// E6 retains E5's padded physical BF16 WMMA rows and logical 256-wide
+// E7 retains E6's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -52,7 +49,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E6 keeps E5's FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E7 keeps E6's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -72,48 +69,36 @@ constexpr int kSharedBytes = kFp8LutSharedOffset + kFp8LutBytes;
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(sizeof(uint4) == kRawChunkBytes,
-              "E6 raw K/V vector chunk must be 16 bytes");
-static_assert(alignof(uint4) == kRawChunkBytes,
-              "E6 raw K/V vector chunk must be 16-byte aligned");
-static_assert(kD % kRawChunkBytes == 0,
-              "E6 head dimension must contain whole vector chunks");
-static_assert(kRawChunksPerMatrix == 512,
-              "E6 one raw K/V matrix must contain 512 vector chunks");
-static_assert(kRawChunksPerThread == 4,
-              "E6 each thread must load four chunks per K/V matrix");
-static_assert(kWmmaLd == 264, "E6 WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E6 WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E6 WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E6 PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E6 PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E6 PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E6 PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E6 K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E6 accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E6 Q/P buffer must be 8,448 bytes");
+static_assert(kWmmaLd == 264, "E7 WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E7 WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E7 WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E7 PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E7 PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E7 PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E7 PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E7 K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E7 accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E7 Q/P buffer must be 8,448 bytes");
 static_assert(kRawStageBytes == 8192,
-              "E6 compact raw staging buffer must be 8,192 bytes");
+              "E7 reserved raw staging buffer must be 8,192 bytes");
 static_assert(kRawStageBytes <= kQBytes,
-              "E6 raw staging must fit within the Q/P shared buffer");
+              "E7 reserved raw staging must fit within the Q/P shared buffer");
 static_assert(kQSharedOffset + kRawStageBytes <= kTmpSharedOffset,
-              "E6 raw staging must not overlap temporary storage");
-static_assert(kQSharedOffset % kRawChunkBytes == 0,
-              "E6 raw staging base must be 16-byte aligned");
+              "E7 reserved raw staging must not overlap temporary storage");
 static_assert(kQSharedOffset >= kKvSharedOffset + kKvSharedBytes,
-              "E6 raw staging must not overlap decoded K/V output");
+              "E7 reserved raw staging must not overlap decoded K/V output");
 static_assert(kTmpSharedOffset == 66816,
-              "E6 temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E6 temporary tile must be 14,336 bytes");
-static_assert(kFp8LutEntries == 256, "E6 LUT must have 256 entries");
-static_assert(kFp8LutBytes == 512, "E6 shared LUT must be 512 bytes");
+              "E7 temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E7 temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E7 LUT must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E7 shared LUT must be 512 bytes");
 static_assert(kFp8LutSharedOffset == 81152,
-              "E6 shared LUT offset must be 81,152 bytes");
+              "E7 shared LUT offset must be 81,152 bytes");
 static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
-              "E6 shared LUT must not overlap temporary storage");
-static_assert(kSharedBytes == 81664, "E6 shared layout must be 81,664 bytes");
+              "E7 shared LUT must not overlap temporary storage");
+static_assert(kSharedBytes == 81664, "E7 shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E6 shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E7 shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -178,64 +163,18 @@ __device__ __forceinline__ int64_t load_block_id(
   return load_index<BlockI64>(block_table, index);
 }
 
-// Stage one raw FP8 K or V tile in the compact shared_q alias.  K and V are
-// physical [32, 264] token-major BF16 matrices, but their raw source rows are
-// only 256 bytes wide.  This stage writes one logical [32,256] uint8 matrix;
-// the alias is not reused for Q until load_kv_bf16's final decode barrier.
-__device__ __forceinline__ void stage_raw_kv(
-    unsigned char* raw_stage,
+// Decode one raw FP8 K or V tile directly from global memory.  The full CTA
+// owns disjoint logical elements, hoists each physical block/head base once,
+// and writes padded BF16 rows.  E7 intentionally has no raw staging or
+// inter-phase barriers: only the final CTA barrier publishes both matrices to
+// WMMA, isolating global-load scoreboard cost from E6's shared staging cost.
+__device__ __forceinline__ void decode_global_kv(
+    uint16_t* shared_kv,
     const unsigned char* cache,
     int64_t tile_base,
     int64_t stride_s,
     int64_t tile_token,
-    int64_t kv_len) {
-  const int tid = threadIdx.x;
-  constexpr int kChunksPerMatrix = kD / kRawChunkBytes;
-  for (int chunk = tid; chunk < kRawChunksPerMatrix; chunk += blockDim.x) {
-    const int token_in_tile = chunk / kChunksPerMatrix;
-    const int d0 = (chunk % kChunksPerMatrix) * kRawChunkBytes;
-    const int raw_offset = token_in_tile * kD + d0;
-    unsigned char* dst = raw_stage + raw_offset;
-    const int64_t token = tile_token + token_in_tile;
-    if (token < 0 || token >= kv_len) {
-      const uint4 zero = {0, 0, 0, 0};
-      *reinterpret_cast<uint4*>(dst) = zero;
-      continue;
-    }
-
-    const int64_t raw_base =
-        tile_base + static_cast<int64_t>(token_in_tile) * stride_s + d0;
-    const uintptr_t raw_address = reinterpret_cast<uintptr_t>(cache) +
-                                  static_cast<uintptr_t>(raw_base);
-    // The chunk mapping gives d0 in {0,...,240}; keep the bound explicit so a
-    // future geometry change cannot turn the vector load into an over-read.
-    const bool row_in_bounds = d0 >= 0 && d0 + kRawChunkBytes <= kD;
-    if (!row_in_bounds) {
-      const uint4 zero = {0, 0, 0, 0};
-      *reinterpret_cast<uint4*>(dst) = zero;
-      continue;
-    }
-    const bool aligned = (raw_address & (kRawChunkBytes - 1)) == 0;
-    if (aligned) {
-      // Both source and destination are 16-byte aligned for the normal
-      // contiguous NHD path.  No register-side byte unpack occurs here.
-      *reinterpret_cast<uint4*>(dst) =
-          *reinterpret_cast<const uint4*>(cache + raw_base);
-    } else {
-      // Preserve correctness for an external unaligned base without issuing
-      // an unaligned uint4 load.  The normal allocator/cache geometry takes
-      // the vector path above.
-      #pragma unroll
-      for (int i = 0; i < kRawChunkBytes; ++i) {
-        dst[i] = cache[raw_base + i];
-      }
-    }
-  }
-}
-
-__device__ __forceinline__ void decode_raw_kv(
-    uint16_t* shared_kv,
-    const unsigned char* raw_stage,
+    int64_t kv_len,
     bool is_v) {
   const int tid = threadIdx.x;
   for (int element = tid; element < kKvElementsPerTile;
@@ -243,17 +182,22 @@ __device__ __forceinline__ void decode_raw_kv(
     const int token_in_tile = element / kD;
     const int d = element % kD;
     const int physical = token_in_tile * kWmmaLd + d;
+    const int64_t token = tile_token + token_in_tile;
+    uint8_t raw = 0;
+    if (token >= 0 && token < kv_len) {
+      const int64_t raw_offset =
+          tile_base + static_cast<int64_t>(token_in_tile) * stride_s + d;
+      raw = cache[raw_offset];
+    }
     shared_kv[(is_v ? kKvMatrixElements : 0) + physical] =
-        fp8_e4m3fn_to_bf16_bits(raw_stage[element]);
+        fp8_e4m3fn_to_bf16_bits(raw);
   }
 }
 
-// Decode one raw FP8 tile through compact shared staging.  The four barriers
-// make each alias lifetime explicit: stage K, decode K, stage V, decode V.
-// The caller may load Q only after this function returns.
+// Decode one raw FP8 tile with two global scalar-byte passes and one final
+// barrier.  Block/head bases are computed once per tile, not per element.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
-    unsigned char* raw_stage,
     const unsigned char* k_cache,
     const unsigned char* v_cache,
     int64_t tile_token,
@@ -273,14 +217,10 @@ __device__ __forceinline__ void load_kv_bf16(
   const int64_t v_tile_base =
       block_id * v_stride_b + tile_slot * v_stride_s + kvh * v_stride_h;
 
-  stage_raw_kv(raw_stage, k_cache, k_tile_base, k_stride_s, tile_token, kv_len);
-  __syncthreads();
-  decode_raw_kv(shared_kv, raw_stage, false);
-  __syncthreads();
-
-  stage_raw_kv(raw_stage, v_cache, v_tile_base, v_stride_s, tile_token, kv_len);
-  __syncthreads();
-  decode_raw_kv(shared_kv, raw_stage, true);
+  decode_global_kv(shared_kv, k_cache, k_tile_base, k_stride_s, tile_token,
+                   kv_len, false);
+  decode_global_kv(shared_kv, v_cache, v_tile_base, v_stride_s, tile_token,
+                   kv_len, true);
   __syncthreads();
 }
 
@@ -314,11 +254,11 @@ __global__ void v7_partial_kernel(
       reinterpret_cast<uint16_t*>(shared + kKvSharedOffset);
   uint16_t* q_shared =
       reinterpret_cast<uint16_t*>(shared + kQSharedOffset);
-  // Before Q is loaded, the compact first 8,192 B of q_shared is aliased as
-  // raw_stage for one K or V matrix at a time.  It never overlaps KV output,
-  // the Q/P tail, or the shared LUT; load_kv_bf16's final barrier ends its
-  // lifetime before any Q store begins.
+  // Reserve E6's compact first 8,192 B of q_shared so this factorial keeps
+  // exactly the same shared allocation.  E7 never accesses the dead alias;
+  // Q owns the complete buffer after the direct global K/V load completes.
   unsigned char* raw_stage = reinterpret_cast<unsigned char*>(q_shared);
+  (void)raw_stage;
   float* tmp_shared = reinterpret_cast<float*>(shared + kTmpSharedOffset);
   uint16_t* fp8_lut_shared = reinterpret_cast<uint16_t*>(
       shared + kFp8LutSharedOffset);
@@ -338,10 +278,10 @@ __global__ void v7_partial_kernel(
   const int lane = tid & 31;
   const int warp = tid >> 5;
 
-  // Retain E5's 512-B shared LUT allocation and load it once per CTA so the
-  // shared-memory geometry stays comparable.  E6's hot decode path is pure
-  // bit arithmetic and deliberately does not read this table; the existing
-  // accumulator-init barrier still publishes the copied entries.
+  // Retain E6's 512-B shared LUT allocation and load it once per CTA so the
+  // shared-memory geometry stays comparable.  E7's direct global decode is
+  // pure bit arithmetic and deliberately does not read this table; the
+  // existing accumulator-init barrier still publishes the copied entries.
   const int lut_index = tid * 2;
   fp8_lut_shared[lut_index] = fp8_lut[lut_index];
   fp8_lut_shared[lut_index + 1] = fp8_lut[lut_index + 1];
@@ -410,14 +350,14 @@ __global__ void v7_partial_kernel(
     }
     __syncthreads();
     load_kv_bf16(
-        kv_shared, raw_stage, k_cache, v_cache, tile * kTile, kBlockSize, kvh,
+        kv_shared, k_cache, v_cache, tile * kTile, kBlockSize, kvh,
         block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb, stride_vs,
         stride_vh, kv_len);
 
     // The Q/P buffer is reused for each 16-row pack.  Loading Q once per pack
     // per tile is required because P occupies its first 32 columns.  This
-    // begins only after load_kv_bf16's final V-decode barrier, when raw_stage
-    // is no longer live.
+    // begins only after load_kv_bf16's single final barrier, which publishes
+    // both direct-global K/V decode passes for WMMA.
     #pragma unroll
     for (int row_group = 0; row_group < kRowGroups; ++row_group) {
       for (int idx = tid; idx < kRowsPerGroup * kD; idx += blockDim.x) {
