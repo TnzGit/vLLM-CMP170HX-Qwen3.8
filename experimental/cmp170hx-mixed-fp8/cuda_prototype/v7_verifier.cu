@@ -6,6 +6,15 @@
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+#if defined(__has_include)
+#if __has_include(<cuda_fp8.h>)
+#include <cuda_fp8.h>
+#else
+#error "V7-E9b requires CUDA cuda_fp8.h for __nv_cvt_fp8x2_to_halfraw2"
+#endif
+#else
+#include <cuda_fp8.h>
+#endif
 #include <cuda_fp16.h>
 #include <math_constants.h>
 #include <mma.h>
@@ -44,7 +53,7 @@ constexpr int kRawStageBytes = kKvElementsPerTile * sizeof(unsigned char);
 constexpr int kRawChunkBytes = 16;
 constexpr int kRawChunksPerMatrix = kRawStageBytes / kRawChunkBytes;
 constexpr int kRawChunksPerThread = kRawChunksPerMatrix / kThreads;
-// E8 retains E6's padded physical BF16 WMMA rows and logical 256-wide
+// E9b retains E6's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  The 16-row Q/P buffer is reused for each of the three row groups;
 // its tail also carries the FP32 alpha values between softmax and PV fusion.
 constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
@@ -52,7 +61,7 @@ constexpr int kKvSharedBytes = 2 * kKvMatrixElements *
 constexpr int kAccBytes = kRows * kD * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E8 keeps E6's FP32 PV scratch wide enough for fourteen N16 tiles.  The
+// E9b keeps E6's FP32 PV scratch wide enough for fourteen N16 tiles.  The
 // final two N16 tiles are reused through the first 16x32 entries after the
 // main phase has merged, so the logical output/workspace width stays 256.
 constexpr int kPvMainD = 224;
@@ -72,62 +81,57 @@ constexpr int kSharedBytes = kFp8LutSharedOffset + kFp8LutBytes;
 static_assert(kGroup == 6, "V7 geometry requires GQA group size six");
 static_assert(kBlockSize % kTile == 0, "V7 page must contain whole tiles");
 static_assert(kThreads == 128, "V7 geometry requires four warps");
-static_assert(kWmmaLd == 264, "E8 WMMA rows must use leading dimension 264");
-static_assert(kRowsPerGroup == 16, "E8 WMMA tiles require sixteen rows");
-static_assert(kRowGroups == 3, "E8 WMMA layout requires three row groups");
-static_assert(kPvMainD == 224, "E8 PV main phase must cover D=224");
-static_assert(kPvTailD == 32, "E8 PV tail phase must cover D=32");
-static_assert(kPvMainTiles == 14, "E8 PV main phase requires fourteen tiles");
-static_assert(kPvTailTiles == 2, "E8 PV tail phase requires two tiles");
-static_assert(kKvSharedBytes == 33792, "E8 K/V tile must be 33,792 bytes");
-static_assert(kAccBytes == 24576, "E8 accumulator must be 24,576 bytes");
-static_assert(kQBytes == 8448, "E8 Q/P buffer must be 8,448 bytes");
+static_assert(kWmmaLd == 264, "E9b WMMA rows must use leading dimension 264");
+static_assert(kRowsPerGroup == 16, "E9b WMMA tiles require sixteen rows");
+static_assert(kRowGroups == 3, "E9b WMMA layout requires three row groups");
+static_assert(kPvMainD == 224, "E9b PV main phase must cover D=224");
+static_assert(kPvTailD == 32, "E9b PV tail phase must cover D=32");
+static_assert(kPvMainTiles == 14, "E9b PV main phase requires fourteen tiles");
+static_assert(kPvTailTiles == 2, "E9b PV tail phase requires two tiles");
+static_assert(kKvSharedBytes == 33792, "E9b K/V tile must be 33,792 bytes");
+static_assert(kAccBytes == 24576, "E9b accumulator must be 24,576 bytes");
+static_assert(kQBytes == 8448, "E9b Q/P buffer must be 8,448 bytes");
 static_assert(kRawStageBytes == 8192,
-              "E8 raw staging buffer must be 8,192 bytes");
+              "E9b raw staging buffer must be 8,192 bytes");
 static_assert(kRawChunkBytes == sizeof(uint4),
-              "E8 raw staging chunks must use 16-byte uint4 vectors");
+              "E9b raw staging chunks must use 16-byte uint4 vectors");
+static_assert(sizeof(__nv_fp8x2_storage_t) == 2,
+              "E9b FP8x2 intrinsic storage must contain two bytes");
+static_assert(sizeof(__half2_raw) == 4,
+              "E9b FP8x2 half bridge must contain two raw halves");
+static_assert(sizeof(__nv_bfloat162_raw) == 4,
+              "E9b BF16x2 raw result must contain two raw halves");
 static_assert(alignof(uint4) == kRawChunkBytes,
-              "E8 uint4 vector loads must be naturally 16-byte aligned");
+              "E9b uint4 vector loads must be naturally 16-byte aligned");
 static_assert(kRawChunksPerMatrix == 512,
-              "E8 raw staging requires 512 vector chunks per matrix");
+              "E9b raw staging requires 512 vector chunks per matrix");
 static_assert(kRawChunksPerThread == 4,
-              "E8 raw staging assigns four chunks per thread");
+              "E9b raw staging assigns four chunks per thread");
+static_assert(kD % 2 == 0,
+              "E9b FP8x2 pairs must fit whole contiguous D rows");
 static_assert(kD % kRawChunkBytes == 0,
-              "E8 raw vector chunks must not cross a logical D row");
+              "E9b raw vector chunks must not cross a logical D row");
 static_assert(kQSharedOffset % kRawChunkBytes == 0,
-              "E8 K raw alias must be 16-byte aligned");
-static_assert(kTmpSharedOffset % kRawChunkBytes == 0,
-              "E8 V raw alias must be 16-byte aligned");
+              "E9b raw alias must be 16-byte aligned");
 static_assert(kRawStageBytes <= kQBytes,
-              "E8 K raw staging must fit within the Q/P shared buffer");
-static_assert(kRawStageBytes <= kTmpBytes,
-              "E8 V raw staging must fit within the tmp shared buffer");
-static_assert(kQSharedOffset + kQBytes <= kTmpSharedOffset,
-              "E8 Q/P and tmp allocations must remain disjoint");
+              "E9b raw staging must fit within the Q/P shared buffer");
 static_assert(kQSharedOffset + kRawStageBytes <=
                   kQSharedOffset + kQBytes,
-              "E8 K raw alias must remain within the Q/P allocation");
-static_assert(kTmpSharedOffset + kRawStageBytes <=
-                  kTmpSharedOffset + kTmpBytes,
-              "E8 V raw alias must remain within the tmp allocation");
-static_assert(kQSharedOffset + kRawStageBytes <= kTmpSharedOffset,
-              "E8 K raw alias must not overlap V raw alias");
-static_assert(kTmpSharedOffset + kRawStageBytes <= kFp8LutSharedOffset,
-              "E8 V raw alias must not overlap the LUT");
+              "E9b raw alias must remain within the Q/P allocation");
 static_assert(kQSharedOffset >= kKvSharedOffset + kKvSharedBytes,
-              "E8 raw aliases must not overlap decoded K/V output");
+              "E9b raw alias must not overlap decoded K/V output");
 static_assert(kTmpSharedOffset == 66816,
-              "E8 temporary tile offset must be 66,816 bytes");
-static_assert(kTmpBytes == 14336, "E8 temporary tile must be 14,336 bytes");
-static_assert(kFp8LutEntries == 256, "E8 LUT must have 256 entries");
-static_assert(kFp8LutBytes == 512, "E8 shared LUT must be 512 bytes");
+              "E9b temporary tile offset must be 66,816 bytes");
+static_assert(kTmpBytes == 14336, "E9b temporary tile must be 14,336 bytes");
+static_assert(kFp8LutEntries == 256, "E9b LUT must have 256 entries");
+static_assert(kFp8LutBytes == 512, "E9b shared LUT must be 512 bytes");
 static_assert(kFp8LutSharedOffset == 81152,
-              "E8 shared LUT offset must be 81,152 bytes");
+              "E9b shared LUT offset must be 81,152 bytes");
 static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
-              "E8 shared LUT must not overlap temporary storage");
-static_assert(kSharedBytes == 81664, "E8 shared layout must be 81,664 bytes");
+              "E9b shared LUT must not overlap temporary storage");
+static_assert(kSharedBytes == 81664, "E9b shared layout must be 81,664 bytes");
 static_assert(kSharedBytes <= 98304,
-              "E8 shared layout must fit SM80 per-CTA dynamic shared limit");
+              "E9b shared layout must fit SM80 per-CTA dynamic shared limit");
 
 __device__ __forceinline__ float bf16_bits_to_float(uint16_t bits) {
   return __uint_as_float(static_cast<uint32_t>(bits) << 16);
@@ -177,6 +181,43 @@ __device__ __forceinline__ uint16_t fp8_e4m3fn_to_bf16_bits(uint8_t code) {
          static_cast<uint16_t>(bf16_fraction);
 }
 
+__device__ __forceinline__ uint16_t half_raw_to_bf16_bits(uint16_t bits) {
+  // Avoid __half/__nv_bfloat16 C++ conversion operators: Torch's headers can
+  // disable those operators.  Raw half bits are converted through the CUDA
+  // intrinsics already used by this prototype.  Every finite E4M3FN value is
+  // exactly representable in half and FP32, so the RNE BF16 bridge preserves
+  // the qualified finite bits.
+  __half_raw half;
+  half.x = bits;
+  return __bfloat16_as_ushort(__float2bfloat16_rn(__half2float(half)));
+}
+
+__device__ __forceinline__ __nv_bfloat162_raw fp8_e4m3fn_x2_to_bf16_raw(
+    uint8_t code0, uint8_t code1) {
+  const bool invalid0 = (code0 & 0x7Fu) == 0x7Fu;
+  const bool invalid1 = (code1 & 0x7Fu) == 0x7Fu;
+  __nv_bfloat162_raw result = {0u, 0u};
+  if (!invalid0 || !invalid1) {
+    // __nv_fp8x2_storage_t stores the first byte in the low eight bits and
+    // the second byte in the high eight bits, matching raw token-major D.
+    const __nv_fp8x2_storage_t pair =
+        static_cast<__nv_fp8x2_storage_t>(
+            static_cast<uint16_t>(invalid0 ? 0 : code0) |
+            (static_cast<uint16_t>(invalid1 ? 0 : code1) << 8));
+    const __half2_raw half_pair =
+        __nv_cvt_fp8x2_to_halfraw2(pair, __NV_E4M3);
+    result.x = half_raw_to_bf16_bits(half_pair.x);
+    result.y = half_raw_to_bf16_bits(half_pair.y);
+    if (invalid0) {
+      result.x = 0u;
+    }
+    if (invalid1) {
+      result.y = 0u;
+    }
+  }
+  return result;
+}
+
 template <bool IsI64>
 __device__ __forceinline__ int64_t load_index(const void* ptr, int64_t index) {
   if constexpr (IsI64) {
@@ -192,20 +233,16 @@ __device__ __forceinline__ int64_t load_block_id(
   return load_index<BlockI64>(block_table, index);
 }
 
-// Stage one raw FP8 K/V tile into two disjoint shared aliases.  Each thread
-// owns four 16-byte chunks of each matrix, so K and V are loaded in one CTA
-// loop and published by one barrier.  A source row is always addressed inside
+// Stage one raw FP8 K or V tile in the compact Q/P shared alias.  Each thread
+// owns four 16-byte chunks; K and V are staged in separate passes so the E6
+// four-phase lifetime is preserved.  A source row is always addressed inside
 // its 256-byte logical D extent; an unaligned external allocation falls back
 // to scalar bytes, while invalid token tails are explicitly zero-filled.
-__device__ __forceinline__ void stage_raw_kv_pair(
-    unsigned char* raw_k_stage,
-    unsigned char* raw_v_stage,
-    const unsigned char* k_cache,
-    const unsigned char* v_cache,
-    int64_t k_tile_base,
-    int64_t v_tile_base,
-    int64_t k_stride_s,
-    int64_t v_stride_s,
+__device__ __forceinline__ void stage_raw_kv(
+    unsigned char* raw_stage,
+    const unsigned char* cache,
+    int64_t tile_base,
+    int64_t stride_s,
     int64_t tile_token,
     int64_t kv_len) {
   const int tid = threadIdx.x;
@@ -214,88 +251,71 @@ __device__ __forceinline__ void stage_raw_kv_pair(
     const int token_in_tile = chunk / kChunksPerRow;
     const int d0 = (chunk % kChunksPerRow) * kRawChunkBytes;
     const int raw_offset = token_in_tile * kD + d0;
-    unsigned char* k_dst = raw_k_stage + raw_offset;
-    unsigned char* v_dst = raw_v_stage + raw_offset;
+    unsigned char* dst = raw_stage + raw_offset;
     const int64_t token = tile_token + token_in_tile;
     if (token < 0 || token >= kv_len) {
       const uint4 zero = {0, 0, 0, 0};
-      *reinterpret_cast<uint4*>(k_dst) = zero;
-      *reinterpret_cast<uint4*>(v_dst) = zero;
+      *reinterpret_cast<uint4*>(dst) = zero;
       continue;
     }
 
     // d0 is one of 0,16,...,240 and therefore the vector read cannot cross a
     // valid cache row.  Keep the nonnegative check explicit for int64 address
     // arithmetic and retain a scalar fallback for a merely unaligned base.
-    const int64_t k_raw_base =
-        k_tile_base + static_cast<int64_t>(token_in_tile) * k_stride_s + d0;
-    const int64_t v_raw_base =
-        v_tile_base + static_cast<int64_t>(token_in_tile) * v_stride_s + d0;
+    const int64_t raw_base =
+        tile_base + static_cast<int64_t>(token_in_tile) * stride_s + d0;
     const bool row_in_bounds = d0 >= 0 && d0 + kRawChunkBytes <= kD;
-    const bool k_in_bounds = row_in_bounds && k_raw_base >= 0;
-    const bool v_in_bounds = row_in_bounds && v_raw_base >= 0;
-    if (k_in_bounds) {
-      const uintptr_t k_address = reinterpret_cast<uintptr_t>(k_cache) +
-                                  static_cast<uintptr_t>(k_raw_base);
-      if ((k_address & (kRawChunkBytes - 1)) == 0) {
-        *reinterpret_cast<uint4*>(k_dst) =
-            *reinterpret_cast<const uint4*>(k_cache + k_raw_base);
-      } else {
-        #pragma unroll
-        for (int i = 0; i < kRawChunkBytes; ++i) {
-          k_dst[i] = k_cache[k_raw_base + i];
-        }
-      }
-    } else {
+    const bool in_bounds = row_in_bounds && raw_base >= 0;
+    if (!in_bounds) {
       const uint4 zero = {0, 0, 0, 0};
-      *reinterpret_cast<uint4*>(k_dst) = zero;
+      *reinterpret_cast<uint4*>(dst) = zero;
+      continue;
     }
-    if (v_in_bounds) {
-      const uintptr_t v_address = reinterpret_cast<uintptr_t>(v_cache) +
-                                  static_cast<uintptr_t>(v_raw_base);
-      if ((v_address & (kRawChunkBytes - 1)) == 0) {
-        *reinterpret_cast<uint4*>(v_dst) =
-            *reinterpret_cast<const uint4*>(v_cache + v_raw_base);
-      } else {
-        #pragma unroll
-        for (int i = 0; i < kRawChunkBytes; ++i) {
-          v_dst[i] = v_cache[v_raw_base + i];
-        }
-      }
+    const uintptr_t raw_address = reinterpret_cast<uintptr_t>(cache) +
+                                  static_cast<uintptr_t>(raw_base);
+    if ((raw_address & (kRawChunkBytes - 1)) == 0) {
+      *reinterpret_cast<uint4*>(dst) =
+          *reinterpret_cast<const uint4*>(cache + raw_base);
     } else {
-      const uint4 zero = {0, 0, 0, 0};
-      *reinterpret_cast<uint4*>(v_dst) = zero;
+      #pragma unroll
+      for (int i = 0; i < kRawChunkBytes; ++i) {
+        dst[i] = cache[raw_base + i];
+      }
     }
   }
 }
 
-// Decode both staged raw matrices through the exact E6 integer converter.
-// The element loop is deliberately shared between K and V so one final CTA
-// barrier publishes all padded BF16 rows before Q/P and tmp reclaim aliases.
-__device__ __forceinline__ void decode_staged_kv_pair(
+// Intrinsic FP8x2 conversion for one raw pair.  E4M3FN's two invalid NaN
+// encodings are detected before the conversion and replaced with zero, so the
+// official intrinsic never gets to choose a NaN payload.  The pure integer
+// helper above remains available for device-side reference/contrast testing.
+__device__ __forceinline__ void decode_raw_kv_intrinsic(
     uint16_t* shared_kv,
-    const unsigned char* raw_k_stage,
-    const unsigned char* raw_v_stage) {
+    const unsigned char* raw_stage,
+    bool is_v) {
   const int tid = threadIdx.x;
-  for (int element = tid; element < kKvElementsPerTile;
-       element += blockDim.x) {
+  for (int element = tid * 2; element < kKvElementsPerTile;
+       element += blockDim.x * 2) {
     const int token_in_tile = element / kD;
     const int d = element % kD;
+    // element is even and kD is even, so this pair remains in one token row.
     const int physical = token_in_tile * kWmmaLd + d;
-    shared_kv[physical] =
-        fp8_e4m3fn_to_bf16_bits(raw_k_stage[element]);
-    shared_kv[kKvMatrixElements + physical] =
-        fp8_e4m3fn_to_bf16_bits(raw_v_stage[element]);
+    const uint8_t code0 = raw_stage[element];
+    const uint8_t code1 = raw_stage[element + 1];
+    const __nv_bfloat162_raw converted =
+        fp8_e4m3fn_x2_to_bf16_raw(code0, code1);
+    const int matrix_offset = is_v ? kKvMatrixElements : 0;
+    shared_kv[matrix_offset + physical] = converted.x;
+    shared_kv[matrix_offset + physical + 1] = converted.y;
   }
 }
 
-// E8's factorial collapses E6's K-stage/decode plus V-stage/decode sequence
-// into one paired stage/decode sequence: two CTA-wide barriers, one after raw
-// staging and one after BF16 decode.  Block/head bases remain tile-hoisted.
+// Restore E6's four-phase K-stage/decode plus V-stage/decode sequence while
+// changing only the per-byte conversion to the official CUDA FP8x2 intrinsic.
+// Block/head bases remain tile-hoisted.
 __device__ __forceinline__ void load_kv_bf16(
     uint16_t* shared_kv,
-    unsigned char* raw_k_stage,
-    unsigned char* raw_v_stage,
+    unsigned char* raw_stage,
     const unsigned char* k_cache,
     const unsigned char* v_cache,
     int64_t tile_token,
@@ -315,10 +335,13 @@ __device__ __forceinline__ void load_kv_bf16(
   const int64_t v_tile_base =
       block_id * v_stride_b + tile_slot * v_stride_s + kvh * v_stride_h;
 
-  stage_raw_kv_pair(raw_k_stage, raw_v_stage, k_cache, v_cache, k_tile_base,
-                    v_tile_base, k_stride_s, v_stride_s, tile_token, kv_len);
+  stage_raw_kv(raw_stage, k_cache, k_tile_base, k_stride_s, tile_token, kv_len);
   __syncthreads();
-  decode_staged_kv_pair(shared_kv, raw_k_stage, raw_v_stage);
+  decode_raw_kv_intrinsic(shared_kv, raw_stage, false);
+  __syncthreads();
+  stage_raw_kv(raw_stage, v_cache, v_tile_base, v_stride_s, tile_token, kv_len);
+  __syncthreads();
+  decode_raw_kv_intrinsic(shared_kv, raw_stage, true);
   __syncthreads();
 }
 
@@ -353,11 +376,10 @@ __global__ void v7_partial_kernel(
   uint16_t* q_shared =
       reinterpret_cast<uint16_t*>(shared + kQSharedOffset);
   float* tmp_shared = reinterpret_cast<float*>(shared + kTmpSharedOffset);
-  // Before Q/P and tmp become live, alias their disjoint prefixes for raw K/V
-  // staging.  The final decode barrier below ends both aliases' lifetimes;
-  // thereafter Q/P and tmp reclaim their complete normal WMMA/PV regions.
-  unsigned char* raw_k_stage = reinterpret_cast<unsigned char*>(q_shared);
-  unsigned char* raw_v_stage = reinterpret_cast<unsigned char*>(tmp_shared);
+  // Before Q/P becomes live, alias its first 8,192 B for one raw K/V matrix
+  // at a time.  The fourth-stage decode barrier ends this alias lifetime;
+  // thereafter Q/P and tmp reclaim their normal WMMA/PV regions.
+  unsigned char* raw_stage = reinterpret_cast<unsigned char*>(q_shared);
   uint16_t* fp8_lut_shared = reinterpret_cast<uint16_t*>(
       shared + kFp8LutSharedOffset);
   // The P matrix occupies the first 16x32 BF16 entries.  The remaining
@@ -377,7 +399,7 @@ __global__ void v7_partial_kernel(
   const int warp = tid >> 5;
 
   // Retain E6's 512-B shared LUT allocation and load it once per CTA so the
-  // shared-memory geometry stays comparable.  E8's exact bit decoder does not
+  // shared-memory geometry stays comparable.  E9b's FP8x2 hot decoder does not
   // read this table in the hot loop; the accumulator-init barrier still
   // publishes the copied entries for ABI/resource comparability.
   const int lut_index = tid * 2;
@@ -448,14 +470,14 @@ __global__ void v7_partial_kernel(
     }
     __syncthreads();
     load_kv_bf16(
-        kv_shared, raw_k_stage, raw_v_stage, k_cache, v_cache, tile * kTile,
-        kBlockSize, kvh, block_id_shared, stride_kb, stride_ks, stride_kh,
-        stride_vb, stride_vs, stride_vh, kv_len);
+        kv_shared, raw_stage, k_cache, v_cache, tile * kTile, kBlockSize, kvh,
+        block_id_shared, stride_kb, stride_ks, stride_kh, stride_vb, stride_vs,
+        stride_vh, kv_len);
 
     // The Q/P buffer is reused for each 16-row pack.  Loading Q once per pack
     // per tile is required because P occupies its first 32 columns.  This
-    // begins only after load_kv_bf16's final decode barrier, which publishes
-    // both staged K/V matrices for WMMA.
+    // begins only after load_kv_bf16's fourth-stage decode barrier, which
+    // publishes both staged K/V matrices for WMMA.
     #pragma unroll
     for (int row_group = 0; row_group < kRowGroups; ++row_group) {
       for (int idx = tid; idx < kRowsPerGroup * kD; idx += blockDim.x) {
@@ -738,7 +760,9 @@ __global__ void v7_decode_e4m3fn_kernel(
                        threadIdx.x;
        index < count;
        index += static_cast<int64_t>(gridDim.x) * blockDim.x) {
-    out[index] = fp8_e4m3fn_to_bf16_bits(codes[index]);
+    const __nv_bfloat162_raw converted =
+        fp8_e4m3fn_x2_to_bf16_raw(codes[index], codes[index]);
+    out[index] = converted.x;
   }
 }
 

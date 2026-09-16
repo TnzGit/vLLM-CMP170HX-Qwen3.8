@@ -976,3 +976,42 @@ not reduce measured barrier waiting because phase arrival imbalance dominates.
 E8's corrected fail-closed semantics in all future tests. Next compare CUDA's
 two-code FP8 conversion intrinsic with bit synthesis, then investigate
 split-local page metadata/base staging.
+
+## Milestone V7-E9b — CUDA FP8x2-to-half bridge (correct; rejected)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `0445323`
+
+The target CUDA 13.0 header does not expose the proposed direct
+`__nv_cvt_fp8x2_to_bf162raw` symbol. E9b therefore used the actually available
+`__nv_cvt_fp8x2_to_halfraw2`, converted both raw half lanes through FP32 to
+BF16, and explicitly fail-closed `0x7f/0xff` to zero. It retained E6's
+four-phase compact staging, resource geometry and external ABI.
+
+The extension compiled on the CMP 170HX to 79 registers/thread, zero local
+bytes, 81,664 B dynamic shared and two CTAs/SM. The exhaustive device test
+passed all 254 finite encodings bit-exactly and required both invalid encodings
+to return zero. All q=5/6/7/8, 895/896/897, mixed-request, 8K/32K/65K,
+int32/int64 and 4-GiB high-block-ID correctness gates passed.
+
+| context | E6 pure bit synthesis | E9b FP8x2-half bridge | change |
+|---:|---:|---:|---:|
+| 4K | 378.5 | 346.9 | -8.3% |
+| 70K | 4,957.3 | 4,829.9 | -2.6% |
+| 126K | 8,130.3 | 8,354.1 | +2.8% |
+| 200K | 12,845.7 | 13,228.3 | +3.0% |
+| 250K | 16,041.2 | 16,511.7 | +2.9% |
+
+NCU at 126K measured 783.4 M instructions versus E6's 711.7 M, while shared
+load conflicts remained 63.51 M and DRAM reads remained about 258 MB. Barrier
+stalls improved slightly (19.23% -> 18.73%) and long-scoreboard stalls moved
+28.48% -> 27.36%, but tensor activity fell 1.51% -> 1.46%. The extra
+half-to-float-to-BF16 bridge therefore wins at short context but accumulates
+too many instructions over long scans.
+
+**Rejected.** CUDA FP8x2 is not automatically a faster SM80 BF16 feed path
+when the public API stops at half2. Preserve E6 as the performance base and
+E8's corrected invalid-code semantics. The next independent experiment is
+split-local physical-page/base staging; do not combine it with this rejected
+conversion bridge.

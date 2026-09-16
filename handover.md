@@ -1350,6 +1350,7 @@ Completed milestones:
 | V7-E6 bitwise FP8 decode | `c732fe9` | correct; 43-44% long gain, accepted isolated scaffold |
 | V7-E7 direct global load | `b6980c6` | correct; rejected, 28-69% slower than staged E6 |
 | V7-E8 dual staging | current milestone | correct; 1-2% long gain, +7.7% 4K, rejected |
+| V7-E9b FP8x2-half bridge | current milestone | correct; -8.3% 4K but +2.8-3.0% long, rejected |
 
 The service was deliberately stopped for isolated GPU testing.  Restore
 `cmp170hx-mixed-fp8-full-256k-8002.service` only after the active experiment is
@@ -1357,9 +1358,9 @@ finished.  No rejected candidate is present in the active patch series or the
 qualified service tree.
 
 The next owner should use E6 four-phase staging as the performance baseline
-but preserve E8's corrected NaN fail-closed contract. E8 dual staging reduced
-instructions and long latency 1-2% but regressed 4K 7.7%, while barrier stalls
-did not fall. Next A/B CUDA FP8x2 conversion intrinsic versus bit synthesis,
-explicitly masking `0x7f/0xff` to zero. Then test split-local page IDs/bases.
+but preserve E8's corrected NaN fail-closed contract. E9b proved the target
+CUDA 13.0 toolkit has only FP8x2-to-half, not direct FP8x2-to-BF16: the bridge
+improved 4K 8.3% but regressed 126K-250K 2.8-3.0% and is rejected. Next test
+split-local page IDs/bases as an independent factorial.
 Admission remains zero spill, two CTAs/SM, >=5% isolated gain at 126K/250K and
 <=2% 4K regression before full-model/CUDA Graph A/B.

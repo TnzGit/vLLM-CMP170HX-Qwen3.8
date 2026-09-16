@@ -846,3 +846,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     instructions about 5%, yet barrier stalls stayed near 19.3%. Long latency
     improved only 1-2% and 4K regressed 7.7%. Arrival imbalance and the work
     between barriers matter more than the source-level barrier count.
+
+70. **A public FP8x2 conversion can still be slower than exact integer decode
+    on SM80.** CUDA 13.0 on the qualified host exposes
+    `__nv_cvt_fp8x2_to_halfraw2`, but not a direct FP8x2-to-BF16 intrinsic.
+    E9b therefore required half-to-float-to-BF16 conversion after the paired
+    decode. It was 8.3% faster at 4K, but 2.8-3.0% slower from 126K to 250K and
+    executed 783.4 M rather than E6's 711.7 M instructions. Check the target
+    toolkit's actual header and end type; vector width alone is not a useful
+    optimization if a scalar type bridge is inserted afterward.
