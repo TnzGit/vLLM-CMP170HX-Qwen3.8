@@ -541,3 +541,13 @@ two-CTA geometry. Locked-1350MHz q=8/NSEG=35 E21/E35 medians were
 185.8/179.8 us at 4K, 2209.5/2064.0 us at 126K and 4220.9/3952.6 us at
 250K (3.2%/6.6%/6.4% faster). Retain this as an isolated candidate; before
 vLLM dispatch, run matched API, two-request and CUDA-Graph A/B checks.
+
+### E35 NCU attribution
+
+Matched Nsight Compute 2022.4 sampling of the 4K/q=8 partial launch measured
+202.912 us for E21 and 195.136 us for E35. Compute-memory throughput was
+23.98%/24.85%, DRAM 2.38%/2.47%, L1/TEX 24.62%/25.50%, L1 hit
+87.86%/87.93% and L2 hit 55.19%/54.96% (E21/E35). Launch geometry and
+shared memory were unchanged (128 threads, grid 140, 81.856 KiB, two CTA
+limit); registers were 133/164. The gain therefore tracks reduced softmax
+serialization rather than an occupancy or cache-policy change.

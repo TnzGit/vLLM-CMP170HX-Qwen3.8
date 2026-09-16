@@ -1856,3 +1856,14 @@ isolated gate and is retained as a candidate, not yet as vLLM or production
 dispatch. Reduction-order differences require reference-based tolerances.
 The next gate is matched NCU attribution plus real API, two-request and
 CUDA-Graph A/B validation.
+
+### E35 NCU attribution (matched 4K/q=8 partial launch)
+
+Old Nsight Compute 2022.4 successfully sampled E21 and E35 with identical
+launch selection. Kernel duration was 202.912 us (E21) versus 195.136 us
+(E35); compute-memory throughput 23.98% versus 24.85%, DRAM throughput
+2.38% versus 2.47%, L1/TEX throughput 24.62% versus 25.50%, L1 hit
+87.86% versus 87.93%, and L2 hit 55.19% versus 54.96%. Both used 128
+threads/grid 140, 81.856 KiB dynamic shared and a two-CTA limit; registers
+were 133 versus 164 per thread. The attribution supports a softmax
+instruction/serialization reduction, not an occupancy or cache-policy win.

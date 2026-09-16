@@ -1056,3 +1056,11 @@ spills) but improved locked-clock latency by only 1.8%/1.1%/1.2% at
     3.2%/6.6%/6.4% at 4K/126K/250K, so it is an accepted isolated candidate.
     Its reduction order differs slightly from E21; validate against the
     reference and still require API/multi-request/graph gates before dispatch.
+
+97. **Legacy Nsight Compute parses application arguments positionally.** On
+    2022.4, putting a standalone `--` before the Python command caused the
+    benchmark's `--segments`/similar flags to be parsed as profiler options
+    and reported a misleading ambiguity. Put the application executable
+    first and pass its arguments directly. Matched E21/E35 NCU samples then
+    worked and showed the E35 gain without an occupancy or cache-policy
+    change.

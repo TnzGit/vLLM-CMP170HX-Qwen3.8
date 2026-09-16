@@ -674,3 +674,13 @@ including mixed int32/int64 and high block IDs (0.000977 standard max error,
 Locked 1350MHz q=8/NSEG=35 medians improved 3.2%/6.6%/6.4% at
 4K/126K/250K. This is an isolated candidate only; matched API, multi-request
 and CUDA-Graph validation are required before dispatch integration.
+
+### E35 NCU attribution
+
+Matched Nsight Compute sampling at locked 1350MHz measured 202.912 us for
+E21 and 195.136 us for E35 on the same 4K/q=8 partial launch. Compute-memory
+throughput was 23.98%/24.85%, DRAM 2.38%/2.47%, L1/TEX 24.62%/25.50%, and
+L1/L2 hit rates 87.86%/87.93% and 55.19%/54.96% (E21/E35). Both retained
+128-thread/grid-140, 81.856 KiB and the two-CTA limit; registers were
+133/164. The result supports a softmax-serialization reduction, not an
+occupancy or cache-policy change.

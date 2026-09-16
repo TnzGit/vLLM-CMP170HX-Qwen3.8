@@ -317,3 +317,17 @@ Current next gate: obtain matched NCU attribution if the installed legacy
 Nsight Compute accepts an unambiguous option form, then measure E35 through
 the real SpecDecodeAttention API. Do not merge it into production from
 standalone timing alone.
+
+### E35 NCU attribution (matched 4K/q=8 partial launch)
+
+The old Nsight Compute 2022.4 CLI works when the application name precedes
+its arguments; the earlier failures were option-parser misuse. Matched
+sampling of the same 128-thread/grid-140 partial kernel at locked clocks
+reported E21/E35 duration 202.912/195.136 us (3.8% lower for E35),
+compute-memory throughput 23.98%/24.85%, DRAM throughput 2.38%/2.47%,
+L1/TEX throughput 24.62%/25.50%, L1 hit 87.86%/87.93%, and L2 hit
+55.19%/54.96%. Both had the same 200-block, 2-CTA launch limit and
+81.856 KiB dynamic shared; E21/E35 used 133/164 registers per thread.
+Thus E35's isolated gain is not an occupancy change or a cache-policy
+change; it is consistent with doing less serial softmax work while retaining
+the same memory geometry. This is still not an end-to-end vLLM result.
