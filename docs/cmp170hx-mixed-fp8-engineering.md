@@ -356,9 +356,14 @@ acceptance.  Lowering the cap from 180 W to 175 W changed step latency as follow
 |---:|---:|---:|---:|
 | 4K | 22.315 | 22.634 | 1.43% |
 | 126K | 35.230 | 35.648 | 1.19% |
+| 250K | 46.941 | 47.043 | 0.22% |
 
-The power cap falls 2.78% for only 1.2-1.4% less throughput, improving perf/W by
-roughly 1.4-1.6%.  Keep 180 W as the peak-throughput default; 175 W is the
+The power cap falls 2.78% for only 0.2-1.4% less throughput.  At 250K the
+workload is sufficiently memory/attention bound that decode throughput was
+effectively unchanged, improving perf/W by about 2.6%.  The 250K 175 W run hit
+the existing prefix cache, so its TTFT is not comparable with the preceding
+cold-prefill run; step latency and decode throughput are the controlled
+measurements.  Keep 180 W as the peak-throughput default; 175 W is the
 qualified low-noise/efficiency profile.  The test restored 180 W on exit.
 
 ## Long-context policy
