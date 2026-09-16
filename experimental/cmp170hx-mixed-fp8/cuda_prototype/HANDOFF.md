@@ -443,3 +443,13 @@ two-CTA resources. However, a single warp's V copy is four times less
 parallel than the original all-thread stage; two locked-clock scans regressed
 about 25% at 20K-250K (250K about 5.29 ms/layer versus E21's 4.22 ms).
 The candidate is rejected and the isolated source has been restored to E21.
+
+## V7-E25 cp.async K prefetch (rejected negative control)
+
+E25 replaced E21's warp-3 synchronous vector loads for the next K tile with
+SM80 `cp.async` groups, retaining a conservative synchronous fallback for
+unaligned/tail chunks. Full correctness and high-ID checks passed, but the
+candidate rose to 134 registers/thread and was consistently slower: three
+locked-clock scans were about 1.2-1.3% slower at 20K-250K and about 4.6%
+slower at 4K. Commit/wait-group overhead outweighed any additional overlap;
+the isolated source has been restored to E21.

@@ -991,3 +991,9 @@ all-thread stage. Correctness remained exact, yet fixed-clock latency regressed
 about 25% at 20K-250K. Keep E21's K-only prefetch and all-thread V stage unless
 a true multi-warp/double-buffer design preserves copy bandwidth without
 losing two-CTA occupancy.
+
+86. **`cp.async` does not guarantee a win for a small warp-prefetch group.**
+V7-E25 kept a synchronous fallback but still added commit/wait-group overhead
+and raised registers from 133 to 134. Fixed-clock scans regressed 1.2-1.3% at
+20K-250K and about 4.6% at 4K. Retain E21's synchronous warp-3 K prefetch
+unless a design can pipeline multiple groups without an immediate wait.

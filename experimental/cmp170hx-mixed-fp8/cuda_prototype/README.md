@@ -598,3 +598,9 @@ This candidate overlapped a warp-3 V copy with owner QK/softmax work, but the
 single-warp copy throughput was insufficient: two locked-clock scans regressed
 roughly 25% at medium/long context (about 5.29 ms/layer at 250K versus E21's
 4.22 ms). Correctness passed, but the source was restored to E21.
+
+## V7-E25 cp.async K prefetch (rejected)
+
+SM80 `cp.async` for warp-3's next-K copy passed correctness but added one
+register and was 1.2-1.3% slower at 20K-250K (about 4.6% slower at 4K) across
+three locked-clock scans. The source was restored to E21.

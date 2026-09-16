@@ -1633,3 +1633,28 @@ Two locked-1350MHz scans nevertheless showed a large, repeatable regression:
 The single-warp V copy loses the original all-thread staging bandwidth; the
 overlap does not compensate. **Rejected.** The source was restored to E21 and
 no production code changed.
+
+## Milestone V7-E25 — cp.async K prefetch (rejected negative control)
+
+**Date:** 2026-09-16
+
+E25 changed only E21's warp-3 next-K copy to use SM80 `cp.async` groups, with
+synchronous fallback for unaligned/tail chunks. Exhaustive decoding,
+mixed-request, int64/high-ID and numerical checks passed. Resources increased
+to 134 registers/thread while dynamic shared remained 81,856 B and occupancy
+remained two CTAs/SM.
+
+Three locked-1350MHz scans (query=8, 300 iterations) produced medians in
+us/layer:
+
+| context | E21 | E25 | change |
+|---:|---:|---:|---:|
+| 4K | 186.1 | 194.8 | +4.7% |
+| 20K | 479.0 | 482.2 | +0.7% |
+| 60K | 1,136.3 | 1,149.8 | +1.2% |
+| 126K | 2,205.6 | 2,233.6 | +1.3% |
+| 200K | 3,403.6 | 3,448.8 | +1.3% |
+| 250K | 4,218.6 | 4,272.2 | +1.3% |
+
+Immediate commit/wait-group synchronization outweighed additional copy
+overlap. **Rejected.** The source remains E21 and no production code changed.
