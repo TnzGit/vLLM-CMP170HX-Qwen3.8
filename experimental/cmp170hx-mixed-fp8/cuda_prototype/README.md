@@ -69,6 +69,26 @@ loads and 14.486 M stores, 3.33% tensor activity, 14.62% barrier and 14.80%
 short-scoreboard stalls. E14 is accepted as an isolated secondary scaffold,
 not production dispatch.
 
+## V7-E16 half2 accumulator merge (accepted isolated scaffold)
+
+E16 keeps E15's resource-safe physical accumulator `ld=258` but changes only
+the owner-local merge loop. Each lane handles four adjacent pairs as `half2`:
+the pair is converted to `float2`, fused-multiply-added with the FP32 row
+alpha, and stored back as `half2`. The 128-pair map covers every logical
+`[16,256]` group exactly once; output indexing and the partial/combine ABI
+remain unchanged.
+
+Resources are 81,856B dynamic shared (81,920B allocator round), 134
+registers/thread, zero local bytes/spills and two active CTAs/SM. Exhaustive
+decoder, boundary, int32/int64 and high-block-ID gates pass. Three locked
+1350MHz scans at query lengths 4/8 were stable; query-8 medians in us/layer
+were 225.3 (4K), 684.5 (20K), 1,751.1 (60K), 3,485.7 (126K), 5,439.8
+(200K) and 6,757.3 (250K), 6.2-12.1% faster than E14. NCU at 126K measured
+12.098M/17.556M shared load/store conflicts, 6.049M tensor instructions and
+258.21MB DRAM reads; despite higher conflict counters, the halved scalar
+merge chain and lower register pressure improve wall latency. E16 is accepted
+as the current isolated scaffold, not production dispatch.
+
 ## V7-E15 persistent accumulator padding (rejected)
 
 E15 changed only the persistent FP16 accumulator's physical row stride from

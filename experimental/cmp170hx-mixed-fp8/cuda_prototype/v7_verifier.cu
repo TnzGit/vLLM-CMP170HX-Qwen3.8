@@ -1,4 +1,4 @@
-// Standalone V7-E15 fixed-geometry persistent-Q verifier prototype.
+// Standalone V7-E16 fixed-geometry persistent-Q verifier prototype.
 //
 // This file intentionally has no vLLM/FlashInfer dependency and is not wired
 // into any production dispatch.  It mirrors the split-KV partial/combine
@@ -44,7 +44,7 @@ constexpr int kRawStageBytes = kKvElementsPerTile * sizeof(unsigned char);
 constexpr int kRawChunkBytes = 16;
 constexpr int kRawChunksPerMatrix = kRawStageBytes / kRawChunkBytes;
 constexpr int kRawChunksPerThread = kRawChunksPerMatrix / kThreads;
-// E15 retains E6's padded physical BF16 WMMA rows and logical 256-wide
+// E16 retains E6's padded physical BF16 WMMA rows and logical 256-wide
 // matrices.  Before the first tile, the 16-row buffer is used to convert and
 // load one query group into persistent WMMA A fragments.  During a tile it is
 // reused after the final decode barrier for each group's FP32 score pack.
@@ -61,7 +61,7 @@ constexpr int kAccElements = kRows * kAccLd;
 constexpr int kAccBytes = kAccElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kQBytes = kRowsPerGroup * kWmmaLd *
                         static_cast<int>(sizeof(uint16_t));
-// E15 keeps E11's 14-KiB FP32 PV workspace allocation.  Its first three 1-KiB
+// E16 keeps E11's 14-KiB FP32 PV workspace allocation.  Its first three 1-KiB
 // slices are warp-disjoint 16x16 output-tile scratch; the remaining bytes stay
 // reserved so the frozen shared-memory geometry and two-CTA target do not move.
 constexpr int kPvMainD = 224;
@@ -82,7 +82,7 @@ constexpr int kQPackElements = kRowsPerGroup * kTile;
 constexpr int kQElements = kRowsPerGroup * kD;
 constexpr int kQPackBytes = kQPackElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kScoreGroups = kRowGroups;
-// E13b pads each FP32 score row from 32 to 36 columns. E15 preserves this;
+// E13b pads each FP32 score row from 32 to 36 columns. E16 preserves this;
 // scalar softmax reads
 // only the first 32 columns; the four-column pad rotates successive rows over
 // shared-memory banks instead of stacking all sixteen rows on one phase.
@@ -93,7 +93,8 @@ constexpr int kScoreElements = kScoreGroups * kScorePackElements;
 constexpr int kScoreBytes = kScoreElements * static_cast<int>(sizeof(float));
 constexpr int kScorePackBytes =
     kScorePackElements * static_cast<int>(sizeof(float));
-// E15 pads each logical BF16 P row from 32 to 40 elements. WMMA BF16 loads
+// E15 pads each logical BF16 P row from 32 to 40 elements. E16 preserves this
+// P layout. WMMA BF16 loads
 // accept this eight-element-aligned leading dimension; the softmax writes and
 // PV loads touch only the first 32 logical columns.
 constexpr int kPCols = kTile;
@@ -102,11 +103,12 @@ constexpr int kPGroupElements = kRowsPerGroup * kPLd;
 constexpr int kPGroupBytes =
     kPGroupElements * static_cast<int>(sizeof(uint16_t));
 constexpr int kPAllBytes = kRowGroups * kPGroupBytes;
-// Keep E13b's dense FP32 PV scratch so E15 isolates only accumulator padding.
+// Keep E13b's dense FP32 PV scratch so E16 isolates only accumulator merging.
 constexpr int kPvScratchCols = 16;
 constexpr int kPvScratchLd = 16;
 constexpr int kPvScratchLogicalElements =
     kRowsPerGroup * kPvScratchCols;
+constexpr int kPvScratchLogicalPairs = kPvScratchLogicalElements / 2;
 constexpr int kPvScratchElements = kRowsPerGroup * kPvScratchLd;
 constexpr int kPvScratchBytes =
     kPvScratchElements * static_cast<int>(sizeof(float));
@@ -130,10 +132,12 @@ static_assert(kPvMainTiles == 14, "E12 PV main phase requires fourteen tiles");
 static_assert(kPvTailTiles == 2, "E12 PV tail phase requires two tiles");
 static_assert(kKvSharedBytes == 33792, "E12 K/V tile must be 33,792 bytes");
 static_assert(kAccLd == 258,
-              "E15 accumulator rows must use leading dimension 258");
+              "E16 accumulator rows must use leading dimension 258");
 static_assert(kAccElements == 12384,
-              "E15 accumulator storage must cover 48 rows at ld=258");
-static_assert(kAccBytes == 24768, "E15 accumulator must be 24,768 bytes");
+              "E16 accumulator storage must cover 48 rows at ld=258");
+static_assert(kAccBytes == 24768, "E16 accumulator must be 24,768 bytes");
+static_assert((kAccLd * sizeof(uint16_t)) % alignof(__half2) == 0,
+              "E16 accumulator rows must be half2 aligned");
 static_assert(kQBytes == 8448, "E12 Q/P buffer must be 8,448 bytes");
 static_assert(kRawStageBytes == 8192,
               "E12 raw staging buffer must be 8,192 bytes");
@@ -157,12 +161,12 @@ static_assert(kQSharedOffset + kRawStageBytes <=
 static_assert(kQSharedOffset >= kKvSharedOffset + kKvSharedBytes,
               "E12 raw alias must not overlap decoded K/V output");
 static_assert(kTmpSharedOffset == 67008,
-              "E15 temporary tile offset must be 67,008 bytes");
+              "E16 temporary tile offset must be 67,008 bytes");
 static_assert(kTmpBytes == 14336, "E12 temporary tile must be 14,336 bytes");
 static_assert(kFp8LutEntries == 256, "E12 LUT allocation must have 256 entries");
 static_assert(kFp8LutBytes == 512, "E12 LUT allocation must be 512 bytes");
 static_assert(kFp8LutSharedOffset == 81344,
-              "E15 retained LUT offset must be 81,344 bytes");
+              "E16 retained LUT offset must be 81,344 bytes");
 static_assert(kFp8LutSharedOffset >= kTmpSharedOffset + kTmpBytes,
               "E12 retained LUT area must not overlap temporary storage");
 static_assert(kQPackBytes == 1024, "E12 dense P pack must occupy 1,024 bytes");
@@ -175,15 +179,19 @@ static_assert(kScoreBytes == 6912,
               "E13b three padded score packs must occupy 6,912 bytes");
 static_assert(kScorePackBytes == 2304,
               "E13b each padded FP32 score pack must occupy 2,304 bytes");
-static_assert(kPCols == 32, "E15 each logical P row must contain 32 values");
+static_assert(kPCols == 32, "E16 each logical P row must contain 32 values");
 static_assert(kPLd == 40,
-              "E15 each physical P row must have leading dimension 40");
+              "E16 each physical P row must have leading dimension 40");
 static_assert(kPGroupBytes == 1280,
-              "E15 each padded BF16 P pack must occupy 1,280 bytes");
+              "E16 each padded BF16 P pack must occupy 1,280 bytes");
 static_assert(kPAllBytes == 3840,
-              "E15 three disjoint padded BF16 P packs must occupy 3,840 bytes");
+              "E16 three disjoint padded BF16 P packs must occupy 3,840 bytes");
 static_assert(kPvScratchLogicalElements == 256,
               "E13b each logical PV scratch tile must contain 256 values");
+static_assert(kPvScratchLogicalPairs == 128,
+              "E16 accumulator merge must contain 128 half2 pairs");
+static_assert((kTmpSharedOffset + kPAllBytes) % alignof(float2) == 0,
+              "E16 PV scratch base must be float2 aligned");
 static_assert(kPvScratchBytes == 1024,
               "E13b each dense PV scratch tile must occupy 1,024 bytes");
 static_assert(kPvScratchTotalBytes == 3072,
@@ -191,10 +199,10 @@ static_assert(kPvScratchTotalBytes == 3072,
 static_assert(kScoreSharedOffset + kScoreBytes <= kRawStageBytes,
               "E12 score packs must fit the raw-stage lifetime");
 static_assert(kPAllBytes + kPvScratchTotalBytes <= kTmpBytes,
-              "E15 disjoint P and PV scratch tiles must fit retained tmp");
+              "E16 disjoint P and PV scratch tiles must fit retained tmp");
 static_assert(kAlphaSharedOffset + 16 * sizeof(float) <= kRawStageBytes,
               "E12 P/score/alpha alias must fit the raw-stage lifetime");
-static_assert(kSharedBytes == 81856, "E15 shared layout must be 81,856 bytes");
+static_assert(kSharedBytes == 81856, "E16 shared layout must be 81,856 bytes");
 static_assert(kSharedBytes <= 81920,
               "E15 shared layout must round within the two-CTA budget");
 static_assert(kSharedBytes <= 98304,
@@ -610,7 +618,7 @@ __global__ void v7_partial_kernel(
       __syncwarp();
 
       // The owner performs all sixteen D16 PV tiles. Its dense 1-KiB scratch
-      // slice restores E12's ld=16 layout so P padding is not mixed with E15's
+      // slice restores E12's ld=16 layout so P padding is not mixed with E16's
       // accumulator factor. It is warp-disjoint: store -> warp sync -> merge into only
       // this group's 16 rows of acc_shared.
       float* group_scratch =
@@ -643,19 +651,27 @@ __global__ void v7_partial_kernel(
             nvcuda::wmma::mem_row_major);
         __syncwarp();
 
-        for (int index = lane; index < kPvScratchLogicalElements;
-             index += 32) {
-          const int local_row = index / kPvScratchCols;
-          const int local_col = index % kPvScratchCols;
+        // E16 merges two adjacent FP16 accumulator values per lane.  The
+        // pair mapping gives each row eight lanes and cuts the scalar shared
+        // load/store transactions in half without changing logical output.
+        #pragma unroll
+        for (int pair_index = lane; pair_index < kPvScratchLogicalPairs;
+             pair_index += 32) {
+          const int local_row = pair_index / (kPvScratchCols / 2);
+          const int local_pair = pair_index % (kPvScratchCols / 2);
+          const int local_col = local_pair * 2;
           const int d = d0 + local_col;
           const int row = warp * kRowsPerGroup + local_row;
           const float row_alpha = __shfl_sync(0xffffffffu, alpha, local_row);
-          const float previous =
-              fp16_bits_to_float(acc_shared[row * kAccLd + d]);
-          acc_shared[row * kAccLd + d] =
-              float_to_fp16_bits(
-                  previous * row_alpha +
-                  group_scratch[local_row * kPvScratchLd + local_col]);
+          const __half2 previous = *reinterpret_cast<const __half2*>(
+              acc_shared + row * kAccLd + d);
+          float2 previous_f = __half22float2(previous);
+          const float2 scratch = *reinterpret_cast<const float2*>(
+              group_scratch + local_row * kPvScratchLd + local_col);
+          previous_f.x = fmaf(previous_f.x, row_alpha, scratch.x);
+          previous_f.y = fmaf(previous_f.y, row_alpha, scratch.y);
+          *reinterpret_cast<__half2*>(acc_shared + row * kAccLd + d) =
+              __float22half2_rn(previous_f);
         }
         __syncwarp();
       }
@@ -1094,8 +1110,8 @@ py::dict resources() {
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("partial", &partial,
-        "V7-E12 fixed SM80 persistent-Q FP8 partial with owner-local PV (standalone prototype)");
+        m.def("partial", &partial,
+              "V7-E16 fixed SM80 persistent-Q FP8 partial with owner-local PV (standalone prototype)");
   m.def("combine", &combine,
         "V7 fixed SM80 FP8 split-KV combine (standalone prototype)");
   m.def("resources", &resources,

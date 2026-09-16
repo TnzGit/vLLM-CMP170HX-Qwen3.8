@@ -1,14 +1,12 @@
 # V7 prototype handoff
 
-Status: V7-E14 padded-P-row factorial is accepted as a secondary isolated
-scaffold. It preserves E13b score `ld=36` and changes only logical BF16 P rows
-from `ld=32` to `ld=40`. A locked-clock A/B improved every tested tier by
-2.3-3.4%, with full correctness and resource gates passing. E15 tested only
-persistent accumulator padding (`ld=258`) and was rejected: correctness and
-resources passed, but three locked-clock runs and NCU were indistinguishable
-from E14. The source currently retains E15 as a negative control; restore E14
-before treating any later change as a qualified factor. E13b+E14 is not
-connected to production dispatch.
+Status: V7-E16 half2 accumulator merge is the current accepted isolated
+scaffold. It preserves E13b score `ld=36`, E14 P `ld=40`, and E15's safe
+accumulator `ld=258`, then changes only scalar accumulator merging to aligned
+half2/float2 FMA pairs. A locked-clock A/B improved query-8 latency 6.2-12.1%
+over E14 from 4K through 250K; correctness, zero-spill and two-CTA gates pass.
+E15's stride-only factor was rejected and remains documented as a negative
+control. E16 is not connected to production dispatch.
 
 Files:
 
@@ -19,6 +17,23 @@ Files:
   int32/int64 index variants.
 - `build_and_smoke.sh` — convenience wrapper for the bench.
 - `README.md` — geometry, interface, build command, and limitations.
+
+## V7-E16 half2 accumulator merge (accepted isolated scaffold)
+
+The merge loop maps 128 logical FP16 pairs across all 32 lanes, converts each
+pair to FP32, applies the FP32 row alpha with FMA, and stores it back as
+`half2`. Logical output indexing remains D=256. Resources are 134
+registers/thread, zero local bytes/spills, 81,856B dynamic shared (81,920B
+allocator round) and two active CTAs/SM. Exhaustive decoder, mixed boundary,
+int32/int64 and 4-GiB high-block-ID tests pass.
+
+Locked-1350MHz query-8 medians (us/layer) are 225.3/684.5/1,751.1/3,485.7/
+5,439.8/6,757.3 at 4K/20K/60K/126K/200K/250K, or 6.2-12.1% below E14.
+NCU at 126K shows 6.049M tensor instructions, 12.098M/17.556M shared
+load/store conflicts and 12.86%/13.11%/14.78% barrier/long/short stalls.
+The higher conflict counters do not negate the wall-time gain; scalar merge
+transactions and dependency length are reduced. Before any production use,
+run multi-request correctness and end-to-end vLLM A/B with E14 as baseline.
 
 ## V7-E15 negative control (rejected)
 

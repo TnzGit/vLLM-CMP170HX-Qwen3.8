@@ -1314,3 +1314,49 @@ conflict/dependency boundary.
 only as a documented negative control. The next optimization must first
 attribute the remaining shared stores (for example with source-level NCU or
 SASS classification) before changing another layout factor.
+
+## Milestone V7-E16 — half2 accumulator merge (accepted isolated scaffold)
+
+**Date:** 2026-09-16
+
+**Parent commit:** `f0f2ec4`
+
+E16 changes only the owner-local accumulator merge. Instead of eight scalar
+FP16 load/convert/round/store operations per lane, each lane handles four
+adjacent values as `half2`: the pair is converted to `float2`, multiplied by
+the FP32 row alpha with FMA, and stored back as `half2`. The 128-pair lane map
+covers every logical `[16,256]` group exactly once; `ld=258` remains only a
+physical stride and publication still uses the logical `D=256` ABI.
+
+The kernel keeps 81,856B dynamic shared memory (81,920B allocator round), but
+registers fall from 164 to 134 per thread; local bytes/spills remain zero and
+the driver reports two active CTAs/SM. Accumulator and scratch bases have
+compile-time alignment assertions. Exhaustive E4M3FN decode, ordinary and
+mixed boundaries, int32/int64 indices and the 4-GiB high-block-ID test all
+passed; max errors stayed within the existing FP16 accumulation tolerance.
+
+Three locked-1350MHz scans (300 iterations, query lengths 4/8) were stable.
+Query-8 medians below are us/layer:
+
+| context | E14 | E16 | change |
+|---:|---:|---:|---:|
+| 4K | 240.1 | 225.3 | -6.2% |
+| 20K | 751.8 | 684.5 | -9.0% |
+| 60K | 1,966.0 | 1,751.1 | -10.9% |
+| 126K | 3,945.8 | 3,485.7 | -11.7% |
+| 200K | 6,172.1 | 5,439.8 | -11.9% |
+| 250K | 7,689.2 | 6,757.3 | -12.1% |
+
+At 126K NCU measured 6.049M tensor instructions, 12.098M shared-load
+conflicts, 17.556M shared-store conflicts, 258.21MB DRAM reads, 12.86%
+barrier stalls, 13.11% long-scoreboard and 14.78% short-scoreboard stalls.
+Compared with E14, conflict counters rose (the half2 transaction pattern is
+not bank-conflict-free), yet wall latency fell substantially because the
+scalar accumulator merge's instruction and dependency chain was halved and
+register pressure dropped by 30. E16 demonstrates that conflict counters must
+be interpreted together with transaction count, register pressure and end to
+end latency.
+
+**Accepted as the current isolated V7 scaffold.** It is still not wired into
+vLLM or any production dispatch; integration requires a separate adapter,
+multi-request correctness gate and end-to-end A/B before deployment.
