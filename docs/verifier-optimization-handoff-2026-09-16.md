@@ -898,3 +898,55 @@ over bf16 and 126K/250K cannot be served.
 E41 scratch sources, test harnesses and benchmark outputs remain outside the
 tree (`int8g64-layout-audit/`, and the remote test directory); production vLLM,
 Guardian, and port 8000 were not started, stopped or modified at any point.
+
+## E42 — kill gate measured and NOT met; E38/E41 frozen (2026-09-17)
+
+The review proposed a cheaper intermediate than the allocator rewrite of E41:
+round the common page up instead of padding every attention page, i.e.
+
+```text
+ceil(1,777,664 / 135,168) = 14   ->   common page = 14 x 135,168 = 1,892,352 B
+```
+
+which pads the Mamba page by only 6.45% and gives the target a natural
+**896-token** physical block (64 x 14), with the draft's 33,792-byte page
+dividing it exactly 56 times. That also decouples the two meanings of "64" that
+E38 had fused: the quantization group (64 dimensions, fixed) and the token page
+size. The review attached a gate to it: measure INT8-G64 against the
+**production** control first, and require decode/step >= +10% at 32K or 65K,
+because G64's KV bytes (2,112 B/token/layer) are 3.1% *larger* than the
+production int8/FP8 control's, so its only possible win is the compute path.
+
+That measurement is done, and the gate fails.
+
+Control arm: `triton-int8-control-8002.service` (`CTX=long` ->
+`TRITON_ATTN` + `int8_per_token_head`, `VLLM_SPEC_DECODE_ATTN=1`), i.e. the
+production long-context verify path, on the same W4A16 target and DFlash2
+drafter. Matched settings, pinned clocks, graph mode, greedy, 191 decode steps,
+fresh engine per context:
+
+| ctx | control decode | INT8-G64 | G64 vs control | control prefill | G64 prefill |
+| --- | --- | --- | --- | --- | --- |
+| 4,096 | **6.120 ms** | 7.339 ms | **-19.9%** | 1,709.6 tok/s | 1,626.5 tok/s |
+| 16,384 | **8.161 ms** | 9.450 ms | **-15.8%** | 1,219.5 | 1,180.8 |
+| 32,768 | **10.200 ms** | 11.292 ms | **-10.7%** | 876.1 | 859.7 |
+| 65,000 | **12.673 ms** | 13.932 ms | **-9.9%** | 560.3 | **564.0** |
+
+The gap narrows with context but never crosses, so the compute-path bet does not
+pay off at any context this allocator can serve. E42 is therefore **not
+justified** and E38/E41 are frozen as a research result; no allocator change was
+made.
+
+Two shared-engine bugs surfaced while measuring, both reproducing on the control
+arm and therefore unrelated to INT8-G64:
+
+1. changing context length within one engine lifetime (a 32K request after other
+   lengths) trips `illegal memory access`; a single 32K request on a fresh engine
+   is fine, so measurement must use one context per engine lifetime;
+2. repeating the same long prefix three times in one process trips the same
+   fault, which is what made early `--reps 3` sweeps non-monotonic.
+
+Both need their own issue. Their consequence here is that the trustworthy
+comparison is the fresh-engine one above, not the earlier in-process sweeps.
+
+Production vLLM, Guardian and port 8000 were not started, stopped or modified.
