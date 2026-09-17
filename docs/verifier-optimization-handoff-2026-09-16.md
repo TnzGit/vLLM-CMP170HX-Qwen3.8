@@ -688,3 +688,85 @@ This validates the fused writer's numerical contract. The remaining E38
 integration work is to expose these G64 code/scale page views through vLLM's
 allocator and writer; the existing `int8_per_token_head` patch is a different
 layout and must not be substituted silently. Production remains unchanged.
+
+### NInfer handoff review and E40 gate
+
+**Date:** 2026-09-17
+
+The external NInfer handoff was reviewed after E36 had already completed. Its
+referenced `e2be18d` state is stale: this branch has since completed E36, the
+producer/consumer E37 probe, E38 INT8-G64, E39 active-split scheduling, and the
+E39-Q3 cache-writer boundary. The conclusions below therefore use measured
+results rather than reopening already rejected E36 variants.
+
+The NInfer Q4 fused Linear+SwiGLU kernel is a real SM80 implementation, but it
+is not byte-compatible with the current W4A16 target. NInfer admits the exact
+`[gate_up=34816, input=5120, output=17408]` problem in `Q4G64_F16S` with signed
+symmetric 4-bit codes, one FP16 scale per 64 K elements, and
+`row-split-k128-v1` planes. The current target uses GPTQ/AutoRound
+group-128 compressed-tensors/Marlin packing. A direct loader substitution
+would therefore be incorrect; it would require a full gate/up repack, a new
+weight-page contract, loader changes, and task-level quality validation. For
+the same gate/up shape, group-64 also adds roughly 6.25% scale bytes versus
+group-128 before any alignment, so the fusion must repay that cost.
+
+E40 is consequently defined as a bounded microbenchmark gate, not an
+integration promise. The isolated NInfer build was run on the CMP170HX and
+measured the fused Q4 path at `T=1,2,4,8,16,32` against a non-fused Q4
+projection plus SiLU multiply using identical represented inputs. Repacking
+would only be considered if the measured layer-level benefit were at least
+10% at the actual decode/small-T points, finite and numerically within the Q4
+oracle, and free of any larger persistent workspace requirement. The completed
+measurements do not clear that default-integration gate, so Q4 fusion is
+rejected for the current target without touching vLLM or production.
+
+The other NInfer recommendations are now classified as follows:
+producer/consumer ownership was already tested as E37 and was 33--35% slower;
+graph-stable active-split selection is E39 and `cap=32` is qualified;
+INT8-G64 is E38's promising standalone route and remains the highest-value
+integration candidate; Blackwell-only NVFP4 TMA code and `rk8v4` remain out of
+scope for this SM80 card. Typed KV pools/ReplaySSM are system-level capacity
+work, not a verifier-kernel speed fix, and should only follow an end-to-end
+integration decision.
+
+No E40 code is wired into vLLM or production. The current production and
+8000/Guardian state remain unchanged.
+
+### E40 — NInfer Q4 fused Linear+SwiGLU gate (standalone complete)
+
+**Date:** 2026-09-17
+
+The isolated NInfer build was completed with CUDA 13.0 on the CMP170HX
+(SM80). The fused `Q4 Linear+SiLU/mul` benchmark and the separate Q4
+projection plus SiLU/mul baselines used the same represented dimensions
+(`N=34816`, `K=5120`) and were measured at `T=1,2,4,8,16,32`. These are
+layer microbenchmarks, not vLLM end-to-end model numbers; clocks were dynamic
+and the fused and unfused executables ran in separate processes.
+
+| T | fused us | Q4 linear us | SiLU/mul us | unfused total us | fused speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 166.912 | 300.032 | 3.51 | 303.54 | **1.82x / 45.0%** |
+| 2 | 279.552 | 292.864 | 3.53 | 296.39 | 1.06x / 6.0% |
+| 4 | 282.624 | 297.984 | 3.70 | 301.68 | 1.07x / 6.3% |
+| 8 | 374.784 | 541.696 | 4.02 | 545.72 | **1.46x / 31.3%** |
+| 16 | 415.744 | 977.920 | 5.24 | 983.16 | **2.37x / 57.7%** |
+| 32 | 566.272 | 701.440 | 6.90 | 708.34 | **1.25x / 20.1%** |
+
+The earlier sweep and these exact-T reruns agree on the qualitative result:
+fusion has a large benefit for T=1 and for several larger batch routes, but
+only a 6--7% benefit at T=2/4. Since the real decode path spends most of its
+time at the small-T end, and the current GPTQ/AutoRound group-128 weight
+packing is not compatible with NInfer's signed Q4G64 layout, the >=10%
+actual-decode gate is **not cleared for a default integration**. The result
+does justify retaining Q4 fusion as a future, format-specific experiment if
+the weights can be repacked and an end-to-end correctness oracle is added;
+it does not justify changing vLLM, the current production model, or the
+Marlin path.
+
+E40 is therefore closed as a standalone evidence milestone. Combined with
+E36 (low-level QK/register-feed variants rejected), E37 (producer/consumer
+rejected), E38 (INT8-G64 promising standalone candidate), and E39 (cap32
+qualified scheduling candidate), the next highest-value work remains an
+end-to-end E38 cache/allocator integration—not more E35/E40 micro-tuning.
+All E40 scratch sources and benchmark outputs remain outside the production
+tree; production vLLM, Guardian, and port 8000 were not changed or started.
