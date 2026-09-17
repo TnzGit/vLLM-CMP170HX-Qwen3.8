@@ -2309,3 +2309,82 @@ Scope of the commit is documentation only, matching the branch's established
 The documentation references no tracked path that does not exist, and the
 integration doc now states that the launcher is an experiment-side unit rather
 than promising `deploy/int8-g64-8002.service`.
+
+## 25. E42 kill gate: NOT met — INT8-G64 loses to the production control at every reachable context
+
+The review's short-term sequence was: measure INT8-G64 against the **production**
+control (`TRITON_ATTN` + `int8_per_token_head`, i.e. the path G64 would replace),
+not against the crashing BF16/FLASH_ATTN arm, and require a clear crossover —
+decode/step at least +10% at 32K or 65K — before spending days on the E42
+common-page allocator work. That measurement is now complete and the gate fails.
+
+### 25.1 The control arm is the production path, not BF16
+
+`triton-int8-control-8002.service` runs `CTX=long`, which resolves to
+`--attention-backend TRITON_ATTN --kv-cache-dtype int8_per_token_head` with
+`VLLM_SPEC_DECODE_ATTN=1` — the same split-KV verify kernel the production long
+-context recipe uses, on the same W4A16 target and DFlash2 drafter. Its pool is
+**1,110,675 tokens** at `max_len=250000`, against G64's 63,799-74,239, which is
+the allocator defect of 23.5 restated from the other side.
+
+### 25.2 Matched result (fresh engine per context, identical settings)
+
+Both arms: same model, drafter, `MAX_SEQS=4`, `DFLASH_TOKENS=7`,
+`VLLM_SPEC_DECODE_ATTN=1`, pinned 1350 MHz, graph mode, greedy, identical
+prompt/seed, 191 decode steps. Decode is reported as **ms/step**, which is
+independent of DFlash acceptance and therefore comparable across arms whose
+acceptance differs.
+
+| ctx | control decode | G64 decode | G64 vs control | control prefill | G64 prefill |
+| --- | --- | --- | --- | --- | --- |
+| 4,096 | **6.120 ms** | 7.339 ms | **-19.9%** | 1,709.6 tok/s | 1,626.5 tok/s |
+| 16,384 | **8.161 ms** | 9.450 ms | **-15.8%** | 1,219.5 | 1,180.8 |
+| 32,768 | **10.200 ms** | 11.292 ms | **-10.7%** | 876.1 | 859.7 |
+| 65,000 | **12.673 ms** | 13.932 ms | **-9.9%** | 560.3 | **564.0 (+0.7%)** |
+
+32K was reproduced twice (control 10.200/10.065, G64 11.292/11.241). The gap
+**narrows with context but never crosses**: -19.9% -> -15.8% -> -10.7% -> -9.9%.
+Prefill reaches parity at 65K but never leads. There is also a consistent
+per-request fixed cost in the G64 arm (`prefill_128_s` 0.123-0.125 s against the
+control's 0.072-0.094 s in every row), which is worth understanding but cannot
+account for a per-step decode gap.
+
+**Verdict: the gate is not met at either 32K or 65K, so E42 (common-page
+round-up to 1,892,352 B, 896-token G64 pages, quant_group / physical_block
+decoupling) is not justified and E38/E41 are frozen as a research result.** The
+review's reasoning was that G64's only possible win is a compute-path bet —
+native s8 MMA instead of FP8 -> BF16 decode -> BF16 MMA — because its KV bytes
+(2,112 B/token/layer) are actually 3.1% *larger* than the production FP8/int8
+control's. That bet does not pay off at any context this allocator can serve.
+
+### 25.3 Two shared-engine bugs found while measuring (neither is G64-specific)
+
+Both arms crash identically, so both are in shared engine code and they affect
+any future measurement on this box:
+
+1. **Sequential context changes trip an illegal access.** A single 32K request on
+   a fresh engine completes normally (10.143 ms/step), but a 32K request that
+   follows other context lengths in the same process dies with
+   `illegal memory access` — in the control arm as well as G64, and with
+   `VLLM_SPEC_DECODE_ATTN=0` too. Measurement protocol therefore had to become
+   **one context length per engine lifetime** (`run_ab_rows.sh` /
+   `fresh_sweep.sh`).
+2. **Repeated identical long prefixes trip an illegal access.** One 16K request
+   is fine; three repetitions of the same 16K prompt in one process die the same
+   way. This is what made the first `--reps 3` sweeps non-monotonic and briefly
+   produced a spurious "+14% for G64" reading.
+
+Both deserve their own issue. They are the reason section 22's and the earlier
+part of this session's numbers disagreed with 25.2, and 25.2 is the trustworthy
+set because it holds arm identity and context constant per engine lifetime.
+
+### 25.4 What this leaves
+
+The review's long-term performance direction does not depend on G64 and is now
+the active path toward the project's engineering ceiling (4K ~161 vs 170-200
+reachable, 126K ~98 vs 131, 250K ~70 vs 100 tok/s): whole-step profiling first,
+then fusion on the *existing* Marlin/G128 packing rather than repacking weights
+for NInfer's Q4G64 layout — E40 showed the fusion itself is worth it (T1 +45%,
+T8 +31%, T16 +58%) but only at T>=8 under the current format. At 126K the split
+is verifier attention ~42% / Marlin target GEMM ~43%, so once attention is not
+the problem the GEMM epilogue is the next ceiling.
