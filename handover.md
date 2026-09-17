@@ -2388,3 +2388,76 @@ for NInfer's Q4G64 layout — E40 showed the fusion itself is worth it (T1 +45%,
 T8 +31%, T16 +58%) but only at T>=8 under the current format. At 126K the split
 is verifier attention ~42% / Marlin target GEMM ~43%, so once attention is not
 the problem the GEMM epilogue is the next ceiling.
+
+## 26. Production-path ceiling work: baseline re-measured, 120K+ blocked
+
+### 26.1 Where the review's ceiling numbers come from
+
+Worth recording so the target is not mistaken for a spec. The review's table
+(`4K≈161 / 126K≈98 / 250K≈70 tok/s` current, `170-200 / 131.2 / 100` as the
+"engineering effective ceiling") does not appear anywhere in this repository as a
+measured triple. What the repo does contain is `single-user/README.md`, which
+measures DFlash2 at **`CTX=fast` (bf16, 64k)** with `SPEC=dflash2` and reports
+C1 **121.8 / 131.2 tok/s** (default / greedy), C2 195.5 / 214.6, C4 278.9 / 285.7,
+C8 389.9 / 405.5 — i.e. the 131.2 and 214.6 in the review's "ceiling" column are
+this repo's *measured current* C1/C2 greedy numbers, and 161 is another project's
+end-to-end figure quoted in `README.md` for comparison. Treat the ceiling column
+as a modelling estimate, not a qualification gate.
+
+### 26.2 Production-path baseline actually measured here
+
+`CTX=long` (`TRITON_ATTN` + `int8_per_token_head`, `SPEC_ATTN=1`,
+`SPEC=dflash2`, k=7, `MAX_SEQS=4`, `max_len=262144`, pool **1,137,362 tokens**),
+fresh engine per context, 191 decode steps, greedy:
+
+| ctx | decode ms/step | decode tok/s | prefill tok/s |
+| --- | --- | --- | --- |
+| 4,096 | 6.098-6.120 | 163-164 | 1,709-1,719 |
+| 16,384 | 8.161-8.247 | 121-123 | 1,219-1,216 |
+| 32,768 | 10.065-10.200 | 98-99 | 876 |
+| 65,000 | 12.673 | 79 | 560 |
+
+Whole-request throughput at 4K (prefill included) reads 142-164 tok/s depending on
+prompt, which brackets the review's 161 "current" figure.
+
+### 26.3 New blocker: this configuration cannot serve 120K+
+
+A **single 120K request on a freshly started control engine** dies with
+`illegal memory access` (4 fault records), and the 126K/250K rows fail the same
+way. This is the production control arm, not INT8-G64, so it is unrelated to the
+frozen G64 work. Consequence: the 126K and 250K rows of the review's ceiling
+table **cannot currently be measured on this isolated configuration at all**, and
+neither could a G64 comparison at those lengths. The pool is not the limit
+(1,137,362 tokens); something in the long-context verify path faults.
+
+This joins the two measurement faults already recorded in 25.3 (context-length
+change within one process; repeated identical long prefix) as the three
+engine-level obstacles that must be fixed before any 126K/250K qualification,
+G64 or otherwise, is possible.
+
+### 26.4 Consequence for the plan
+
+The review's short-term branch is closed: the E42 kill gate was measured and
+failed (25.2), so INT8-G64 is frozen and no allocator work is justified. Its
+long-term branch — whole-step profiling, then fusion on the existing Marlin/G128
+packing rather than repacking weights for NInfer's Q4G64 layout — remains the
+right direction, and the repo's existing 126K profile is the reference:
+
+| component | time / step | share |
+| --- | ---: | ---: |
+| speculative FP8 verifier partials | 12.847 ms | 42.2% |
+| target Marlin GEMMs | 13.219 ms | 43.4% |
+| GatedDeltaNet kernels | 1.120 ms | 3.7% |
+| combine reduction | 0.123 ms | 0.4% |
+| all other kernels | ~3.12 ms | 10.3% |
+
+with the dominant GEMMs being `M=16,N=34816,K=5120` (64 calls, 6.111 ms) and
+`M=16,N=5120,K=17408` (64 calls, 3.139 ms). The Marlin tile candidates were
+already swept and rejected (`(128,64,128)` +18% at 4K, `(64,128,128)` +12.3%), so
+the remaining GEMM-side headroom is an **epilogue fusion** — SwiGLU into the
+gate+up GEMM — not a retile. `apply_gptq_marlin_linear` already takes a `bias`
+argument, which is the natural place to attach such an epilogue.
+
+The immediate prerequisite is 26.3: without a working 120K+ path there is no way
+to measure whether any of this moves the long-context number the ceiling table is
+about.
