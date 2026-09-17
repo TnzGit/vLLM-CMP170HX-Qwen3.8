@@ -624,3 +624,28 @@ accepting the result. This stream-selection detail is required for any future
 vLLM integration and is now part of the E38 handoff. E38 remains a standalone
 candidate until the cache writer, mixed query-length dispatch and task-level
 model quality are integrated and requalified.
+
+### E38-Bc64 and E38-W12 follow-up — resource and long-context gates
+
+**Date:** 2026-09-17
+
+Two NInfer-shaped parameter probes were run without changing the E38 cache,
+quantization or partial/reduce ABI. First, `KeyBlock=64` was compiled with the
+same six-warps/one-CTA geometry. `ptxas` rejected both single-request and
+multi-batch entry points because the static shared footprint was 85,440B,
+above this SM80 launch's 49,152B maximum (`uses too much shared data ...
+0xc000 max`). This is a hard resource failure, not a timing regression; Bc64
+would require a different dynamic-arena/layout design and is not a drop-in
+optimization.
+
+Second, the Bc32 kernel was compiled with twelve warps and
+`MinBlocksPerSm=1`, which is the only larger warp count satisfying the
+`PVNtPerWarp` geometry for the 48-row q8 shape. The run was finite at all
+three contexts. Under the same dynamic-clock (not locked) conditions, the
+12-warp variant measured 170.65/192.61 us at 4K, 1,350.25/1,211.29 us at
+126K and 2,427.14/2,158.03 us at 250K for W12/W6. It is about 11.4% faster
+at 4K, but 11.5% and 12.5% slower at 126K and 250K. The extra consumer warps
+do not amortize their one-CTA occupancy cost over the long split envelope,
+so W12 is rejected as the default and retained only as a possible short-
+context specialization. Neither probe changed E35, E38-W6, vLLM or
+production.
