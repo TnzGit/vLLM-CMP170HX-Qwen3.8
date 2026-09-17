@@ -674,3 +674,17 @@ with `maxdiff=0`. Therefore cap32 is a qualified E39 scheduling candidate,
 not merely a single-request timing result. It is still standalone: the
 vLLM cache writer, mixed query-length dispatch and task-level model A/B are
 not yet integrated, so no production dispatch changed.
+
+### E39-Q3 — fused INT8-G64 cache-writer boundary
+
+The NInfer E38 kernel's `GqaAppendInput` path was exercised with eight new
+BF16 K/V tokens and an empty INT8-G64 cache. K/V scales written by the GPU
+matched the CPU FP16-rounded per-token/per-64-dimension-group scales exactly.
+The code comparison had 61 K and 58 V boundary differences out of 8,192
+values, all attributable to the device's reciprocal-then-`__float2int_rn`
+rounding order; dequantized maximum errors were 0.00298 (K) and 0.00304 (V),
+below the corresponding per-group scales, with no NaN or out-of-bounds error.
+This validates the fused writer's numerical contract. The remaining E38
+integration work is to expose these G64 code/scale page views through vLLM's
+allocator and writer; the existing `int8_per_token_head` patch is a different
+layout and must not be substituted silently. Production remains unchanged.
