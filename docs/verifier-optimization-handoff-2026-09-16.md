@@ -649,3 +649,28 @@ do not amortize their one-CTA occupancy cost over the long split envelope,
 so W12 is rejected as the default and retained only as a possible short-
 context specialization. Neither probe changed E35, E38-W6, vLLM or
 production.
+
+### E39 — graph-stable active-split cap scan (E38 INT8-G64)
+
+**Date:** 2026-09-17
+
+E38's kernel already supports a fixed launch capacity with a smaller
+`active_split_count`; this experiment scanned only that capacity, leaving the
+INT8-G64 math, Bc32/W6 geometry, cache writer contract, and reduction ABI
+unchanged. A single-process interleaved scan over cap values 16/24/32/48/64/85
+was run twice with opposite execution order. `cap=32` was the winner at both
+126K and 250K in both orders. Representative medians (us/layer) in the
+second order were:
+
+| context | cap16 | cap24 | cap32 | cap48 | cap64 | cap85 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 126K | 1,269.8 | 1,177.6 | **917.5** | 1,048.6 | 961.5 | 1,000.4 |
+| 250K | 2,369.5 | 2,181.1 | **1,672.2** | 1,884.2 | 1,717.2 | 1,739.8 |
+
+The first order showed the same winner (900.1/1,674.2 us for cap32). A
+two-request mixed 4K+126K run with cap32 remained finite (nan=0), and
+fixed-address CUDA Graph capture/replay passed at both 4K+126K and 4K+250K
+with `maxdiff=0`. Therefore cap32 is a qualified E39 scheduling candidate,
+not merely a single-request timing result. It is still standalone: the
+vLLM cache writer, mixed query-length dispatch and task-level model A/B are
+not yet integrated, so no production dispatch changed.
