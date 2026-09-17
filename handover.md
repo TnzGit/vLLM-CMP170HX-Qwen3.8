@@ -1382,3 +1382,892 @@ CTA, all-GQA-rows and split-local page-list topology, but retains split policy
 and limits from a 170-SM parent and is much slower than the measured vLLM
 control. Borrow only the dataflow/testing ideas; do not copy its cache ABI,
 64-token pages, INT8 scales or split constants.
+
+## 19. E38/E39 INT8-G64 handover (2026-09-17)
+
+This is the current stopping point for the INT8-G64 cache experiment. It ran
+only on the isolated `base-node@192.168.10.206` port-8002 unit. Production
+8000 and Guardian were not changed or restarted by this experiment. The 8002
+unit is now stopped/failed and is not a working service.
+
+### 19.1 Objective and isolation
+
+The intended comparison is the existing W4A16 Qwen3.8 target + DFlash2 versus
+a vLLM-compatible INT8-G64 KV cache:
+
+```text
+target: /home/base-node/models/Qwen3.8-27B-W4A16-AutoRound-fast
+draft:  /home/base-node/models/Qwen3.8-27B-DFlash2-W4A16
+target KV: int8_g64 (G=64), requested attention block=64
+port: 8002 only; power 180 W; graphics clock locked to 1350 MHz
+```
+
+Remote experiment root:
+
+```text
+/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/
+/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/recipe-g64/
+/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/int8g64-8002.log
+/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/v7_verifier_e38_int8.cu
+```
+
+Units:
+
+```text
+/home/base-node/.config/systemd/user/int8g64-8002.service
+/home/base-node/.config/systemd/user/triton-int8-control-8002.service
+```
+
+Only one of these port-8002 units may run at a time. The control unit uses
+stock per-token/head INT8 interpretation; it is a correctness control, not
+the G64 implementation.
+
+### 19.2 Proven facts
+
+* The standalone E38 oracle/writer is numerically plausible (prior oracle
+  cosine was about `0.989`) and stores int8 K/V plus FP16 G=64 scales.
+* The stock per-token/head INT8 control with the same target/draft produced
+  coherent text, so the original garbling was in the G64 path/geometry.
+* Before the guards, vLLM promoted target cache geometry to `896` tokens and
+  the custom shape gate was false; execution fell back to the incompatible
+  stock INT8 interpretation.
+* The platform hybrid-alignment guard and indivisible-promotion guard were
+  reached. The bounded attempt therefore kept the requested 64-token block.
+* The bridge is installed in the remote runtime at:
+
+```text
+/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/lib/python3.12/site-packages/vllm/v1/attention/ops/int8_g64.py
+```
+
+### 19.3 Latest failure and interpretation
+
+The final bounded start used `G64_MAX_LEN=64000`; the earlier 250K attempt is
+not usable. EngineCore warmup failed before serving any request:
+
+```text
+ValueError: INT8-G64 requires VLLM_KV_CACHE_LAYOUT=HND;
+got strides=(1777664, 16384, 256, 1), expected=(65536, 16384, 256, 1)
+```
+
+The matching debug line was:
+
+```text
+kv_update mode=8 enabled=True cache_shape=(2905, 4, 64, 256)
+cache_stride=(1777664, 16384, 256, 1) cache_dtype=torch.int8
+heads=4 hs=256 slot_shape=(32,)
+```
+
+This is a cache-layout contract failure, not a Triton, DFlash2 selector,
+acceptance, or OOM result. `g64_views()` requires HND but the vLLM allocation
+does not provide that stride. No first token was generated; therefore there
+are no valid G64 TPS, acceptance, CUDA Graph, NCU, or whole-model A/B results.
+
+The previous forced-64-token/250K start also showed a separate geometry limit:
+padding/accounting required `109.23 GiB` KV versus about `38.49 GiB` available,
+and `KVCacheCoordinator` asserted on incompatible scheduler/hash block sizes.
+Forcing `--block-size 64` alone cannot provide a 250K mixed cache.
+
+### 19.4 Safe resume order
+
+1. Confirm the isolated unit is stopped before making changes:
+
+```bash
+ssh base-node@192.168.10.206 \
+  'systemctl --user stop int8g64-8002.service; systemctl --user is-active int8g64-8002.service'
+```
+
+2. Fix the layout contract first. Either make the allocator emit the HND
+   shape/stride expected by `g64_views()` for the G64 target pool, or make the
+   bridge consume the actual layout through an explicit validated permutation.
+   Do not merely remove the check and reinterpret memory: that recreates the
+   earlier garbling.
+
+3. Keep a compact, separate 64-token G64 target pool and a separate Mamba/GDN
+   pool. If allocation remains globally padded to Mamba's 896-token geometry,
+   250K is impossible under current page accounting.
+
+4. After the layout fix, run only bounded correctness: KV init -> one
+   deterministic short request -> continuation prefill -> batch 2/4 -> graph
+   capture. Check `/tmp/int8g64-debug.log`, the service log and `dmesg` for
+   Xid/illegal access; stop on the first correctness failure.
+
+5. Only after coherent first-token output run 4K/126K/250K C1/C2/C4 locked
+   A/B, NCU, graph, DFlash2 acceptance and quality tests against a precisely
+   identified control path. Label the control by the actual runtime path.
+
+### 19.5 Machine state at pause
+
+At the pause check on 2026-09-17, `int8g64-8002.service` was `failed` with
+exit code 1 after the HND stride error. Its ExecStopPost reset graphics
+clocks. Port 8000 was observed unavailable at that moment, but this
+handover operation did not start, stop, or otherwise modify 8000. The next
+agent must independently verify 8000 and Guardian before changing either.
+
+The G64 helper scripts, service examples and integration notes are currently
+untracked local experiment files. Review them before any commit or push; no
+commit/push was made for this G64 experiment in this turn.
+
+## 20. INT8-G64 layout contract fixed; new blocker at CUDA-graph replay (2026-09-17)
+
+This section continues 19.4. The cache layout/allocator contract of 19.3 is
+**resolved and verified inside the real isolated runtime**; a different blocker
+now sits after it, at CUDA-graph replay. Nothing here touched port 8000 or
+Guardian, and no commit or push was made.
+
+### 20.1 Root cause of the 19.3 stride failure (confirmed)
+
+The allocator pads every physical page to its own stride, so a per-layer tensor
+arrives as `stride=(1777664, 16384, 256, 1)` rather than the contiguous
+`(65536, 16384, 256, 1)` the original bridge demanded. Byte-sentinel experiments
+proved the padded layout is **not** a contiguous reinterpretation: reinterpreting
+it reads page padding (byte value 85) instead of page 1. The two layouts are:
+
+| layout | page stride | structure |
+| --- | --- | --- |
+| original packed | 65536 B (K/V), 1024 el (scales) | `[all K][all V][all Kscales][all Vscales]` |
+| allocator page-local | 1777664 B | per page `[K 65536][V 65536][Kscales 2048][Vscales 2048][pad]` |
+
+The fix keeps the strict checks and changes the ABI: `g64_views()` now returns
+four **page-local** views that share the allocator's page stride and differ only
+by in-page offset (K at +0, V at +65536, Kscales at +131072, Vscales at
++133120). Overlapping or misaligned pages are still rejected rather than
+reinterpreted, exactly as 19.4 required.
+
+### 20.2 A second, previously unreported defect: prefill never worked
+
+`KVQuantMode.INT8_G64` reports `is_per_token_head=True`, so stock
+`unified_attention` computes `BLOCK_Q = BLOCK_M // num_queries_per_kv` = `16 // 0`
+and raises `ZeroDivisionError` on every prefill/warmup call. The stock kernel
+also cannot express per-group G=64 scales. A/B evidence, same runtime, prefill
+route disabled:
+
+```
+run B (no prefill route):  ZeroDivisionError: integer division or modulo by zero
+run A (prefill route):     gets past KV init, warmup and graph capture
+```
+
+So a dedicated G64 prefill kernel is **required**, not optional. The new kernel
+dequantizes per-group K/V pages and follows vLLM's causal contract
+`context_len = seqused_k - current_batch_query_len` (read from
+`triton_unified_attention.py`), i.e. a continuation-prefill query at row `i`
+sits at absolute position `context_len + i`.
+
+### 20.3 Verified before deployment
+
+All GREEN, run against the exact module that was then installed:
+
+- `test_merged_bridge.py` — page-local view offsets/strides, writer round-trip,
+  page-isolation sentinel (page 1 untouched, 0 non-sentinel bytes), prefill
+  numerics `max_abs=0.00445 / 0.00459` on a two-batch continuation shape, and
+  rejection of overlapping / misaligned pages.
+- `test_g64_prefill_v2.py` — tiled prefill, both padded and compact geometries,
+  `max_abs=0.01389`.
+- `test_page_attention.py` — strided E38 adapter: zero-Q oracle
+  `max_abs=0.00137`, padded and contiguous **bitwise equal**, non-zero-Q
+  mixed-length shuffled-page ABI parity.
+- `test_page_layout.py` — 8/8, writer + views on the padded page.
+
+Debugging lesson worth keeping: several hours were lost editing kernel address
+arithmetic before writing `test_g64_addr_probe.py`, which printed the four
+values the kernel's formulas produce next to the torch views and proved the
+addressing had been right all along — the error was in the test oracle (it
+attended unwritten 85-fill tokens). Write the byte-level probe first.
+
+### 20.4 New blocker: illegal memory access at CUDA-graph replay
+
+With the page-local module and the prefill route deployed, the engine now gets
+through KV init, the G64 writer, the E38 decode bridge and **both** CUDA graph
+capture passes:
+
+```
+INT8-G64 cache views enabled (HND, block_size=64).
+INT8-G64 writer debug: cache (2905, 4, 64, 256) (1777664, 16384, 256, 1) k_scale (2905, 4, 64, 4) (888832, 256, 4, 1)
+INT8-G64 bridge debug: tables (4, 128) valid [8, 8, 8, 8] pos [0..7] split 4 capacity 8
+Capturing CUDA graphs (PIECEWISE): 100%
+Capturing CUDA graphs (FULL): 100%
+```
+
+then fails in `warmup.py:338 _run_decode_step` at
+`cudagraph_utils.py run_fullgraph -> graphs[desc].replay()` with
+`torch.AcceleratorError: CUDA error: an illegal memory access was encountered`.
+Confirmed with `CUDA_LAUNCH_BLOCKING=1`, which localised it from a sticky error
+surfacing in a later Triton `load_binary` to the actual replay site.
+
+The prefill inputs during warmup were captured with a one-shot probe and are
+benign: `max_q 6, max_k 6, num_actual_tokens 24, q (24,24,256),
+cu_q [0,6,12,18,24], seqused [6,6,6,6], table (4,128)` — `q_row` reaches 33
+against 24 rows, but `mask_q = (0..15) < 6` masks every out-of-range row, so no
+unmasked access occurs on that path.
+
+**What is and is not established.** The A/B above proves the prefill route is
+*necessary* (without it the run dies earlier with `ZeroDivisionError`). It does
+**not** attribute the replay fault: run B never reached replay, so the E38 decode
+path's graph-replay safety is still unverified. The leading hypothesis, to be
+tested next, is the pre-existing E38 workspace cache — `_g64_workspace` is keyed
+on `(batch, split_count)` and reallocated whenever either changes, while warmup
+captures graphs for `cudagraph_capture_sizes=[1,2,4,8,16,24,32]`. Tensors
+allocated during capture and later freed and reused for a different
+`(batch, split_count)` would leave stale pointers baked into a captured graph,
+which is exactly the observed replay-time fault. The next test is to pre-allocate
+the workspace for every capture size before capture begins (or force
+`enforce_eager=True` to confirm replay is the sole trigger).
+
+### 20.5 Machine state at this pause
+
+`int8g64-8002.service` is `failed`/stopped; GPU idle at 14 MiB; port 8000 had no
+listener throughout and was never started, stopped, or modified. The isolated
+runtime currently holds the page-local module (md5 `2252c9d366e322bc67cf8852fba09bf3`),
+the prefill route, and untouched backups
+`v1/attention/ops/int8_g64.py.orig-g64layout` and
+`v1/attention/backends/triton_attn.py.orig-g64layout`. The strided-adapter
+environment lives in the reversible systemd drop-in
+`~/.config/systemd/user/int8g64-8002.service.d/g64-layout.conf`, which also sets
+`G64_MAX_LEN=8192` and (for this debugging session) `CUDA_LAUNCH_BLOCKING=1`;
+remove that variable before any performance measurement.
+
+Reproduce with:
+
+```bash
+# artifacts live here (all local experiment files, still untracked)
+ls int8g64-layout-audit/            # probes, kernels, tests, snapshots
+python3 make_runtime_candidate.py   # regenerates runtime-candidate/int8_g64.py
+scp runtime-candidate/int8_g64.py <remote>:.../int8g64-e38-test/
+python3 scripts/deploy_int8_g64_layout_fix.py <vllm_root> int8_g64.py
+systemctl --user start int8g64-8002.service
+```
+
+Per 19.5 these remain untracked local files: review before any commit or push.
+
+### 20.6 Bounded correctness run: engine starts eagerly, batch 3/4 degenerate
+
+`enforce_eager=True` localises the 20.4 fault to CUDA graphs and lets the engine
+start for the first time on the page-local layout. Note that a systemd drop-in
+must quote a multi-flag value — `Environment=EXTRA_ARGS=--a --b` is split on
+whitespace into two assignments and silently drops the second flag; use
+`Environment="EXTRA_ARGS=--a --b"`.
+
+With the engine up (isolated unit only), `scripts/bounded_correctness_probe.py`
+reported:
+
+```
+== 1. determinism: one greedy request twice ==   identical=True
+== 2. long prompt: chunked / continuation prefill == coherent answer
+== 3. batch 2: both requests coherent
+== 3. batch 4: req0/req1 coherent, req2/req3 both 'Register Register Register...'
+BOUNDED_PROBE OK
+```
+
+`BOUNDED_PROBE OK` only means "non-empty text"; the batch-4 rows are wrong. A
+follow-up with content-distinguishable prompts (count 1-5 / 1-10 / 1-15 / 1-20),
+run twice, is byte-identical across trials and shows the failure is systematic,
+not a race:
+
+| batch | req0 (1-5) | req1 (1-10) | req2 (1-15) | req3 (1-20) |
+| --- | --- | --- | --- | --- |
+| 3 | correct | `Register...` | partial (digits, not words) | — |
+| 4 | correct | near-correct | `Register...` | `Register...`, **identical to req2** |
+
+Two facts matter for the next session. First, the failing slot **moves with batch
+size** (req1 at batch 3, req2+req3 at batch 4) rather than being tied to an
+index, and req0 is always correct. Second, at batch 4 the last two requests
+produce **identical** output from different prompts, which is the signature of
+aliased KV state rather than of quantization error. Determinism across trials
+rules out a race.
+
+**Attribution is still open and must not be assumed.** These runs have no
+baseline control, so it is not yet established whether the degeneracy belongs to
+the INT8-G64 work or is pre-existing in the DFlash2 verify path at batch >= 3.
+Recall that the E38 whole-model bridge guard is `1 <= batch <= 4 and
+num_actual_tokens == batch * 8`, and the warmup inputs observed in 20.4 were
+`cu_q [0,6,12,18,24]` (batch 4, q_len 6, so `num_actual_tokens == 24 != 32`),
+which means the E38 branch was *skipped* and the new prefill route handled that
+step. The immediate next experiment is the same batch-3/4 pattern against a
+known-good baseline (CTX=fast, bf16 KV) on the same unit; only if the baseline
+is clean does this become a G64 defect, and the first suspects are then the
+per-request page-table/`split_count` handling in the E38 bridge and the batch
+dimension of `_g64_workspace`.
+
+### 20.7 Machine state after this run
+
+The isolated unit was run eagerly for the probes above and then **stopped**;
+port 8000 was never started, stopped or modified and had no listener throughout.
+GPU idle. The runtime still holds the page-local module
+(md5 `2252c9d366e322bc67cf8852fba09bf3`), the prefill route, and both
+`.orig-g64layout` backups. The drop-in currently sets
+`"EXTRA_ARGS=--enable-prompt-tokens-details --enforce-eager"`; drop the
+`--enforce-eager` flag to return to graph mode (where 20.4's replay fault
+reproduces) and before any performance measurement.
+
+### 20.8 Baseline control run: the batch-3/4 degeneracy is G64-specific, and prefill is ruled out
+
+The control experiment from 20.6/20.7 was run on the same isolated unit with the
+same launcher settings (`MAX_SEQS=4`, `SPEC=dflash2`, `DFLASH_TOKENS=7`,
+`--enforce-eager`) and only the KV cache changed. The baseline identifies itself
+in its own log:
+
+```
+kv_cache_dtype=bfloat16
+AttentionBackendEnum.FLASH_ATTN backend
+enforce_eager=True
+INT8-G64 code paths in this run: 0
+```
+
+Same probe, same content-distinguishable prompts, two trials:
+
+| batch | INT8-G64 (TRITON_ATTN, kv int8_g64) | baseline (FLASH_ATTN, kv bfloat16) |
+| --- | --- | --- |
+| 2 | both coherent | all correct, distinct |
+| 3 | req1 `Register...`, req2 partial | all correct, distinct |
+| 4 | req2 + req3 `Register...`, identical | all correct, distinct |
+
+`dup=False` on every baseline row, and baseline output is correct and on-topic at
+every batch size. **The degeneracy is therefore a G64-specific defect that
+appears at batch >= 3**, not a pre-existing DFlash2/verify limitation.
+
+The next question was which half of the G64 path owns it, so prefill — the piece
+this session rewrote — was tested directly. Every earlier prefill test used B=2
+only, which was a real gap. `test_g64_batch34_prefill.py` closes it:
+
+```
+== equal-length prompts (engine pattern) ==
+  PASS batch3_equal12 per_batch=[0.01404, 0.012, 0.01415]
+  PASS batch3_equal1 (decode-sized) per_batch=[0.00775, 0.00769, 0.00763]
+  PASS batch4_equal12 per_batch=[0.01356, 0.01326, 0.01402, 0.01159]
+  PASS batch4_equal1 (decode-sized) per_batch=[0.00778, 0.00778, 0.00768, 0.00775]
+== continuation prefill (cached prefix, seqused_k > q_len) ==
+  PASS batch4_cont12_of_40 per_batch=[0.00666, 0.0071, 0.00447, 0.00663]
+  PASS batch3_cont8_of_40 per_batch=[0.00449, 0.00509, 0.00522]
+== uneven lengths ==
+  PASS batch3_uneven   PASS batch4_uneven
+BATCH34_PREFILL PASS
+```
+
+Per-request errors are uniform across the batch (no tail-request outlier), so the
+new prefill route is **exonerated at batch 3 and 4**. With prefill and the writer
+both clean, the defect lies in the **E38 decode/verify path at batch >= 3** — the
+pre-existing `run_e38_attention` bridge. Ranked suspects, none yet tested:
+
+1. `_g64_workspace`, keyed on `(batch, split_count)` and reallocated whenever
+   either changes, during a run that revisits several batch sizes;
+2. `positions` and `valid_columns`, built as
+   `attn_metadata.seq_lens[:batch] - 8 + arange(8)` and `seq_lens[:batch]` — worth
+   checking that the per-request row of `block_table[:batch]` pairs with the
+   matching `valid_columns` entry rather than a broadcast one;
+3. `split_count = min(32, max(4, (max_seqlen_k + 4095) // 4096))`, computed from a
+   **batch-wide** `max_seqlen_k` while each request has its own length — the
+   tail-request aliasing at batch 4 is consistent with a per-request column
+   being resolved from a batch-level value.
+
+The cheapest next step is a standalone E38 decode test at batch 1..4 against a
+dequantized-cache oracle, mirroring `test_page_attention.py` but sweeping batch
+and per-request lengths, which separates suspects 2 and 3 from suspect 1 without
+starting the engine.
+
+### 20.9 Machine state after the control run
+
+The baseline finished, the unit was stopped and the G64 experiment drop-in
+(eager, `G64_MAX_LEN=8192`) was restored with the unit left **stopped**. Port 8000
+was never started, stopped or modified and had no listener throughout; GPU idle.
+The runtime still carries the page-local module
+(md5 `2252c9d366e322bc67cf8852fba09bf3`), the prefill route, and both
+`.orig-g64layout` backups. To reproduce the two open defects:
+
+- batch >= 3 degeneracy: start the unit as configured (eager) and run the
+  batch-3/4 probe with content-distinguishable prompts;
+- CUDA-graph replay fault (20.4): remove `--enforce-eager` from the drop-in's
+  `EXTRA_ARGS` and start the unit.
+
+### 20.10 Root cause of the batch>=3 degeneracy: a PRE-EXISTING E38 decode defect
+
+The standalone sweep from 20.8's plan was written as
+`test_e38_decode_sweep.py`: batch 1..4, equal and mixed per-request lengths,
+split_count 1/4/8/16, a per-request int8-Q-emulated softmax oracle, an explicit
+cross-match aliasing check, and a sentinel-init diagnostic. Against the
+page-local strided adapter:
+
+```
+PASS batch1_len200 split=4 errs=[0.0026]
+PASS batch2_len200 split=4 errs=[0.003, 0.0033]
+FAIL batch3_len200 split=4 errs=[0.0034, 0.0022, 1.6881195546468432e+38]
+FAIL batch4_len200 split=4 errs=[0.0024, 0.0024, 127.4192, 127.2875]
+FAIL batch4_mixed  split=4 errs=[0.0023, 0.003, 127.6642, 127.5081]
+```
+
+The failure is structural, not numeric: batch 1 and 2 are always exact, and
+**every request with batch index >= 2 is broken, for every batch size and every
+split_count**. Re-initialising `acc/m/l` to the online-softmax identity
+(`acc=0, m=-inf, l=0`) before the call did not repair it — it turned the garbage
+into `nan` instead, which means those requests' splits were never populated with
+real data at all, not merely reduced wrongly.
+
+To decide whether the page-stride port caused this, the identical sweep was run
+against the **untouched** `v7_verifier_e38_int8.cu` with the original packed
+contiguous ABI (`test_e38_orig_adapter_sweep.py`, log line `packed ABI:
+page_stride = 65536`):
+
+```
+PASS ORIG-ADAPTER batch1_len200 split=4 errs=[0.0026]
+PASS ORIG-ADAPTER batch2_len200 split=4 errs=[0.003, 0.0033]
+FAIL ORIG-ADAPTER batch3_len200 split=4 errs=[0.0034, 0.0022, nan]
+FAIL ORIG-ADAPTER batch4_len200 split=4 errs=[0.0024, 0.0024, 4.1224, 4.1986]
+FAIL ORIG-ADAPTER batch4_mixed  split=4 errs=[0.0037, 0.0026, 4.3447, 4.0753]
+```
+
+Same signature, same index boundary. **The batch>=3 decode defect is pre-existing
+in the E38 extension and was not introduced by this session's layout work.** The
+garbage magnitudes differ between the two runs (1.7e38/127 vs nan/4.1) only
+because the cache ABI differs; what is invariant is that batch index >= 2 is dead.
+
+This was invisible until now because **every previous E38 decode test used batch
+2** — `test_page_attention.py` builds `tables` of shape `(2, 2)`. Combined with
+20.8's finding that every earlier prefill test used B=2 as well, the whole G64
+verification suite had a batch-2 blind spot, which is why the engine's first real
+run at `MAX_SEQS=4` surfaced it.
+
+Where to look next, all in the E38 partial/reduce pair:
+
+1. `page_stride_kernel.cuh:194` — `if (split >= active_split_count) { return; }`
+   runs *after* `write_neutral` (lines 154-172) has stored `acc=0, m=?, l=0`. Check
+   that the neutral `m` value and the `active_split_count` derivation both hold for
+   every batch entry, and that the early return happens after the neutral store for
+   batch >= 2 as well;
+2. the index helpers `gqa_partial_acc_index<Geometry>(q_head, d, token, split,
+   TokenTile)` and `gqa_partial_stat_index<Geometry>(q_head, token, split,
+   TokenTile)` — the per-batch pointer advance in the kernel is
+   `batch * D * QHeads * TokenTile * split_count`, which matches the
+   `[batch, split, 8, 24, 256]` workspace, so verify the helper's own split/token
+   decode next;
+3. `reduce_batch` launches `grid(QHeads, 1, Batch * 8)` and derives
+   `Batch = out.numel() / (8*24*256)`; confirm the reduce kernel decodes batch from
+   `blockIdx.z` the same way the partial kernel does.
+
+A standalone reproduction needs no engine: run `test_e38_decode_sweep.py` (or the
+orig-adapter variant) and watch request index 2.
+
+### 20.11 Machine state at the end of the sweep session
+
+`int8g64-8002.service` is **stopped**; the drop-in on disk
+(`g64-experiment.conf`) holds the G64 eager config
+(`G64_MAX_LEN=8192`, `"EXTRA_ARGS=--enable-prompt-tokens-details --enforce-eager"`).
+Port 8000 was never started, stopped or modified and had no listener throughout;
+GPU idle. The runtime still carries the page-local module
+(md5 `2252c9d366e322bc67cf8852fba09bf3`), the prefill route, and both
+`.orig-g64layout` backups.
+
+Three defects now stand, in dependency order:
+
+1. **batch >= 3 decode (20.10)** — pre-existing E38 defect; blocks any C3/C4
+   measurement and explains the engine's batch-3/4 garbage;
+2. **CUDA-graph replay fault (20.4)** — blocks graph-mode startup entirely; the
+   engine only runs with `--enforce-eager`;
+3. performance/quality A/B (19.4 step 5) — not started; requires 1 and 2, and the
+   `CUDA_LAUNCH_BLOCKING`/`--enforce-eager` debug settings must be removed first.
+
+New files this session: `test_e38_decode_sweep.py`, `test_e38_orig_adapter_sweep.py`,
+`test_g64_batch34_prefill.py`, `test_merged_bridge.py`, `test_g64_addr_probe.py`,
+`test_g64_both_geometries.py`, `make_runtime_candidate.py`,
+`runtime-candidate/int8_g64.py`, and in the PR worktree
+`scripts/deploy_int8_g64_layout_fix.py`, `scripts/bounded_correctness_probe.py`.
+All remain untracked per 19.5.
+
+## 21. Both open defects fixed; engine runs in graph mode at batch 1..4 (2026-09-17)
+
+Sections 20.4 and 20.10 left two defects. Both are now fixed, and each fix has a
+component-level RED->GREEN record plus an end-to-end confirmation.
+
+### 21.1 Fix 1 — E38 decode dropped every request with batch index >= 2
+
+Root cause, found by reading the reduce launch rather than guessing: the adapter
+passed a **literal `2`** for the reduce kernel's `batch_size` parameter.
+
+```cpp
+// page_stride_adapter.cu and v7_verifier_e38_int8.cu, reduce_batch():
+const dim3 grid(Geometry::QHeads, 1, Batch * 8);
+...<<<grid, 256, 0, stream>>>(
+    partial_acc, partial_m, partial_l, pos, nullptr,
+    8, 8, 0, 2, split_count,            // <- batch_size was hardcoded to 2
+    out);
+```
+
+The ninfer kernel itself is generic (`ops/kernel/gqa_attention_decode.cuh` takes
+`batch_size` as a parameter); only the adapter's argument was wrong:
+
+```cpp
+if constexpr (MultiBatch) { if (batch >= batch_size) { return; } }
+```
+
+so `out` was **never written** for batch index >= 2, leaving whatever the caller's
+`torch.empty` buffer contained. That is exactly the observed signature: garbage
+magnitudes (1.7e38 / 127.4) and two unwritten slots holding *identical* content,
+which is the req2 == req3 aliasing seen in the engine. The vestigial
+`"pos must be int32 [2,8]"` / `"block_tables must be int32 [2,pages]"` checks in
+the same function are the fingerprint of the original 2-request design this
+literal was left behind by.
+
+Fix: pass `Batch`. Applied to both `page_stride_adapter.cu` (the deployed strided
+port) and `v7_verifier_e38_int8.cu` (the untouched original), because both carried
+the same literal. The check messages now say `[batch,...]`.
+
+RED -> GREEN on `test_e38_decode_sweep.py` (batch 1..4, equal/mixed lengths,
+split_count 1/4/8/16):
+
+```
+before:  FAIL batch3_len200 errs=[0.0034, 0.0022, 1.688e+38]
+         FAIL batch4_len200 errs=[0.0024, 0.0024, 127.4192, 127.2875]
+after:   PASS batch3_len200 errs=[0.0034, 0.0022, 0.0024]
+         PASS batch4_len200 errs=[0.0024, 0.0024, 0.0034, 0.0021]
+         ... all 12 cases PASS, every split_count
+```
+
+### 21.2 Fix 2 — CUDA graph replay fault: E38 workspace allocated inside capture
+
+20.4's hypothesis is confirmed. Disabling the E38 verify branch (so verify fell
+through to the G64 prefill kernel) let the engine reach `Application startup
+complete.` **in graph mode**, which attributed the replay fault to the E38 branch
+and cleared the prefill route.
+
+The cause is the workspace below, whose tuple is keyed on `(batch, split_count)`
+and therefore reallocated repeatedly while warmup captures graphs for
+`cudagraph_capture_sizes = [1,2,4,8,16,24,32]`. Tensors allocated inside one
+capture region were reused for another, so replay followed stale pointers:
+
+```python
+if (self._g64_workspace is None or self._g64_workspace[0] != batch
+        or self._g64_workspace[1] != split_count):
+    self._g64_workspace = (batch, split_count, torch.empty(...), torch.empty(...), torch.empty(...))
+```
+
+Fix: pre-allocate one buffer per split_count in `__init__` (batch <= 4 is enforced
+by the adapter, and the bridge only ever derives split_count from
+`min(32, max(4, ...))`, normalised to the next value in `(1, 4, 8, 16, 32)`), so
+no allocation can happen inside a capture region while the dynamic split_count is
+preserved:
+
+```python
+self._g64_ws_cache = {}
+if self._g64_enabled:
+    _dev = torch.device("cuda", torch.cuda.current_device())
+    for _s in (1, 4, 8, 16, 32):
+        self._g64_ws_cache[_s] = (
+            torch.empty((4, _s, 8, self.num_heads, self.head_size), dtype=torch.bfloat16, device=_dev),
+            torch.empty((4, _s, 8, self.num_heads), dtype=torch.float32, device=_dev),
+            torch.empty((4, _s, 8, self.num_heads), dtype=torch.float32, device=_dev),
+        )
+```
+
+With E38 re-enabled and no `--enforce-eager`, the engine starts in graph mode in
+42 s.
+
+### 21.3 End-to-end verification after both fixes
+
+Graph mode, E38 enabled, content-distinguishable prompts, two trials, byte-stable
+across trials:
+
+| batch | request outputs (head) |
+| --- | --- |
+| 1 | `One Two Three Four Five` |
+| 2 | + `1 2 3 ... 10  Wait, the user ask` |
+| 3 | + `1 2 3 ... 15  Wai` |
+| 4 | + `1 2 3 ... 15 16 1` (continues past 15, matching its own prompt) |
+
+`dup=False` on every row. Before the fix, batch 3 lost a request to
+`Register Register Register...` and batch 4 returned that same string for both of
+its last two requests.
+
+### 21.4 A/B harness
+
+`scripts/ab_bench.py` measures one arm (one engine on one port): greedy, fixed
+seed, `ignore_eos`, identical prompts per row, warmup rounds discarded, C1/C2/C4,
+emitting one JSON row per concurrency with p10/p50/p90 latency and aggregate
+output tokens/s. Both arms are run with `--ctx` 4096 / 126000 / 250000 so the
+rows can be diffed directly. Results are recorded in section 22.
+
+### 21.5 Fix 3 — the E38 verify path was never even enabled
+
+While running the A/B, the G64 arm measured ~2.7 output tok/s at 4k context
+against the baseline's ~114 tok/s (section 17), and the engine log showed
+`INT8-G64 bridge debug` **never printed**, i.e. `run_e38_attention` was never
+called. Two gates were responsible, and both are adapter-level, not kernel-level.
+
+1. The E38 branch tested `self.sliding_window == (-1, -1)`, but full-attention
+   layers report `sliding_window = None`. The strict test silently dropped every
+   layer to the fallback, exactly like the batch-2 blind spot of 20.10 — the
+   branch simply never ran. Fixed to
+   `(self.sliding_window is None or self.sliding_window == (-1, -1))`, matching
+   what the prefill route already did.
+2. `_spec_attn_enabled()` is
+   `os.environ.get("VLLM_SPEC_DECODE_ATTN", "0") == "1"`
+   (defined in `vllm/v1/attention/backends/flash_attn.py:1728`), and the isolated
+   unit **never set that variable**. Every E38 and spec-attention branch was
+   therefore dead code in this configuration. Fixed by adding
+   `Environment=VLLM_SPEC_DECODE_ATTN=1` to the drop-in.
+
+After both changes the bridge debug line does print, so E38 now owns the verify
+step.
+
+### 21.6 A/B status: NOT completed, and why
+
+The A/B was started with `scripts/ab_bench.py` (locked greedy/seed/`ignore_eos`,
+warmup rounds discarded, C1/C2/C4, one JSON row per row) against 4k context and
+was **stopped after the G64 C1 row measured 2.7 output tok/s** — roughly 40x below
+the bf16 baseline, and identical (47.30 s / 2.7 tok/s / 3756 prompt tokens) before
+and after fix 3, which is itself evidence that the bottleneck is not the E38
+routing. Reporting A/B rows from this configuration would be meaningless, so no
+numbers are recorded here.
+
+The isolated unit was left running for the next session (state `active`, port
+8002, `G64_MAX_LEN=8192`, `VLLM_SPEC_DECODE_ATTN=1`, graph mode). What is
+established and what is not:
+
+- **Established**: the layout contract (20.1), the prefill route (20.2), the
+  batch >= 3 decode defect (21.1), the CUDA-graph workspace hazard (21.2), the
+  E38 verify gate (21.5). Batch 1..4 correctness is verified end to end in graph
+  mode with E38 engaged.
+- **Not established**: why 4k decode is ~2.7 tok/s. Prime suspect is the G64
+  prefill kernel still serving some verify steps that E38 does not claim — the
+  E38 branch requires `max_seqlen_q == 8` **and**
+  `num_actual_tokens == batch * 8`, and the warmup probe of 20.4 measured
+  `max_q 6, num_actual_tokens 24` (batch 4 x 6), which fails that equality and
+  falls through to the naive kernel. That kernel is O(context) per token with a
+  broadcast-multiply-sum QK (no tensor cores), which is consistent with a decode
+  rate three orders of magnitude below the speculation path.
+
+The immediate next measurement is cheap and decisive: instrument the G64 prefill
+route to count how many verify steps per request it serves, and read
+`max_seqlen_q` / `num_actual_tokens` for each. If it is serving decode, relax the
+E38 gate the same way its sliding-window test was relaxed, then re-run
+`ab_bench.py` for both arms at 4k/126k/250k.
+
+### 21.7 21.6's suspect is REFUTED by measurement
+
+21.6 guessed that the G64 prefill kernel was still serving verify steps. A counter
+probe was added to the prefill route (recording `max_seqlen_q`,
+`num_actual_tokens`, batch per call, skipping device reads while capturing) and a
+single 4k C1 request (3756 prompt tokens, 128 output tokens, i.e. ~16-20 verify
+steps) was measured. The prefill route was called **18 times in total**:
+
+```
+counts {(1,1,1):3, (1,2,2):3, (1,4,4):2, (2,8,4):2, (4,16,4):2, (6,24,4):2,
+        (8,9,2):1, (9,36,4):1}
+plus max_q 1736 num_actual_tokens 1736 batch 1   (the real 4k prefill chunk)
+```
+
+Those are the warmup/profiling shapes plus the prefill chunks. **No decode verify
+step went through the prefill route**, so E38 does own verify — the same conclusion
+the bridge-debug print gave. The 2.7 tok/s therefore sits **inside the E38 G64
+path**, and 21.6's proposed relaxation of `num_actual_tokens == batch * 8` would
+have changed nothing. Do not chase it.
+
+What remains to be separated, none of it yet measured:
+
+1. whether the E38 **G64** kernel is intrinsically slow at 4k, or whether this
+   whole configuration is slow — the clean control is the same engine config with
+   `CTX=fast` (bf16 KV, FLASH_ATTN, `VLLM_SPEC_DECODE_ATTN=1`) measured with
+   `ab_bench.py` at the same `--ctx 4096`, which is the baseline arm the A/B
+   needs anyway;
+2. whether the stride-aware addressing added by this session costs speed: the
+   page stride is a runtime `int64` where the original kernel folded
+   `kPagedKVPageSize` as a compile-time constant, so the per-element address math
+   is no longer strength-reduced. `paged_kv_address_strided.cuh` is the file to
+   profile, and `nsys`/`ncu` on a single decode step would settle it;
+3. the `split_count` normalisation added in 21.2 — it maps the derived value up to
+   the next entry of `(1,4,8,16,32)`, which is a no-op at 4k (derived 4) but must
+   be re-checked at 126k/250k.
+
+The unit was left stopped after this probe. `triton_attn.py` in the runtime still
+carries the counter probe from this measurement; it only prints, costs nothing per
+step, but should be removed (`/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/triton_attn.py.deployed-fixed`
+is the pre-probe copy) before any timing run.
+
+## 22. A/B: first measured row, and the G64 decode slowdown is real
+
+The baseline arm was run on the same unit with the same launcher settings
+(`MAX_SEQS=4`, `SPEC=dflash2`, `DFLASH_TOKENS=7`, `VLLM_SPEC_DECODE_ATTN=1`, graph
+mode, no `--enforce-eager`), changing only the KV cache and attention backend.
+Its own log confirms the identity: `kv_cache_dtype=bfloat16`,
+`AttentionBackendEnum.FLASH_ATTN backend`, `enforce_eager=False`. Both arms were
+measured with the identical 3756-token prompt asking for 128 output tokens,
+greedy, `ignore_eos`, one warmup request discarded.
+
+| arm | backend / KV | 4k C1 | per-request wall |
+| --- | --- | --- | --- |
+| baseline | FLASH_ATTN / bfloat16 | **47.6 out tok/s** | 2.69 s |
+| INT8-G64 | TRITON_ATTN / int8_g64 (this work) | **2.7 out tok/s** | 47.28 s |
+
+Two things follow. First, the configuration is not inherently slow — the baseline
+does 47.6 tok/s at 4k on this card, so 21.7's second alternative is eliminated.
+**The ~17.6x slowdown is inside the E38 G64 path.** Second, this is the first real
+A/B number; C2/C4 and the 126k/250k rows are still missing, so the A/B is **not
+complete**.
+
+Ranked causes for the 17.6x, none measured yet:
+
+1. **runtime page stride vs compile-time constant.** The original kernel folded
+   `kPagedKVPageSize` (64 tokens) as a compile-time constant, so every page
+   address was strength-reduced. `paged_kv_address_strided.cuh` replaces that with
+   a runtime `int64` `page_stride * physical_page` multiply in the inner loop.
+   The page stride (1777664) is not a whole multiple of the element page payload
+   (135168), so it cannot be reduced to a shift, and a 64-bit multiply-add per
+   access is exactly the shape that costs a large constant factor. This is the
+   prime suspect and the only one this session introduced;
+2. **parallelism.** With `split_count = 4` and `KVHeads = 4` the partial kernel
+   launches only `grid(4, 4, batch)` = 16 CTAs on 82 SMs for a 4k window, while
+   the bf16 path can use FlashAttention's own split. Worth checking whether the
+   G64 arm should derive a larger `split_count` at 4k; note 21.2 normalises the
+   derived value upward to `(1,4,8,16,32)`, which is a no-op at 4k (derived 4);
+3. DFlash2 draft cost — the same in both arms, so it cannot explain the gap, but
+   it is worth confirming that acceptance is comparable (a G64 arm with collapsed
+   acceptance would do more target steps for the same output).
+
+The measurement to run next is `ncu` or `nsys` on a single 4k decode step in each
+arm and compare the attention kernel's time; that distinguishes 1 from 2 in one
+shot. `ab_bench.py` is ready for the remaining rows.
+
+Nothing in section 21 needs revisiting for this: the three fixes stand, batch 1..4
+correctness is verified, and the two defects that blocked startup are gone. The
+G64 arm is simply not yet competitive at 4k, which is exactly what the A/B exists
+to measure.
+
+### 22.1 Machine state
+
+The baseline arm was left stopped. Port 8000 was never started, stopped or
+modified and had no listener throughout. GPU idle. The isolated runtime still
+carries the page-local module and the prefill route plus the counter probe from
+21.7 (remove it, or restore
+`.../int8g64-e38-test/triton_attn.py.deployed-fixed`, before any timing run), and
+both `.orig-g64layout` backups. Drop-ins: `baseline-ctl.conf` (baseline arm) and
+the saved G64 configuration used for the fixed-arm runs.
+
+## 23. All four fixable defects fixed; A/B and quality completed within the reachable range
+
+This section supersedes the partial status in 22. Section 22's ranking of causes was
+wrong and is corrected here by measurement.
+
+### 23.1 Fix 4 — the G64 prefill kernel was O(N^2) on the FP32 pipe (20.5x)
+
+`test_g64_prefill_*` all passed, so the kernel was *correct*, but its QK step was
+
+```python
+s = tl.sum(q[:, None, :] * kq[None, :, :], axis=2) * scale
+```
+
+which materialises a `[Q_TILE, BLOCK_N, DIM]` fp32 temporary and never touches
+tensor cores. Splitting prefill from decode with `scripts/ab_split_bench.py` made
+the shape of the problem obvious:
+
+| metric | baseline bf16 | G64 (broadcast QK) | G64 (tl.dot QK) |
+| --- | --- | --- | --- |
+| prefill 128 tok | 0.0675 s | 0.0783 s | 0.0687 s |
+| **prefill 3756 tok** | **1.78 s (1938 tok/s)** | **39.37 s (87.4 tok/s)** | **1.92 s (1796 tok/s)** |
+| decode 127 tok | 1.00 s (127.4 tok/s) | 1.62 s (78.6 tok/s) | 1.63 s (78.6 tok/s) |
+
+Baseline prefill scales 26x for 29x more tokens (linear, GEMM-bound); the old G64
+kernel scaled **503x** — the O(N^2) signature. Replacing the QK term with
+`tl.dot(q.to(tl.bfloat16), tl.trans(kq.to(tl.bfloat16)))` cut prefill **39.37 s ->
+1.92 s (20.5x)** and put it within 8% of the bf16 baseline. All correctness tests
+still pass (`max_abs` 0.01389 -> 0.01252).
+
+**This also invalidates section 22's conclusion.** The "17.6x aggregate slowdown"
+was almost entirely prefill, not decode: G64 decode is only **1.6x** slower than
+the bf16 baseline (78.6 vs 127.4 tok/s), and the earlier 2.7 tok/s figure was a
+prefill-dominated wall-clock average. Nor was the strided page addressing at
+fault: `bench_e38_packed_vs_strided.py` times the untouched contiguous adapter
+against the strided port on identical data and gets ratios **0.87x-1.01x** across
+batch 1/4, split 4/16/32, while the E38 attention call itself costs only
+0.07-0.25 ms.
+
+### 23.2 Completed A/B (4k and the reachable ceiling)
+
+Both arms: `MAX_SEQS=4`, `SPEC=dflash2`, `DFLASH_TOKENS=7`,
+`VLLM_SPEC_DECODE_ATTN=1`, graph mode, same prompt, greedy, warmup discarded.
+Rows were run one process per concurrency by `run_ab_rows.sh` so a crash in one
+row does not lose the others.
+
+| row | baseline bf16 | INT8-G64 | G64/baseline |
+| --- | --- | --- | --- |
+| 4k C1 | 49.36 tok/s | 43.46 tok/s | 0.88x |
+| 4k C2 | 51.70 tok/s | 43.02 tok/s | 0.83x |
+| 4k C4 | **crash** | 41.51 tok/s | n/a |
+| 32k C1 | **crash** | 2.52 tok/s | n/a |
+| 32k C2 | **crash** | 2.00 tok/s | n/a |
+| 126k / 250k | not serviceable | not serviceable | n/a |
+
+Isolated components (same card, same prompt): prefill 1796 vs 1938 tok/s (0.93x),
+decode 78.6 vs 127.4 tok/s (0.62x).
+
+### 23.3 Quality A/B
+
+`scripts/ab_quality.py` runs 12 fixed prompts greedily with `logprobs=1` per arm;
+`ab_quality_compare.py` diffs them. Both arms produced **1495 tokens**:
+
+```
+byte-identical outputs  : 9/12
+shared token prefix     : 1177/1495 (78.73%)
+mean |dlogprob| on agreement: 0.00385 (n=1177, max=0.11758)
+mean logprob baseline   : -0.1344
+mean logprob INT8-G64   : -0.1279
+```
+
+The three divergences are all 192-token open-ended generations that flipped their
+greedy argmax at tokens 10, 123 and 125 — the expected behaviour of a lossy int8
+cache over long free-form text, not an addressing or scaling error. G64's own mean
+logprob is marginally *higher*, i.e. no systematic degradation.
+
+### 23.4 Remaining blocker A — the baseline config itself is unstable (pre-existing)
+
+The bf16/FLASH_ATTN arm dies with `illegal memory access` at **C4 4k** and at
+**32k**, reproducibly. This is not caused by this session's changes: after
+restoring the pre-session `triton_attn.py` and `int8_g64.py` from the
+`.orig-g64layout` backups (verified `prefill route=0 ws=0 tensorcore=0`) the
+baseline still crashes identically, and the FLASH_ATTN backend never enters
+`triton_attn.py` in the first place. It also reproduces with
+`VLLM_SPEC_DECODE_ATTN=0`, so the spec-attention patch is not the trigger either.
+It is worth its own investigation; it caps the A/B at C1/C2 for the baseline.
+
+### 23.5 Remaining blocker B — the G64 KV cache costs 8.1x the bf16 pool
+
+Measured pools at comparable settings: **baseline 529,060 tokens vs G64 65,362
+tokens**. A per-layer dump (added temporarily in `kv_cache_utils.py`) gives the
+mechanism exactly:
+
+| | baseline bf16 | INT8-G64 |
+| --- | --- | --- |
+| `max_page_size` (from the 48 MambaSpec layers) | 1,835,008 | 1,777,664 |
+| attention page | 131,072 (block 16) | 135,168 (block 64, native) |
+| divisibility | `1,835,008 % 131,072 == 0` | `1,777,664 % 135,168 != 0` |
+| promotion outcome | `page_size_padded=None`, **block 16 -> 448** | `page_size_padded=1,777,664`, **13.15x waste** |
+| result | 126,615,552 bytes/page | 122,658,816 bytes/page, 28.6% of it padding |
+
+`1,835,008 = 2^18 * 7` is divisible by `2^17`, so the bf16 arm takes the
+zero-waste **block-scaling** path. `1,777,664 = 2^13 * 217` is **not** divisible by
+`135,168 = 2^12 * 33`, so the G64 arm is forced onto the `page_size_padded` path.
+The 5 sliding-window draft layers are padded even harder (33,792 -> 1,777,664,
+52.6x).
+
+This is why 126k/250k cannot be served: at `G64_MAX_LEN=262144` the engine refuses
+with `114.23 GiB KV cache is needed, which is larger than the available KV cache
+memory (37.85 GiB)`, i.e. ~467 KB per token for a format whose payload is 528 B
+per token per layer. Fixing the block-scaling path is not a quick change: scaling
+the G64 block from 64 to 448 would break the 64-token page contract that
+`g64_views`, the writer and the E38 kernel all depend on. The real fix is to give
+the linear-attention (Mamba) layers their own KV cache group with their own page
+size instead of unifying every layer onto the Mamba page. Until then INT8-G64
+cannot deliver its intended memory advantage, let alone a long-context A/B.
+
+### 23.6 State and files
+
+The isolated unit was left running the fixed G64 arm. Port 8000 was never started,
+stopped or modified and had no listener throughout. The runtime holds the fixed
+`triton_attn.py` and `int8_g64.py`; the pre-session originals are at
+`*.orig-g64layout` and the fixed copies are also saved as
+`triton_attn.py.g64-fixed-final` / `int8_g64.py.g64-fixed-final` in the test dir.
+`kv_cache_utils.py` still carries the temporary `KVPAGE`/`KVPAGE-AFTER` dump
+(harmless unless `VLLM_DUMP_KV_PAGES=1`) and should be reverted.
+
+New this session: `ab_bench.py` (+`--only-concurrency`), `ab_split_bench.py`,
+`ab_quality.py`, `ab_quality_compare.py`, `run_ab_rows.sh`,
+`bench_e38_packed_vs_strided.py`, `test_e38_decode_sweep.py`,
+`test_e38_orig_adapter_sweep.py`, `test_g64_batch34_prefill.py`,
+`test_merged_bridge.py`, `test_g64_addr_probe.py`, `test_g64_both_geometries.py`,
+`make_runtime_candidate.py`, `runtime-candidate/int8_g64.py`,
+`deploy_int8_g64_layout_fix.py`. All untracked local experiment files per 19.5.

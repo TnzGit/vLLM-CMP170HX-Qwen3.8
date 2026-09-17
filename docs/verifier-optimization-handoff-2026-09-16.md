@@ -770,3 +770,131 @@ qualified scheduling candidate), the next highest-value work remains an
 end-to-end E38 cache/allocator integration—not more E35/E40 micro-tuning.
 All E40 scratch sources and benchmark outputs remain outside the production
 tree; production vLLM, Guardian, and port 8000 were not changed or started.
+
+## E41 — end-to-end INT8-G64 allocator integration (2026-09-17)
+
+E38/E39 were closed standalone, and this handoff named the whole-model
+cache/allocator integration as the highest-value next step. E41 is that
+integration. It reached a running, graph-mode engine with the E38 verify path
+live, and it closed four defects; two further defects are recorded below and
+are what keep this mode experimental.
+
+### E41-A — the page ABI: the allocator pads pages, it does not lay out planes
+
+The bridge assumed the four INT8-G64 planes were contiguous across the whole
+cache with a 65,536-byte page stride, and rejected the allocator's actual
+tensor. Byte-sentinel probes show the assumption is not recoverable by
+reinterpretation: read as contiguous, the padded storage returns page padding
+instead of the next page's codes. The allocator's layout is page-local
+(`[page][K 65,536][V 65,536][Kscales 2,048][Vscales 2,048][padding]`), so
+`g64_views()` now returns four views sharing the page stride and differing only
+by in-page offset, and the E38 decode adapter became stride-aware. The stride
+check was **not** removed: overlapping and misaligned pages are still rejected.
+Cost of the runtime `int64` page stride against the old compile-time constant,
+on identical data: 0.87x-1.01x (batch 1/4, split 4/16/32). Detail lives in
+`docs/int8-g64-vllm-integration.md`.
+
+### E41-B — prefill never worked, and the reason was a zero divide
+
+`KVQuantMode.INT8_G64` reports `is_per_token_head=True`, so the stock
+`unified_attention` computes `BLOCK_Q = BLOCK_M // num_queries_per_kv = 16 // 0`
+and raises `ZeroDivisionError` on every prefill and warmup call; the stock
+kernel also cannot express per-group G=64 scales. With the prefill route
+disabled the engine dies with exactly that `ZeroDivisionError`; with a dedicated
+G64 prefill route it proceeds. The route implements the causal contract read
+out of `triton_unified_attention.py` (`context_len = seqused_k - q_len`, a new
+query at row `i` sitting at absolute position `context_len + i`).
+
+That route was first written with a QK step of
+`tl.sum(q[:, None, :] * kq[None, :, :], axis=2)`, which materialises a
+`[Q_TILE, BLOCK_N, DIM]` fp32 temporary and never touches tensor cores. It was
+correct and catastrophically slow: prefill of 3,756 tokens took 39.37 s against
+the bf16 baseline's 1.78 s. Baseline prefill scales 26x for 29x more tokens
+(linear, GEMM-bound); this kernel scaled **503x** — the O(N^2) signature. With
+`tl.dot(q.to(tl.bfloat16), tl.trans(kq.to(tl.bfloat16)))` prefill is 1.92 s
+(1,796 tok/s), within 8% of baseline, and decode is unchanged because decode
+does not use this kernel.
+
+This corrects an intermediate conclusion: the apparent 17.6x whole-model
+slowdown was **prefill, not decode**. Isolated decode is 78.6 tok/s against the
+baseline's 127.4 (0.62x), and the E38 attention call itself measures 0.07-0.25 ms.
+
+### E41-C — E38 dropped every request with batch index >= 2
+
+The adapter passed a **literal `2`** for the reduce kernel's `batch_size`
+parameter. The ninfer kernel is generic; only the argument was wrong, and its
+`if (batch >= batch_size) return;` left `out` unwritten for requests 2 and
+beyond, which is why batch 3 lost a request to `Register Register Register...`
+and batch 4 returned that same string for its last two requests. The vestigial
+`"pos must be int32 [2,8]"` checks in the same function are the fingerprint of
+the original two-request design. Both the strided port and the untouched
+`v7_verifier_e38_int8.cu` carried the literal. Passing `Batch` turns
+`test_e38_decode_sweep.py` from
+`FAIL batch3 errs=[..., 1.688e+38]` into `PASS` across batch 1..4 and split_count
+1/4/8/16. Every earlier E38 decode test used batch 2, which is why this survived
+E38-Q1/Q2.
+
+### E41-D — the E38 branch was never reachable
+
+Two gates kept `run_e38_attention` dead in this configuration. The branch tested
+`self.sliding_window == (-1, -1)`, but full-attention layers report `None`, so
+the strict test dropped every layer to the fallback; and the branch is gated on
+`_spec_attn_enabled()`, which is
+`os.environ.get("VLLM_SPEC_DECODE_ATTN", "0") == "1"` — a variable this launcher
+never set. With both corrected the bridge debug line prints and E38 owns verify.
+Separately, the E38 partial workspace was allocated lazily, keyed on
+`(batch, split_count)`, while warmup captures graphs for
+`[1,2,4,8,16,24,32]`; tensors allocated inside one capture region were reused for
+another and replay followed stale pointers (`illegal memory access` at
+`run_fullgraph -> graphs[desc].replay()`). Pre-allocating one buffer per
+split_count in `__init__` keeps every allocation out of the capture region and
+graph-mode startup completes in 42 s.
+
+### E41 A/B and quality at 4k
+
+Both arms: W4A16 target, DFlash2 k=7, `MAX_SEQS=4`, `VLLM_SPEC_DECODE_ATTN=1`,
+graph mode, pinned clocks, identical prompts, greedy, warmup discarded, one
+process per concurrency so a crash in one row does not lose the others.
+
+| row | bf16 / FLASH_ATTN | INT8-G64 | ratio |
+| --- | --- | --- | --- |
+| 4k C1 | 49.36 tok/s | 43.46 tok/s | 0.88x |
+| 4k C2 | 51.70 tok/s | 43.02 tok/s | 0.83x |
+| 4k C4 | **crash** | 41.51 tok/s | n/a |
+| 32k C1 | **crash** | 2.52 tok/s | n/a |
+| 32k C2 | **crash** | 2.00 tok/s | n/a |
+
+Isolated components: prefill 1,796 vs 1,938 tok/s (0.93x); decode 78.6 vs 127.4
+tok/s (0.62x).
+
+Quality, 12 fixed prompts greedily decoded with `logprobs=1` on both arms
+(1,495 tokens each): **9/12 byte-identical**, 1,177/1,495 (78.73%) shared token
+prefix, mean absolute logprob delta **0.00385** on agreeing tokens, mean logprob
+-0.1279 (G64) vs -0.1344 (bf16). The three divergences are all 192-token
+open-ended generations that flipped their greedy argmax at tokens 10, 123 and
+125 — the expected behaviour of a lossy int8 cache, not an addressing error.
+
+### E41 open defects
+
+**Baseline instability (pre-existing, not caused by this work).** The bf16 /
+FLASH_ATTN arm dies with `illegal memory access` at C4 4k and at 32k,
+reproducibly. After restoring the pre-session `triton_attn.py` and `int8_g64.py`
+from the `.orig-g64layout` backups, the baseline still crashes identically, and
+the FLASH_ATTN backend never enters `triton_attn.py` at all; it also reproduces
+with `VLLM_SPEC_DECODE_ATTN=0`. This caps the A/B at C1/C2 for the baseline and
+deserves its own investigation.
+
+**KV allocation (blocks long context).** The G64 pool is 65,362 tokens against
+529,060 for bf16. `max_page_size` is set by the 48 MambaSpec layers at
+1,777,664 B; the bf16 attention page (2^17) divides it and takes the zero-waste
+block-scaling path, while the G64 page (135,168 = 2^12·33) does not divide
+1,777,664 (2^13·217) and is padded 13.15x. At `G64_MAX_LEN=262144` the engine
+refuses: `114.23 GiB KV cache is needed ... (37.85 GiB available)`. Scaling the
+G64 block to 448 would break the 64-token page contract, so the fix is to give
+the linear-attention layers their own KV cache group rather than unifying every
+layer onto the Mamba page. Until that lands, INT8-G64 has no memory advantage
+over bf16 and 126K/250K cannot be served.
+
+E41 scratch sources, test harnesses and benchmark outputs remain outside the
+tree (`int8g64-layout-audit/`, and the remote test directory); production vLLM,
+Guardian, and port 8000 were not started, stopped or modified at any point.
