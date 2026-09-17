@@ -2271,3 +2271,41 @@ New this session: `ab_bench.py` (+`--only-concurrency`), `ab_split_bench.py`,
 `test_merged_bridge.py`, `test_g64_addr_probe.py`, `test_g64_both_geometries.py`,
 `make_runtime_candidate.py`, `runtime-candidate/int8_g64.py`,
 `deploy_int8_g64_layout_fix.py`. All untracked local experiment files per 19.5.
+
+## 24. Records pushed (2026-09-17)
+
+Sections 19-23 and the E41 write-up were committed and pushed:
+
+```
+804f272  docs: record E41 INT8-G64 integration and open allocation gate
+         docs/int8-g64-vllm-integration.md                  (new, 137 lines)
+         docs/verifier-optimization-handoff-2026-09-16.md   (+128, E41)
+         handover.md                                        (+889, sections 19-23)
+```
+
+Pushed with `git push published HEAD:work/cmp170hx-mixed-fp8`
+(`published` = `https://github.com/TnzGit/vLLM-CMP170HX-Qwen3.8.git`), advancing
+that branch `c07cb00 -> 804f272`. PR #1
+(`CMP170HX mixed-FP8 speculative verify reconstruction`, draft, base `main`) now
+reports head `804f272`, and its body was extended with an "E41 slice" section plus
+progress annotations on the original still-to-do items.
+
+Scope of the commit is documentation only, matching the branch's established
+`docs: ...` convention (the previous ten commits touched only docs). Deliberately
+**not** committed:
+
+- `patches/int8-g64-vllm.patch` — its header still describes the contiguous
+  global-plane ABI (`[all K codes][all V codes][...]`) that 20.1/23.5 proved is
+  not what the allocator produces. Committing it beside the corrected
+  `docs/int8-g64-vllm-integration.md` would contradict the record; it needs
+  rewriting for the page-local ABI first;
+- `deploy/int8-g64-8002.service` and `deploy/triton-int8-control-8002.service` —
+  they carry a literal `VLLM_API_KEY=pixelml-bench` whereas the tracked
+  `deploy/*.service.example` files blank that variable, and they embed lab-host
+  paths. Track them as `.example` with an empty key if they are wanted;
+- the bridge module `vllm_int8_g64_module.py`, the layout-audit harnesses and
+  `scripts/ab_*.py` — experiment scratch, still unreviewed per 19.5.
+
+The documentation references no tracked path that does not exist, and the
+integration doc now states that the launcher is an experiment-side unit rather
+than promising `deploy/int8-g64-8002.service`.
