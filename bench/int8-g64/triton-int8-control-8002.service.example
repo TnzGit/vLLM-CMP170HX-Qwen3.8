@@ -1,0 +1,42 @@
+[Unit]
+Description=Locked-1350 Triton INT8-per-token-head control for E38 A/B (port 8002)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/base-node/.codex_tasks/pixelml-cmp170hx/recipe-control
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=CUDA_HOME=/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/lib/python3.12/site-packages/nvidia/cu13
+Environment=PATH=/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/lib/python3.12/site-packages/nvidia/cu13/bin:/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=MODEL=/home/base-node/models/Qwen3.8-27B-W4A16-AutoRound-fast
+Environment=DRAFT=/home/base-node/models/Qwen3.8-27B-DFlash2-W4A16
+Environment=SPEC=dflash2
+Environment=CTX=long
+Environment=MAX_SEQS=4
+Environment=DFLASH_TOKENS=7
+Environment=DFLASH_MAX_LEN=250000
+Environment=PORT=8002
+Environment=GPU_UTIL=0.90
+Environment=KV_MEM=
+Environment=VLLM_API_KEY=
+Environment=VLLM_NO_USAGE_STATS=1
+Environment=DO_NOT_TRACK=1
+Environment=FLASHINFER_DISABLE_VERSION_CHECK=1
+Environment=TORCH_EXTENSIONS_DIR=/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/torch-ext-control
+Environment=TORCH_CUDA_ARCH_LIST=8.0
+Environment=MAX_JOBS=4
+Environment=EXTRA_ARGS=--enable-prompt-tokens-details
+ExecStartPre=/usr/bin/sudo -n /usr/bin/nvidia-smi -i 0 -pl 180
+ExecStartPre=/usr/bin/sudo -n /usr/bin/nvidia-smi -i 0 -lgc 1350,1350
+ExecStartPre=/home/base-node/.codex_tasks/pixelml-cmp170hx/setup_pixelml_cuda_links.sh
+ExecStart=/bin/bash /home/base-node/.codex_tasks/pixelml-cmp170hx/recipe-control/single-user/start_qwen.sh
+ExecStopPost=/usr/bin/sudo -n /usr/bin/nvidia-smi -i 0 -rgc
+Restart=no
+TimeoutStopSec=90
+KillMode=control-group
+StandardOutput=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/triton-control-8002.log
+StandardError=append:/home/base-node/.codex_tasks/pixelml-cmp170hx/int8g64-e38-test/triton-control-8002.log
+
+[Install]
+WantedBy=default.target
