@@ -5161,3 +5161,97 @@ index -- and the same first-error technique applies, at
 Note this also re-frames §45.6's missing `num_cache_lines` guard in
 `causal_conv1d.py`: it remains a genuine latent defect worth an upstream report, but
 it is not this fault, and the two should not be conflated.
+
+## 48. RESOLVED DIRECTION: the fault is the custom spec-decode verify kernel, and disabling it is a workaround
+
+§47.3 flagged a contradiction: §47's attribution pointed at
+`flash_attn.py::_spec_attn_run` -> `spec_decode_attn.py:220`, yet the earlier record
+said `SPEC_ATTN=0` still faults. The contradiction is now resolved, and it resolves
+**in favour of the attribution**.
+
+### 48.1 The earlier `SPEC_ATTN=0` result was invalid
+
+`_spec_attn_enabled()` is:
+
+```python
+def _spec_attn_enabled() -> bool:
+    import os
+    return os.environ.get("VLLM_SPEC_DECODE_ATTN", "0") == "1"
+```
+
+so the custom kernel is active **if and only if the variable is exactly `"1"`**. But
+the launch script used for every arm contained
+
+```bash
+export VLLM_SPEC_DECODE_ATTN=1     # run_graph.sh, line 14, unconditional
+```
+
+so setting `SPEC_ATTN=0` in a drop-in could not turn it off -- the launcher re-exported
+`1`. **Every `SPEC_ATTN=0` run recorded in this project therefore had the custom
+verify kernel enabled.** The variable has to be *absent*, not zero.
+
+This is the fourth instance of the same class of error (28.4, 35, 38, 45): a
+configuration that never reached the engine, read back as a result. The standing rule
+applies -- read the effective configuration out of the engine, never the intent.
+
+### 48.2 The corrected test
+
+Same 16K x 24 protocol (distinct content, exact token counts, restart on fault),
+custom kernel genuinely off (`env -u VLLM_SPEC_DECODE_ATTN`), and the log checked to
+confirm `SpecDecodeAttention` never appears:
+
+| custom verify kernel | 16K x 24 result |
+| --- | --- |
+| **on** (`VLLM_SPEC_DECODE_ATTN=1`) | **2/24 faulted -- requests 12, 24** |
+| **off** (variable absent) | **24/24 clean -- zero faults** |
+
+**The fault occurs only when the custom split-KV speculative verify kernel is
+enabled.** With it disabled the identical workload, drafter, context length, batch
+size, scheduling and graph mode runs clean.
+
+### 48.3 What this establishes
+
+- the fault is **in `SpecDecodeAttention`** (`v1/attention/ops/spec_decode_attn.py`),
+  reached only through `flash_attn.py::_spec_attn_run`;
+- **`VLLM_SPEC_DECODE_ATTN=0` is a working workaround** -- not a diagnosis, but a
+  reliable way to keep long-context speculative serving alive on this card today;
+- every other subsystem is now excluded *by measurement*, not by argument: driver/WPR2
+  (33), graph capture incl. verified eager (38), async scheduling (32.11), draft depth
+  (32.12), prefix-cache/align (32.14, 38.10), `max_num_batched_tokens` (35), the
+  mamba state-copy machinery (43), the GDN state index (46, 1919 checks clean), the
+  paged KV pools by address (45.2), and now stock attention (48.2);
+- §45.6's missing `num_cache_lines` guard in `causal_conv1d.py` is confirmed
+  unrelated (it was refuted by measurement in 46 before this attribution).
+
+### 48.4 Why the kernel is a plausible site, and what to inspect
+
+`SpecDecodeAttention` computes KV addresses from the verify batch's block table and
+page geometry, with split-KV segmenting. The observed signature fits it: the address
+is page-aligned and outside the allocator's map (§45.2), which is what
+`page_base + block_id * page_stride + offset` produces when a block id or segment
+offset is wrong. Unlike the GDN path, nothing here validates the block ids against
+the pool's row count, and `_SPEC_ATTN_QMAX` / `NSEG` segment arithmetic is custom.
+
+Next, in order:
+
+1. **reproduce at the smallest scale**: 16K, C1, DFlash2 k=7, custom kernel on, to
+   request 12 -- already the working repro;
+2. **first-error guard on the verify batch's block table / slot mapping** at
+   `spec_decode_attn.py:220`, same technique as §46 (host-side where possible, no
+   in-kernel printf, count every check so a null result is provable);
+3. if the block ids are in range, the remaining candidates are the split-KV
+   **segment** arithmetic (`qmax`, `NSEG`, `split_count`) and the page-stride
+   computation -- compare against the pool's `page_size_padded` and the measured
+   page stride `1,777,664` recorded earlier in this project;
+4. Compute Sanitizer on this repro now that it is narrow (single kernel, single
+   request shape) -- the earlier attempt was blocked only by leftover VRAM (§31.3),
+   and with the fault localised to one kernel, memcheck's serialisation is far less
+   likely to prevent reproduction.
+
+### 48.5 Practical recommendation
+
+Until the kernel defect is fixed, the qualified configuration for long-context
+speculative serving on CMP 170HX is **`VLLM_SPEC_DECODE_ATTN` unset**, with the
+performance cost measured rather than assumed -- the custom kernel exists for a
+reason, so the trade must be quantified on the production path before it is adopted
+as the default. That measurement is cheap and should accompany the fix.
