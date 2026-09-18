@@ -4566,3 +4566,64 @@ Given §43's lesson (four plausible mechanisms turned out to be gated off), the 
 action is to confirm from the running engine that this path is genuinely taken --
 `use_async_spec_decode` is `True` and `update_num_computed_tokens_for_batch_change`
 is called -- before analysing it further.
+
+### 44.4 Gate confirmed open, from the engine's own config
+
+§43's rule applied before going further:
+
+```
+engine reports  async_scheduling: True      (and run_graph.sh passes --async-scheduling)
+faulting arms   num_spec_tokens = 7
+therefore       use_async_spec_decode = True   -> the row-correction path is taken
+SPEC=none arm   no speculator -> num_spec_tokens = 0 -> flag False, and that arm is clean
+```
+
+So the path is genuinely live in the faulting arms and genuinely absent in the clean
+one. Unlike §41/§42, this is confirmed from the running engine rather than inferred
+from a docstring.
+
+**And §32.11 is the sharp constraint on it.** `ASYNC_SCHED=0` did not move the fault
+rate, which means the defect is *not* in code that only runs when
+`use_async_spec_decode` is True -- that flag goes False with async scheduling off,
+and the fault persisted. Therefore the defect must be in state that the async path
+*writes* and that other paths *also consume*, or in state that exists whenever
+speculation is on regardless of the async switch.
+
+That is a strong and unusual constraint, and it is the thing to exploit: it says the
+bug is a **shared persistent buffer whose contents are produced under one scheduling
+mode and read under another**, which is consistent with a stale/freed read (§40) and
+with a period set by how many requests and steps have recycled the buffer (§35).
+
+The falsifiable predictions that follow, in order of cheapness:
+
+1. **`valid_sampled_token_count_*` is only allocated when
+   `use_async_spec_decode`** (runner lines ~908-930). If `ASYNC_SCHED=0` leaves those
+   tensors `None` and the fault still occurs, then the faulting read is *not* one of
+   those and the narrow set is `prev_positions`, `prev_num_draft_tokens`,
+   `num_accepted_tokens`, `num_computed_tokens`, or the `input_batch` per-row
+   metadata -- all of which exist in both scheduling modes;
+2. if instead a fault under `ASYNC_SCHED=0` can be shown to read one of the
+   async-only tensors, then §32.11's null result was a rate-measurement artefact
+   (two arms at 2/10 with the same indices is a small sample) and should be re-run
+   at higher N before being relied on.
+
+Prediction 1 is a pure code read and should be settled first.
+
+### 44.5 Honest status of the IMA line
+
+Established, each by measurement: speculation necessary and drafter-independent
+(§34); period in requests, set by length and concurrency (§35); driver/WPR2 clean
+(§33); graph capture excluded with a verified eager arm (§38); paged KV pools
+excluded by address (§40); align mode and the whole mamba state-copy subsystem
+excluded by gating (§38.10, §43); the fault reads unmapped memory at a
+deterministic offset (§40.3).
+
+Narrowed to: a **shared per-row persistent buffer in the speculative path**, written
+under one scheduling mode and consumed later, whose recycling period matches the
+observed 12/5/8-request periods. That is a much smaller target than at the start of
+this line, but it is **not yet identified**, and the honest expectation is that
+confirming it needs the per-step row-index logging in §44.3 rather than more
+configuration A/B.
+
+The review's requalification matrix (DFlash2 + MTP, C1/C4, >=10x the old period at
+16K, 65K/126K, FULL/eager, zero Xid) applies once a candidate fix exists.
