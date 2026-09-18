@@ -3775,3 +3775,61 @@ the instrumentation (on the narrowed path), not the reverse, since memcheck's
 serialisation may prevent a timing-sensitive fault from reproducing at all, and
 even when it fires it reports only the final illegal load rather than when the
 metadata first went bad.
+
+### 38.3 The fault addresses are page-aligned and cluster at a fixed in-allocation offset
+
+Converting the Xid 31 absolute VAs to band-relative offsets (`fault_va - band_base`
+for 2 GiB bands), because absolute CUDA VAs are not actionable but relative ones
+are:
+
+```
+offsets repeating across different bands (fixed relative address):
+  0x022b3c000 = 555.234 MiB  x7
+  0x0261f9000 = 609.973 MiB  x7
+  0x041400000 = 1044.000 MiB  x5
+  0x03d96c000 = 985.422 MiB  x4
+  0x022f91000 = 559.566 MiB  x4
+  0x025cc0000 = 604.750 MiB  x4
+  0x02288b000 = 552.543 MiB  x3
+  0x022dc4000 = 557.766 MiB  x3
+  0x024348000 = 579.281 MiB  x3
+  0x03c9ac000 = 969.672 MiB  x2
+```
+
+Three properties, all of which the review asked to test for:
+
+1. **Every faulting VA is 4 KiB-aligned** (72/72), while only 5/72 are 2 MiB-aligned
+   and 11/72 are 64 KiB-aligned. Page-aligned-but-not-hugepage-aligned is exactly
+   what a stale or freed *page mapping* looks like, and is consistent with
+   `FAULT_PDE` (the page directory entry is absent) rather than with wild pointer
+   arithmetic, which would produce arbitrary misalignment;
+2. **the same relative offsets recur across different 2 GiB bands** -- 555 MiB
+   appears 7 times, 610 MiB 7 times, and so on. The same offset landing in
+   different arenas means the bad address is a *fixed offset within whichever
+   allocation is there*, not a one-off pointer value;
+3. **the offsets cluster in a narrow window**: seven of the ten repeating offsets
+   fall between **552 and 610 MiB** (~57 MiB wide), with a second small cluster at
+   970 and 985 MiB and one exactly 2 MiB-aligned entry at 1044.000 MiB (n=5).
+
+A reproducible ~57 MiB window at ~550-610 MiB into an allocation is a much
+stronger lead than the raw absolute addresses, and it is the kind of result that
+can be matched directly against a live allocation map.
+
+### 38.4 What this adds
+
+`FAULT_PDE ACCESS_TYPE_VIRT_READ` on a page-aligned address, at a reproducible
+allocator-relative offset, in a process whose CUDA graphs are not even captured
+(38), points at **a stale page mapping for a buffer that is still being read** --
+i.e. freed or remapped memory being dereferenced -- rather than at an
+out-of-range index into a live tensor. That is consistent with §38.1's suspect
+class: per-request speculative state (Mamba/GDN state index, block-table row,
+accepted-token bookkeeping) that is recycled on a boundary while an in-flight
+consumer still holds the old address.
+
+Next actions, in order: (a) record the live allocation map of this engine (KV pool
+base/size, Mamba state pool base/size, spec persistent buffers, graph buffers) and
+compute `fault_va - base` against it, which turns the offsets above into a named
+allocation; (b) then the device-side first-error buffer and slot-generation
+tagging in §38.2, targeting the named allocation.
+
+Artifacts: `int8g64-layout-audit/fault_va_analysis.py` and `fault_va_bands.py`.
