@@ -2812,3 +2812,91 @@ then slow (~14.4), then ~13.6 — and the median is stable to +-0.9%
 This is the answer to 28.5, and it means a single-engine multi-context sweep is
 acceptable for **timing** provided the first repetition at each context is
 discarded.
+
+## 31. Session state: sanitizer available, box left idle (2026-09-18)
+
+### 31.1 compute-sanitizer is now installed
+
+The blocker recorded in 26.3 ("compute-sanitizer is not installed, use ncu
+instead") is resolved. The reviewer was right that memcheck is the correct tool
+for a CUDA OOB rather than more configuration bisection.
+
+```
+pip install --no-deps nvidia-cuda-sanitizer-api
+# -> /home/base-node/vllm-cmp170hx-nightly/lib/python3.12/site-packages/nvidia/cu13/bin/compute-sanitizer
+#    NVIDIA (R) Compute Sanitizer 2026.3.0.0
+```
+
+Note it landed in the **nightly** venv, not the `runtime-v0271` venv that the
+serving units use, because pip resolved `Location` there. Use the absolute path
+above; do not assume it is on `PATH`.
+
+The engine's launcher `exec`s `venv/bin/vllm serve ...`, so sanitizer can wrap it
+directly. The exact argv for the control arm was captured by running
+`start_qwen.sh` with the unit's own environment and replacing the `exec` with a
+print (see 31.3).
+
+### 31.2 What the exact-token sweep established
+
+Recorded in section 30: the fault is **discrete**, hitting `65531` and `65536`
+inside a 9-token window whose other lengths pass. Two further facts from this
+session:
+
+- it is a **prompt-length** property, not a sequence-growth one: prompt 65530 with
+  `max_tokens=64` (so the sequence crosses 65536 during decode) **passes**;
+- `65536 = 2^16` is therefore the leading candidate, and 65536/16 = 4096 blocks at
+  the control arm's `block_size=16`, which points at block-table or slot-mapping
+  indexing rather than at any quantization kernel. `65531` implies a second,
+  still-unidentified period.
+
+A full 128-length window scan around 65536 was started and abandoned: at ~124 s
+per length (each request prefills 64K tokens) it is ~4.4 hours, which is not a
+good use of the card. A targeted residue scan at the specific candidate moduli
+(16/32/64/128/448/896) is the cheaper next step, and the sanitizer run below
+supersedes it anyway.
+
+### 31.3 Sanitizer attempt hit a mundane obstacle, not a sanitizer problem
+
+The first memcheck run failed with
+
+```
+ValueError: Free memory on device cuda:0 (17.29/63.39 GiB) on startup is less
+than desired GPU memory utilization (0.9, 57.05 GiB)
+```
+
+That was **not** a sanitizer incompatibility: a leftover `VLLM::EngineCore` was
+holding ~58 GiB. Two separate mistakes produced it and both are worth avoiding:
+
+1. `pkill -9` on a unit's `EngineCore` while the unit is still wanted leaves
+   systemd's cgroup bookkeeping inconsistent, and the unit then restarts and
+   re-grabs the GPU. Stop units with `systemctl --user stop`, never with `pkill`;
+2. the sweep scripts restart engines themselves, so an "idle" box can be
+   mid-restart. Check `nvidia-smi --query-compute-apps` **and**
+   `systemctl --user show <unit> -p ActiveState` before launching anything that
+   needs a specific amount of free VRAM.
+
+### 31.4 Machine state at the end of this session
+
+All vLLM/SGLang units are `inactive`, no `failed` units remain, no `vllm` or
+`EngineCore` processes are running, port 8000 and 8002 have no listener, and the
+GPU is at 14 MiB / 0% with 64898 MiB free. `pixelml-vllm-8002` was reset earlier
+along with the other stale failures. Nothing was left running.
+
+`gpu-dashboard` (pid 14878) and `dualwan-guardian` (pid 470595) are untouched and
+still serving their own ports; neither is an LLM server and neither was started,
+stopped or modified by this work.
+
+### 31.5 Next actions, in the order the review set
+
+1. run the control engine **under compute-sanitizer memcheck** at prompt length
+   65531 (and 65536) and read the OOB report -- this is now unblocked, and the
+   argument-capture recipe is in 31.1/31.3;
+2. in parallel, stand up `cmp170hx-mixed-fp8-full-256k` as the long-context
+   research platform so the Marlin work does not wait on this bug;
+3. first performance experiment: **gate_up-only W4A8-INT8 Marlin**, using the
+   repo's existing `marlin-int8-negative-scales.patch` and
+   `marlin-int8-layer-select.patch` with `VLLM_MARLIN_INPUT_DTYPE=int8`;
+4. then the DFlash `k=3/5/7` sweep on `accepted/pass x pass time` using
+   `bench/int8-g64/spec_bench.py`;
+5. only then consider a paired gate/up Marlin+SwiGLU kernel, and first measure
+   the standalone `silu_and_mul` share to bound the payoff.
