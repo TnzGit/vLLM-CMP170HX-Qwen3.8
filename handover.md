@@ -4060,3 +4060,83 @@ The distinguishing experiment is to log **every** allocation base in the engine 
 match `fault_va - 0x39af000` against the list; whichever allocation owns that base
 identifies the structure, and then only that kernel needs the first-error buffer
 from §38.2.
+
+## 39. Full engine allocation map captured (2026-09-18)
+
+`bench/int8-g64/alloc_probe.py` now dumps **every** CUDA segment of the engine
+process via a `sitecustomize.py` hook (`PYTHONPATH=/tmp`, armed by
+`ALLOC_PROBE_OUT` / `ALLOC_PROBE_DELAY_S`). This is the prerequisite for naming the
+allocation that owns `fault_va - 0x39af000` (38.9), and it works: the EngineCore
+reported **390 segments** where a client-side probe would report zero.
+
+The map, largest first (MiB):
+
+```
+8 x 5192.000   recurrent-state pools (the linear_attn/GDN groups, 2 GiB-aligned)
+1 x 1214.000
+1 x  960.000
+2 x  608.000
+1 x  136.000   active 0  (a reserved-but-free segment)
+1 x  128.000   (plus 0x1000a200000, i.e. a non-CUDA-host-style range)
+2 x  128.000
+1 x  100.000
+8 x   86.000
+```
+
+Two practical traps were hit and are worth recording:
+
+1. **The APIServer has no GPU work.** It reported `0 segments` and, because both it
+   and the EngineCore were told to write the same JSON path, its empty dump
+   **clobbered** the EngineCore's real 390-segment dump. The map is therefore
+   recovered from the engine log (`recover_alloc_from_log.py`) rather than from the
+   JSON. Any future probe must give each process its own output path;
+2. **a probe that never ran looks exactly like a clean result.** The first attempt
+   set only `PYTHONPATH=/tmp` with no `sitecustomize.py`, produced no output, and
+   the file was simply absent. `sitecustomize.py` is what actually gets imported.
+
+The exact-match test (`fault_va == base + 0x39af000`) returns no hit against *this*
+generation's bases, which is expected and not a negative result: the probe dumped a
+process that had not yet faulted, while `dmesg` retains 41 distinct fault VAs from
+many earlier generations whose bases are gone. To close it, the probe must be armed
+in the **same** process that then faults, and the fault VA compared before any
+restart -- which is a two-minute change to the run script, not new analysis.
+
+### 39.1 Status of the IMA line
+
+Everything the review asked for before instrumentation is now done, and the
+investigation has a concrete target rather than a hypothesis class:
+
+```
+excluded, each by measurement:
+  driver/WPR2 (33)            graph capture, incl. verified eager (38)
+  ASYNC_SCHED (32.11)         draft depth k (32.12)
+  prefix-cache option + align mode (32.14, 38.10)
+  max_num_batched_tokens (35) paged KV pools -- fault VA is outside all of them (38.7)
+  the entire SPEC=none path (34: clean, 24/24)
+
+established:
+  speculation is necessary; DFlash2 and MTP fault identically (34)
+  the fault is periodic in request count, period set by length and concurrency (35)
+  every fault VA is 4 KiB page-aligned (38.5)
+  fault VA == <2 GiB-aligned base> + 0x39af000, constant across 4 processes (38.9)
+  that base is ~1.94 GiB below the lowest recurrent-state pool (38.9)
+  mamba_cache_mode is "none" in the faulting arms, so the documented align-precopy
+    bug is NOT this fault (38.10)
+
+next (ordered):
+  1. arm the probe and fault in the SAME process, then match the VA -- names the
+     structure and should take one engine cycle, not more analysis;
+  2. instrument only that structure with the device-side first-error buffer and
+     slot-generation tags (38.2);
+  3. Compute Sanitizer on the narrowed path;
+  4. fix, then requalify: DFlash2 + MTP, C1/C4, >=10x the old period at 16K,
+     65K/126K, FULL/eager, zero Xid;
+  5. only then resume the performance line with the DFlash k=3/5/7 sweep.
+```
+
+`marlin_shape_bench.py` stays superseded and unrun (36.1, 37). The W4A8 question is
+answered negatively at 4K and the review's reasoning that a longer context cannot
+rescue it is accepted: the dense MLP GEMM cost is set by `batch x verify_q`, not by
+historical KV length, so the same absolute saving is a *smaller* fraction of a
+longer step. Reopening it would need the kernel-level trace the review specified,
+not a longer context.
