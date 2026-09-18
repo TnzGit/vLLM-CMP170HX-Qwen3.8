@@ -5004,3 +5004,93 @@ the two agree -- a mismatch would itself be a finding.
 Status: written and syntax-checked; **not yet injected or run**. The next step is to
 inject it at both derivation sites (267 and 288), run the minimal repro
 (16K, C1, DFlash2 k=7, to request #12), and read the first-error record.
+
+## 46. The state-index hypothesis is REFUTED, with proof the guard ran (2026-09-18)
+
+§45.7-45.8 proposed that an out-of-range `spec_state_indices_tensor` entry, reaching
+the unguarded `conv_state_ptr + coord * stride_conv_state_seq` read in
+`causal_conv1d_update`, was the fault. That is now **tested and refuted**.
+
+### 46.1 The guard was verified to execute before its null result was believed
+
+Per §43's rule, a null result is worthless until the instrument is proven live. Two
+controls:
+
+**Positive control** -- force `_ncl = 1` so any real block id must violate:
+
+```json
+{"kind": "state_index_out_of_range", "value": 1, "row": 0, "col": 0,
+ "num_cache_lines": 1, "num_spec_plus1": 8, "bad_count": 4,
+ "shape": [4, 8], "num_actual_tokens": 32, "null_sentinel": 0}
+```
+
+The guard fires correctly and reports a sensible record. (Note `shape [4,8]` and
+`num_actual_tokens 32`: the tensor is `[num_spec_decodes, num_spec+1]`, i.e. 4
+speculating requests x 8 columns at k=7.)
+
+**Execution counter** -- every check increments `/tmp/gdn_guard_count.txt`, so a
+"no violation" outcome can be distinguished from "the guard never ran".
+
+### 46.2 The real-bound run
+
+16K, DFlash2 k=7, to the fault, real bound `_ncl = self.kv_cache[0].size(0)`:
+
+| quantity | value |
+| --- | --- |
+| guard checks executed | **1919** |
+| requests served before fault | 11 ok, fault on the 12th |
+| Xid 31 count | 76 -> **77** (the fault did occur) |
+| violation records | **none** |
+
+**Every one of 1919 checks found `spec_state_indices_tensor` fully in range**, and the
+engine still took an illegal memory access on request 12.
+
+### 46.3 What this eliminates, and what it does not
+
+Eliminated:
+
+- an out-of-range **state index** entering the GDN layer (this is now measured, not
+  argued -- and it was the reviewer's priority #1);
+- the specific unguarded read in `causal_conv1d_update` as the *trigger*, since its
+  index was always valid. The missing `num_cache_lines` bound on that read is still a
+  real latent robustness defect worth reporting upstream (the same bound exists ~120
+  lines later in both kernels), but it is **not** this fault.
+
+Not eliminated:
+
+- the GDN **recurrent** kernel's other address arithmetic. The guard validated the
+  index *entering the layer*; the kernels then derive further addresses from
+  `stride_conv_state_seq`, `conv_state_token_offset`, `num_accepted_tokens` and the
+  fused `sigmoid_gating_delta_rule` path, none of which the guard inspected;
+- whether the fault is in the GDN path at all. A valid state index with a wrong
+  *offset within* the state row would still fault, and so would a fault in a
+  different kernel entirely.
+
+### 46.4 Honest position against the review's stop condition
+
+The review set: *continue if an invalid state id is captured, or if Sanitizer
+localises it to the GDN kernel; re-evaluate whether to park if all state metadata
+stays valid and the fault demonstrably does not fall in the GDN path.*
+
+State: **all state metadata stayed valid** (1919/1919). The second half of the
+condition -- whether the fault falls in the GDN path -- is **not yet established**,
+because nothing measured so far localises the faulting kernel. The address evidence
+(§45.2) says only that the final dereference is 4 KiB-aligned and lands outside the
+allocator's map; it does not name a kernel.
+
+So the condition is half-met. The two ways to close it, in cost order:
+
+1. **attribute the faulting kernel** -- run the same repro with
+   `CUDA_LAUNCH_BLOCKING=1` and read the *first* kernel to report the error, or use
+   `nsys`/`ncu` to capture the last kernels before the Xid. This is the missing piece
+   that would either re-open the GDN path or definitively move the search elsewhere.
+   Note §38 already found `CUDA_LAUNCH_BLOCKING` does not change the fault *rate*,
+   but that is a different question from *which kernel reports first*;
+2. **Compute Sanitizer** on the narrowed repro, which names the faulting instruction
+   directly. The earlier attempt was blocked only by a leftover engine holding VRAM
+   (§31.3), not by any incompatibility.
+
+Given §46.3, the honest summary is that this line has eliminated its strongest
+remaining specific hypothesis and now needs kernel attribution rather than another
+hypothesis. If attribution points outside the GDN/speculative path, parking is the
+right call per the stop condition.
