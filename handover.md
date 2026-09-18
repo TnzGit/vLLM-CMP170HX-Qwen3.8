@@ -6019,3 +6019,86 @@ Cumulative verification of the int64 widening:
 Still to run: C4 (concurrency changes the period, §32.14) and the FULL graph mode
 (the verification so far used eager, which is the stricter case per §38, but FULL is
 what production runs).
+
+## 58. The full requalification matrix PASSES
+
+Every leg of the fixed-in-advance matrix (§38.2, §52.4) now passes with the int64
+widening:
+
+| leg | why it is in the matrix | requests | result | Xid 31 delta |
+| --- | --- | --- | --- | --- |
+| DFlash2, 16K | 10x the measured 12-request fault period | 120 | **120/120 OK** | **0** |
+| DFlash2, 65K | a context where the fault was observed | 12 | **12/12 OK** | **0** |
+| DFlash2, 126K | the context the investigation opened with | 8 | **8/8 OK** | **0** |
+| MTP, 16K | the fault was drafter-independent (§34) | 24 | **24/24 OK** | **0** |
+| C4 (4-way), 16K | concurrency changes the period (§32.14) | 32 | **32/32 OK** | **0** |
+| FULL graph mode, 16K | production runs FULL (§38 used eager) | 24 | **24/24 OK** | **0** |
+
+The C4 leg is the most striking: before the fix it faulted after roughly 8 requests
+(~131K cumulative tokens, §32.14); it now completed **32 requests / 524,288 tokens**
+with zero faults.
+
+Every leg asserts a zero Xid 31 **delta**, not an absolute count, because `dmesg`
+retains every earlier run's faults on this host (§33). No leg was chosen after seeing
+its result -- the matrix was written down in advance precisely because three retracted
+models in this investigation came from single clean runs.
+
+### 58.1 The investigation is closed
+
+Opened with "long-context illegal memory access above ~64K". Closed with:
+
+- **root cause**: an int32 multiply overflow in `_spec_attn_partial`
+  (`v1/attention/ops/spec_decode_attn.py`), where a **valid** block id from an int32
+  block table is multiplied by a byte stride inside a KV pool larger than 2**31, and
+  Triton wraps the product negative;
+- **evidence**: memcheck located it at `spec_decode_attn.py:109` and the address
+  arithmetic closes exactly (`2**31 - 2,086,997,952 = 0x39af040`, the fault VA's low
+  bits);
+- **fix**: one operand widening, `.to(tl.int64)`, matching the GDN path's existing
+  code and comment for this same failure class
+  (`patches/spec-decode-attn-int64-block-id.patch`);
+- **verified** across two drafters, four context lengths, two concurrency levels and
+  two graph modes, with zero Xid delta throughout.
+
+`VLLM_SPEC_DECODE_ATTN=0` is no longer needed as a workaround (§57.3).
+
+### 58.2 What made this hard, for the record
+
+The fault was adversarial to the usual techniques, and the resolution is only
+believable because each of these was measured rather than argued:
+
+1. **the offending value is valid everywhere it can be inspected from the host.** The
+   block table width, every block id, and negative ids on active columns were all
+   clean over 785 checks each (§50, §52); the overflow happens in the multiply, inside
+   the kernel, from an operand that is correct;
+2. **it needed a large pool to be reachable at all.** Below roughly 2,391 of ~6,059
+   block ids there is no overflow, so short contexts and small caches simply never hit
+   it -- which is why it looked like a "long context" bug;
+3. **only the speculative verify kernel does this arithmetic**, so it required a
+   drafter, and any drafter would do (§34) -- which pointed away from the drafter and
+   at the shared kernel;
+4. **memcheck could not report it as an ordinary out-of-bounds access.** The fatal hit
+   is an MMU-level `FAULT_PDE`, and an early windowed attempt returned only
+   "Internal Sanitizer Error: failed to handle a hardware exception" (§54). Making the
+   tool's output usable required suppressing an unrelated API warning that had been
+   consuming the entire print budget (§53);
+5. **the address is deterministic**, which invited a wrong explanation (a fixed
+   allocator-relative displacement) before the arithmetic was actually checked
+   (§45 corrected it).
+
+### 58.3 Process notes worth keeping
+
+Four configuration/attribution traps each produced or nearly produced a wrong
+conclusion, and all four are the same class -- an apparent location substituted for
+the actual one:
+
+| trap | correction |
+| --- | --- |
+| §28.4 a drop-in overrode the unit's `CTX`, so a "G64" run measured the control arm | read the effective env out of the engine, never the file you edited |
+| §35 `fault_rate` restarted a directly-launched arm through the systemd unit, changing `--max-num-batched-tokens` | restart an arm with its own configuration |
+| §38 a `CUDAGRAPH_MODE=NONE` arm still had capture enabled | verify capture from the effective config before believing an "eager" result |
+| §48.1 the launcher exported `VLLM_SPEC_DECODE_ATTN=1` unconditionally, so every "`SPEC_ATTN=0`" run had the kernel on | unset the variable; `== "1"` is the test |
+| §47 a traceback frame named the file where a function is *defined*, not the backend that called it | confirm which backend the engine reports |
+
+The standing rule, now used consistently: **before analysing a path, read its gate and
+confirm from the running engine that the gate is open.**
