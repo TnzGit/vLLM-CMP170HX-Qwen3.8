@@ -2747,3 +2747,68 @@ Accepted, and it reorders the next steps:
    no headroom and only the paired-schedule redesign is worth anything.
 7. Verifier micro-optimisation (E43) stays parked unless a fresh long-context
    profile puts verifier attention back above ~50% of the step.
+
+## 30. The >64K fault is discrete at 2^16, not a threshold (2026-09-18)
+
+Section 26.3 called this a "long-context" fault with a threshold somewhere above
+64K and stopped there. An **exact-token** sweep (the reviewer's first
+recommendation, and the right one: this repo has already had a bug that broke at
+one prompt length in 128) shows the fault is not a threshold at all.
+
+`bench/int8-g64/exact_residue_sweep.py` builds the prompt as exactly N token IDs
+and verifies it via the response's `prompt_tokens`, so the length is controlled
+to the token. Sweeping one token at a time across 65530..65538 on the
+`CTX=long` control arm:
+
+| prompt tokens | result |
+| --- | --- |
+| 65530 | OK |
+| **65531** | **FAULT** |
+| 65532 | OK |
+| 65533 | OK |
+| 65534 | OK |
+| 65535 | OK |
+| **65536** | **FAULT** |
+| 65537 | OK |
+| 65538 | OK |
+
+So the fault is **discrete**: single lengths inside a 9-token window fault while
+their neighbours do not. `65536 = 2^16` is an obvious candidate; `65531` shows at
+least one further period on top, and 65531/65536 are 5 apart, which does not match
+16/32/64/128 directly, so the second period is not yet identified.
+
+This retracts the framing of 26.3 and of the reviewer's summary: the correct
+question is not "above what context length does it break" but "which exact
+sequence lengths trip it, and why 2^16". That also means the earlier
+`63K OK / 66K FAULT` pair was consistent with a discrete pattern rather than a
+threshold, and that a range-based protocol (or a range-based claim of "clean")
+was never sound.
+
+### 30.1 Measurement variance is structured, not noise
+
+Six consecutive identical-shape runs at 32K on one engine, three repetitions
+each (`ms per output token`, the corrected metric of 29.1):
+
+```
+rep1 [9.099, 14.489, 13.546]   rep4 [8.512, 14.268, 13.639]
+rep2 [8.545, 14.562, 13.689]   rep5 [8.564, 14.373, 13.716]
+rep3 [8.409, 14.580, 13.546]   rep6 [8.543, 14.406, 13.653]
+```
+
+The pattern within each repetition is identical every time — first fast (~8.5),
+then slow (~14.4), then ~13.6 — and the median is stable to +-0.9%
+(13.546-13.716). Two consequences:
+
+1. the median is a usable estimator, but a **single** measurement is not, and the
+   per-context fresh-engine numbers recorded earlier (e.g. control 32K = 10.200)
+   are the *optimistic first-request* value, not the steady-state one. Both arms
+   were measured that way so the comparison stands, but the absolute figures are
+   biased low and should not be quoted as steady-state;
+2. the ordering effect is deterministic, so it is a warmup/ordering artefact
+   (block reuse or acceptance settling), not thermal or scheduling noise. A
+   protocol that discards the first repetition and takes the median of the rest
+   is the right shape.
+
+This is the answer to 28.5, and it means a single-engine multi-context sweep is
+acceptable for **timing** provided the first repetition at each context is
+discarded.
