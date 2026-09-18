@@ -4937,3 +4937,70 @@ defect, no align mode, and nothing drafter-specific. It also explains why the fa
 is periodic in *requests* rather than tokens: the invalid index arises from
 speculative state bookkeeping (accepted-token / slot recycling), not from context
 length.
+
+### 45.8 The producer, and the exact reuse pattern that can leave a stale block id
+
+The state index is the **physical block id**, derived by slicing the block table:
+
+```python
+spec_state_indices_tensor = block_table_tensor[spec_sequence_masks_cpu, : self.num_spec + 1]
+```
+
+(`gdn_attn.py:267` and `:288`), and it lands in a **persistent, pre-allocated**
+buffer refreshed only partially each step:
+
+```python
+self.spec_state_indices_tensor = torch.empty(          # line 127, torch.empty
+    (self.decode_cudagraph_max_bs, self.num_spec + 1), dtype=torch.int32, device=device)
+
+self.spec_state_indices_tensor[:num_spec_decodes].copy_(
+    spec_state_indices_tensor, non_blocking=True)      # line 428: only the active rows
+spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)   # line 432
+```
+
+So correctness depends on a **two-part invariant**:
+
+1. rows `[:num_spec_decodes]` hold this step's block ids, and
+2. rows `[num_spec_decodes:batch_size]` hold **exactly** `NULL_BLOCK_ID`.
+
+The kernels only test for the null sentinel (`if conv_states_input_coord == null_block_id:
+return`), and only when `HAS_NULL_BLOCK` is set. A row that holds a **stale but
+valid-looking** block id from a previous step is neither this step's id nor the null
+sentinel: the null check passes, and the unguarded
+`conv_state_ptr + coord * stride_conv_state_seq` (45.6) then addresses whatever that
+old id pointed at. If the old id exceeds the current pool's row count -- which is
+what happens when the pool or its occupancy changes -- the address is out of range.
+
+`decode_cudagraph_max_bs` is `min(max_num_seqs * (num_spec + 1),
+max_cudagraph_capture_size)` = `min(4*8, 32)` = **32** here, while `batch_size`
+varies per step, which is exactly the situation where the "fill the tail with null"
+step has to be perfectly consistent with what the kernel reads.
+
+This also explains the request-count periodicity (45.7) naturally: the buffer's rows
+are recycled per step and per request, so a mismatch surfaces after a characteristic
+number of requests rather than at a characteristic context length.
+
+### 45.9 Instrumentation built (not yet run)
+
+`bench/int8-g64/gdn_state_guard.py` implements the review's invariants, host-side and
+first-error-only:
+
+- `0 <= state_id < num_cache_lines` on the exact slice the kernel will consume
+  (`block_table_tensor[masks_cpu, :num_spec+1]`);
+- `1 <= num_accepted_tokens <= k+1`;
+- `spec_query_start_loc` monotonic;
+- on the **first** violation it writes `/tmp/gdn_state_guard.json` and raises, so the
+  producer is caught rather than the eventual illegal access. It never overwrites the
+  record and never synchronises in a hot path; all inputs to these checks are already
+  CPU-side at the derivation site, so the guard adds no GPU sync at all.
+
+`num_cache_lines` is not directly in scope at the derivation site, but `MambaSpec` is
+(`self.kv_cache_spec`, a `MambaSpec`) and carries `shapes`, `block_size` and
+`page_size_bytes`, so the row count is derivable there; the injector should compute it
+from the same spec the kernel's `conv_states` tensor was allocated from, and assert
+the two agree -- a mismatch would itself be a finding.
+
+Status: written and syntax-checked; **not yet injected or run**. The next step is to
+inject it at both derivation sites (267 and 288), run the minimal repro
+(16K, C1, DFlash2 k=7, to request #12), and read the first-error record.
