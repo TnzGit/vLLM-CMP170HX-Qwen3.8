@@ -3595,3 +3595,80 @@ Since 33 the following are settled, each with matched measurement:
 The next IMA step is instrumentation (pre-fault state dump with the cross-request
 persistent fields listed in 33.1), not more A/B. The next performance step is the
 W4A8 engine A/B above, which does not depend on the IMA.
+
+## 37. W4A8 gate_up engine A/B: no measurable gain (2026-09-18)
+
+Ran the review's M1 as an engine A/B rather than a microbench (36.2), because the
+repo already carries the correct per-layer W4A8 machinery.
+
+**Configuration.** Same `CTX=long` arm, same checkpoint, same DFlash2 k=7, same
+`max_num_batched_tokens=2048`, clocks pinned. The only difference:
+
+```
+baseline: (nothing)
+W4A8:     VLLM_MARLIN_INPUT_DTYPE=int8
+          VLLM_MARLIN_INT8_INCLUDE_RE=mlp\.(gate|up)_proj
+          VLLM_MARLIN_INT8_EXCLUDE_RE=lm_head|mtp
+```
+
+**The selector was verified, not assumed.** `get_marlin_input_dtype` returns
+`torch.int8` for `mlp.gate_proj` and `mlp.up_proj`, and `None` for `mlp.down_proj`,
+`lm_head` and `mtp` -- i.e. exactly gate+up, which is the review's M1. Two
+independent checks that the arm is real rather than silently ignored (the failure
+mode of upstream #48904):
+
+- `patches/marlin-int8-negative-scales.patch` **is applied** -- the sign-fold is
+  present at `model_executor/kernels/linear/mixed_precision/marlin.py:150-173`.
+  Without it the AutoRound negative group scales turn to garbage while still
+  benchmarking normally, so this had to be confirmed before any timing meant
+  anything;
+- the model produces coherent text (`"The capital of France is"` -> `" Paris. The
+  capital of Germany is Berlin."`), which the patch header says it will not if the
+  sign-fold is missing.
+
+**Result** (`bench/int8-g64/spec_bench.py`, 3 reps, 191 output tokens, median):
+
+| arm | ms per output token @ 4K | per-rep |
+| --- | --- | --- |
+| W4A16 baseline | **6.675** | 8.311, 6.675, 5.156 |
+| W4A8 gate_up | **6.645** | 8.276, 6.645, 5.134 |
+
+A **0.45%** difference, and the per-rep structure is superimposable. The review's
+gate for proceeding to whole-step work was ">=10% on the dominant GEMM and >=8%
+after activation-quant overhead"; this does not come close, so on this evidence
+gate_up-only W4A8 does **not** justify further integration work at 4K.
+
+Caveats stated rather than hidden:
+
+- measured at **4K only**. The 16K run of the W4A8 arm hit the IMA (HTTP 500), and
+  the activation-quant overhead is a fixed cost per token while the GEMM saving
+  grows with context, so the balance *could* differ at 126K. That is the one
+  reason this is "no gain at 4K" and not "no gain";
+- `accepted_tokens_per_pass` came back `null` for the baseline run (window
+  alignment found no `SpecDecoding metrics` line inside the bracket) and 3.1 for
+  W4A8. Since the reported metric is ms **per output token**, a differing
+  acceptance would move it, so the two arms' acceptance should be matched before
+  this result is treated as final -- the per-rep ms values are nearly identical
+  (8.311/6.675/5.156 vs 8.276/6.645/5.134), which is what one expects if
+  acceptance was also matched, but that was not verified from the log.
+
+### 37.1 Session position
+
+Two lines are now in a clear state:
+
+**IMA (correctness blocker).** Driver gate clean (33); speculation necessary and
+drafter-independent (34); `max_num_batched_tokens` irrelevant, so the conserved
+quantity is a per-request resource in the shared speculative path (35). Next step
+is instrumentation, not more A/B.
+
+**Performance line.** W4A8 gate_up measured and negative at 4K (37). The
+remaining review-ordered items are the DFlash `k=3/5/7` proposal-efficiency sweep
+(`spec_bench.py` is built for exactly this and now reports accepted/pass
+alongside pass cost), and only after that a paired gate/up Marlin+SwiGLU kernel --
+whose payoff should be bounded first by measuring the standalone `silu_and_mul`
+share, since E40's data shows the win there comes from the changed dataflow
+rather than from removing a microsecond-scale activation.
+
+`marlin_shape_bench.py` remains in the tree as a superseded skeleton: it reads
+GPTQ-format keys that this compressed-tensors checkpoint does not have (§36.1),
+and the engine A/B above is both cheaper and ABI-correct.
