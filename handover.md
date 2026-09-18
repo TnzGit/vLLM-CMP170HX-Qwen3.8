@@ -5910,3 +5910,74 @@ Requalification, to the matrix fixed in advance in `bench/int8-g64/requalify.py`
 C1 and C4, 65K/126K, FULL and eager, asserting a zero Xid 31 **delta**). A single
 clean run is not evidence -- three retracted models in this investigation came from
 exactly that -- so the period multiple and the zero-Xid assertion are both required.
+
+## 57. Fix VERIFIED: 120/120 requests, zero Xid delta
+
+Requalification of the int64 widening, on the boring protocol fixed in advance:
+
+```json
+{
+  "matrix": "16k10x",
+  "xid31_before": 81, "xid31_after": 81, "xid31_delta": 0,
+  "zero_new_xid": true, "all_legs_clean": true, "PASS": true,
+  "legs": [{"leg": "16k_x10period", "length": 16384, "requests": 120,
+            "ok": 120, "faults": 0, "first_fault_request": null,
+            "elapsed_s": 4245.2}]
+}
+```
+
+- **120/120 requests passed at 16K**, i.e. **10x the measured 12-request fault
+  period**, where the unfixed build faulted on request 11-12;
+- **Xid 31 delta = 0** (81 before, 81 after) -- asserted on the delta because `dmesg`
+  retains every earlier run's faults (§33);
+- the fixed Triton kernel compiles and runs: the int64 widening changes no layout and
+  raises no compile error.
+
+The fix is one operand widening, mirroring the GDN path's existing comment and code
+(`v1/worker/mamba_utils.py`), and the same pool-size arithmetic that made the GDN path
+need it (a >2 GiB stride product) applies here.
+
+### 57.1 What this closes
+
+The long-context illegal memory access that this investigation opened with -- the
+"above ~64K it breaks" fault, periodic in the request count, requiring speculative
+decoding, identical for DFlash2 and MTP, mysteriously address-stable, and immune to
+every configuration knob -- was an **int32 multiply overflow**:
+
+```
+blk (int32, valid) * stride_kb (~898,560 B) > 2**31  for blk >= ~2,390 of ~6,059
+  -> wraps negative
+  -> address lands below the 5,444,206,592-byte KV pool
+  -> Xid 31 / FAULT_PDE on an unmapped read
+```
+
+Every property that made it hard to find follows from that: it needs enough KV to
+reference a high block id (long context), the ids handed out depend on allocation
+order (length- and concurrency-dependent period), only the speculative verify kernel
+does this multiply (speculation required, drafter-independent), the wrapped offset is
+deterministic (address stability), and the block id is *valid* -- so every host-side
+guard correctly reported clean while the kernel faulted.
+
+### 57.2 Remaining qualification (the rest of the fixed-in-advance matrix)
+
+`16k10x` is the leg the review required first. Still to run, unchanged from §38.2 /
+§52.4:
+
+- DFlash2 and MTP (two drafters);
+- C1 and C4 (concurrency changes the period);
+- 65K and 126K (the contexts where the fault was originally observed);
+- FULL and eager graph modes;
+- zero Xid 31 delta asserted on each.
+
+`bench/int8-g64/requalify.py --matrix long` covers 65K/126K; the drafter, concurrency
+and graph-mode variants need their own engine launches, since each is an engine-level
+setting.
+
+### 57.3 The workaround is no longer needed
+
+`VLLM_SPEC_DECODE_ATTN=0` was only ever a workaround (§48.5) and can be dropped: the
+custom kernel is now safe to use, and it exists to avoid leaving SMs idle when
+`max_seqlen_q > 1`. The A/B in `bench/int8-g64/spec_attn_ab.py` is therefore no longer
+about choosing a workaround, but about confirming there is no performance regression
+from the widened multiply (there should be none: the multiply happens once per KV
+tile, not per element).
