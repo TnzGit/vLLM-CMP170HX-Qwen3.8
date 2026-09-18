@@ -4837,3 +4837,103 @@ park. No new broad hypothesis trees.
 
 `marlin_shape_bench.py` stays superseded and unrun; the W4A8 question is answered
 negatively at 4K (§37) and a longer context cannot rescue it (§37.1).
+
+### 45.6 The guard asymmetry, verified in the source
+
+Confirmed in `vllm/model_executor/layers/mamba/ops/causal_conv1d.py`. There are two
+kernels; **both** load a state index and then dereference it, and in both the guard
+is missing from the reads that matter.
+
+**Kernel A** (`causal_conv1d_update`, line ~139):
+
+```python
+conv_states_input_coord = tl.load(
+    conv_state_indices_ptr + idx_seq * stride_cache_indices + conv_state_init_index
+).to(tl.int64)
+if HAS_NULL_BLOCK:
+    if conv_states_input_coord == null_block_id:
+        return
+conv_states_base = (
+    conv_states_ptr
+    + (conv_states_input_coord * stride_conv_state_seq)     # <-- unguarded
+    + (idx_feats * stride_conv_state_dim)
+)
+```
+
+and the load that consumes it is masked by `idx_feats < dim` alone. The **same
+kernel**, ~120 lines later, does carry the bound:
+
+```python
+mask = (
+    (conv_states_input_coord < num_cache_lines)      # <-- present here
+    & ((idx_tokens_conv + seqlen) < state_len)[:, None]
+    & (idx_feats < dim)[None, :]
+)
+conv_state = tl.load(conv_states_ptrs_source, mask, other=0.0)
+```
+
+**Kernel B** (`causal_conv1d_update_kernel`, line ~830, the path taken with
+speculation) has the identical pattern, and it is more explicit about the
+speculative case:
+
+```python
+# With speculative decoding, the conv_state updates works in a sliding
+# window manner, at each forward pass, the tokens are shift by 1, so we
+# load since idx_tokens + 1.
+conv_state_ptrs_source = (
+    conv_state_ptr
+    + (conv_states_input_coord * stride_conv_state_seq)
+    + conv_state_token_offset * stride_conv_state_tok
+    + (idx_feats * stride_conv_state_dim)[None, :]
+    + ((idx_tokens + (1 if IS_SPEC_DECODING else seqlen)) * stride_conv_state_tok)[:, None]
+)
+mask = (
+    (conv_states_input_coord < num_cache_lines)      # <-- STEP 2: guarded
+    & ((idx_tokens + seqlen) < state_len)[:, None]
+    & (idx_feats < dim)[None, :]
+)
+```
+
+but **STEP 1** of that same kernel, immediately above it:
+
+```python
+conv_states_base = (
+    conv_state_ptr
+    + (conv_states_input_coord * stride_conv_state_seq)    # <-- unguarded
+    + (idx_feats * stride_conv_state_dim)
+)
+mask_w = idx_feats < dim                                   # <-- NO cache-line bound
+prior_tokens = conv_states_base + conv_state_token_offset * stride_conv_state_tok
+col0 = tl.load(conv_states_ptrs, mask_w, 0.0)              # dereferenced here
+```
+
+### 45.7 Why this is now the leading candidate
+
+The omission is exactly the shape the evidence demands, and it needs no lifetime
+defect:
+
+- one invalid entry in `spec_state_indices_tensor` -> `conv_state_ptr + bad_id *
+  stride_conv_state_seq` is computed and **dereferenced with no bound check**;
+- `stride_conv_state_seq` is a recurrent-state row, i.e. **MiB-scale**, so a
+  modestly bad id lands tens of MiB from the pool -- matching the 57.68 MiB
+  magnitude actually measured (§45.1) and producing 4 KiB-aligned addresses
+  naturally (§45.2);
+- the unguarded load runs only when a speculator is present, because
+  `IS_SPEC_DECODING` selects the sliding-window path and `SPEC=none` does not take
+  this route -> matches §34 exactly (clean without a drafter, identical fault with
+  either drafter);
+- `coalesced`/`HAS_NULL_BLOCK` handling shows the authors expected `null_block_id`
+  to be the only invalid sentinel, so a *non-null but out-of-range* id was not
+  contemplated at this site;
+- a guard for the very same quantity already exists 120 lines away in both kernels,
+  which is the signature of an omission rather than a deliberate design.
+
+**This is a checkable statement, not a story**: it predicts that an
+out-of-range `spec_state_indices_tensor` entry occurs before the fault. That is
+what §45.5's instrumentation tests.
+
+Note what this does *not* require: no use-after-free, no graph state, no driver
+defect, no align mode, and nothing drafter-specific. It also explains why the fault
+is periodic in *requests* rather than tokens: the invalid index arises from
+speculative state bookkeeping (accepted-token / slot recycling), not from context
+length.
