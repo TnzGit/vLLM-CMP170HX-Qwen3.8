@@ -4335,3 +4335,83 @@ productive step is code reading plus the *cheap* host-side checks in 41.2, not m
 GPU bisection. The review's requalification matrix (DFlash2 + MTP, C1/C4, >=10x the
 old period at 16K, 65K/126K, FULL/eager, zero Xid) applies once a candidate fix
 exists.
+
+## 42. Primary hypothesis: three call sites race to bind the same one-shot metadata, and they pass different tensors (2026-09-18)
+
+`MambaSpecDecodeGPUContext.initialize_from_forward_context` captures raw
+`data_ptr()`s into persistent device arrays **once**, guarded by `is_initialized`
+(§41.2). Its own docstring states the assumption it depends on:
+
+> "This method is idempotent - it only executes once (guarded by `is_initialized`
+> flag) since **the metadata is static after model loading**."
+
+There are **three** call sites, and they do **not** pass equivalent block tables:
+
+| site | location | block tables passed | comment in code |
+| --- | --- | --- | --- |
+| **A** | `gpu/model_states/mamba_hybrid.py:162` | `[block_tables[gid] for gid in mamba_group_ids]` | "block_tables are batch-order slices of the **persistent** `input_block_tables` (**stable data_ptr**), so the metadata is captured once here and reused" |
+| **B** | `mamba_utils.py:1065` (non-align fused path) | `[input_batch.block_table[gid].get_device_tensor(num_reqs) ...]` | -- |
+| **C** | `mamba_utils.py:1213` (`postprocess_align`) | same `get_device_tensor(num_reqs)` form | -- |
+
+A and C are align-only; **B is the non-align path that runs in all four faulting
+arms** (§38.10 established `_align_mode` is off). Sites B and C capture a device
+tensor **sized to the `num_reqs` of the step that happens to run first**, and both
+`block_table_ptrs[i]` and `block_table_stride_req` are then bound permanently from
+it:
+
+```python
+self.block_table_stride_req = int(next(iter(strides)))
+for i, bt in enumerate(block_tables):
+    self.block_table_ptrs[i] = bt.data_ptr()
+self.is_initialized = True
+```
+
+while the kernel later addresses it as if it spanned the whole request slot space:
+
+```python
+block_table_base = group_base_addr + bt_row_idx * block_table_stride_req
+dest_block_id = tl.load(block_table_base + dst_col)   # no bounds check
+```
+
+**Why this fits every observation**
+
+- a row index (`bt_row_idx`) valid for the *larger* persistent table can be **past
+  the end** of a table captured when `num_reqs` was small -> the load reads a
+  garbage "block id" from unrelated memory -> `state_base_addr + block_id * stride`
+  lands in **unmapped space**, exactly as §40 measured;
+- it needs **speculation** (§34): the speculative path is what exercises
+  multi-token state advance and therefore reads further columns / higher state
+  indices than a plain decode step, so the overrun only manifests with a drafter,
+  and identically for DFlash2 and MTP since they share this machinery;
+- the period and its dependence on **length and concurrency** (§35) follow from
+  how many requests and steps elapse before a row index crosses the captured
+  extent;
+- the **constant low bits** `0x39af000` across processes (§38.9, §40.3) follow from
+  the offset being `bt_row_idx * block_table_stride_req` — a product of small
+  integers and a fixed stride, i.e. deterministic arithmetic, not a random value.
+
+This is the first hypothesis that accounts for *all* the measured properties at
+once, which the earlier candidates (length threshold, chunk count, graph state,
+align precopy) each failed to do.
+
+### 42.1 The cheap confirmation, no GPU bisection needed
+
+Three checks, all host-side or read-only, in increasing strength:
+
+1. **static**: confirm which of A/B/C wins in the non-align speculative
+   configuration, and whether `num_reqs` at that moment is smaller than
+   `max_num_reqs`. The `is_initialized` guard makes this a first-caller race, so it
+   can be settled by reading the call order in `model_runner` for our config;
+2. **logging-only**: log `num_reqs`, the captured `block_table_stride_req`, each
+   `block_table_ptrs[i]`, and `bt.shape` inside
+   `initialize_from_forward_context` (no behaviour change, same technique as
+   `patches/log-alloc-bases.patch`), then log the same quantities each step. If the
+   captured tensor is smaller than the row index later used, the hypothesis is
+   confirmed without touching a kernel;
+3. **assertion**: at the point of capture, compare the captured table's row count
+   against `max_num_reqs` and the largest `bt_row_idx` the kernel can produce. A
+   mismatch is the bug, and a one-line assert proves it.
+
+If confirmed, the fix is to bind from the **persistent** tables exactly as site A
+does (or to size the captured tensor to `max_num_reqs`), and the requalification
+matrix from §38.2/§41.3 applies.
