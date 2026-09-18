@@ -4140,3 +4140,67 @@ rescue it is accepted: the dense MLP GEMM cost is set by `batch x verify_q`, not
 historical KV length, so the same absolute saving is a *smaller* fraction of a
 longer step. Reopening it would need the kernel-level trace the review specified,
 not a longer context.
+
+## 40. The fault address is in unmapped space: a stale pointer, not an overrun (2026-09-18)
+
+Closed the loop from 38.9/39 by dumping the allocation map and faulting **in the
+same process** (pid 576267), then matching:
+
+```
+fault VA (pid 576267)   0x00007054a39af000
+segments in that map    390
+verdict                 NOT inside any of them
+nearest segment below   0x000001001c400000 (44 MiB), ~116 TiB away
+va - 0x39af000          0x00007054a0000000 -- not a known base either
+```
+
+This is a sharper result than "out of range index", and it changes the diagnosis:
+
+**The faulting read targets an address in unmapped space, tens of TiB from any live
+allocation.** An out-of-range *index* into a live tensor produces an address inside
+or just past that tensor's allocation -- which is exactly what §38.9 hypothesised
+when reading `base + 0x39af000`. The same-process measurement refutes that reading:
+there is no base owning this address, and the offset is not a live segment plus
+`0x39af000`. What is being dereferenced is a pointer whose mapping is **gone** --
+freed, or belonging to a previous engine generation or a different context.
+
+Combined with `FAULT_PDE` (the page directory entry is absent) and the 4 KiB page
+alignment of every fault address (38.5), this is the signature of a **stale pointer
+to freed/reallocated memory**, not of arithmetic running off a live buffer.
+
+### 40.1 Why the address still repeats across processes
+
+If the pointer is stale, why does `0x39af000` recur across four generations? Because
+the *value* is not random: it is a previously valid address from the same workload,
+and the allocator is deterministic enough to place the same large (5192 MiB,
+2 GiB-aligned) pools at the same *relative* layout each run, so a pointer computed
+in one generation lands at the same low bits in the next. The high bits move
+(`0x7054...`, `0x7377...`, `0x77ca...`, `0x748b...`, `0x7e34...`) because the pool
+region itself moves. A stale absolute pointer explains both facts; a bad index
+into a live buffer explains neither the unmapped verdict nor the constant low bits.
+
+### 40.2 Consequences for the next step
+
+The instrumentation target is therefore **not** "bounds-check an index in a kernel".
+It is:
+
+1. **find the pointer that goes stale** -- a tensor or buffer whose storage is
+   freed, reallocated, or belongs to an earlier generation, while a later step still
+   dereferences the old address. The natural candidates given §34 (speculation
+   required, drafter-independent) are buffers created or resized per speculative
+   step, or per request-slot state that is recycled without the consumer's pointer
+   being updated;
+2. because the address is unmapped rather than merely out of range, a
+   **device-side bounds check would not catch it** -- the check itself would fault.
+   The useful instrumentation is instead **pointer identity**: record each
+   persistent buffer's `data_ptr()` when created and again on every reuse, and flag
+   any dereference whose pointer is not the current one. That is the slot-generation
+   tagging from §38.2, applied to *pointers* rather than to indices;
+3. a **host-side consistency check between requests** (not per step, so it cannot
+   perturb timing inside a step) comparing the recorded set of live pointers against
+   the set the metadata refers to, run after each request, is the cheapest way to
+   catch the transition at request 12.
+
+`bench/int8-g64/match_fault_seg.py` performs the naming step for any fault VA and
+map; it should be run on the next fault before the engine is restarted, since
+restarting destroys the map that makes the answer meaningful.
