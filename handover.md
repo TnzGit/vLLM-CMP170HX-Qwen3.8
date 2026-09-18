@@ -3363,3 +3363,72 @@ current `max_num_batched_tokens=2048`:
 MBT is now the right knob. Corrected wording: **cumulative work proportional to
 prompt length; whether the conserved quantity is KV blocks, prefill chunks /
 model-runner invocations, or another per-request resource is not established.**
+
+## 34. Classification: speculative decoding is NECESSARY (2026-09-18)
+
+Three spec sources, same engine, same length, same 24 requests each, distinct
+content, exact token counts, restart after every fault:
+
+| spec source | k | 16K x 24 result |
+| --- | --- | --- |
+| `DFlash2` (`method=dflash`) | 7 | **2 faults — requests 12, 24** |
+| `MTP` (`method=mtp`) | 7 | **2 faults — requests 12, 24** |
+| **`none`** (no `--speculative-config`) | — | **0 faults — 24/24 clean** |
+
+This is the sharpest result of the investigation so far, and it is a two-sided
+one:
+
+**Speculation is necessary.** With the speculator removed the identical workload
+runs 24/24 clean on the same length, dtype, backend, schedulers and graph config.
+So every target-only path is exonerated: prompt prefill by itself, the KV
+allocator in isolation, GDN/Mamba alone, the Triton attention kernels, the
+int8_per_token_head format, the driver, and the CUDA graph machinery on its own.
+
+**But the drafter is not it.** DFlash2 and MTP fault identically, at the same two
+request indices, with the same period. Two structurally different drafters
+(DFlash2 is a 5-layer block drafter consuming target hidden states; MTP is
+Qwen's own multi-token head) cannot produce the same period by coincidence. The
+defect is therefore in **shared speculative machinery**, not in either drafter:
+
+- `num_accepted_tokens` / accepted-token bookkeeping,
+- slot and recurrent-state allocation per speculative step (the repo already
+  needed `vllm-pr50021-gdn-spec-bounds.patch` in exactly this area, so a second
+  defect here is plausible),
+- the spec-token / draft-id buffers and their slot mapping,
+- verify-batch metadata that both drafters feed.
+
+**This also retracts the earlier "SPEC=none at 70K passes" observation.** That was
+a single request, and a fault with a period of 12 requests cannot be ruled out by
+one sample; 32.4's wording ("only observed in speculative configurations... not
+proven sufficient") was appropriately cautious but is now superseded by a real
+30-sample-class result. The correct statement is: **speculation is necessary and
+either drafter suffices to trigger it.**
+
+Combined with the exonerations already recorded (draft depth `k` 3/5/7, async
+scheduling, the prefix-cache option), the search space is now:
+
+```
+NOT: driver/WPR2, KV dtype, attention backend, split-KV verifier, async scheduler,
+     prefix-cache option, draft depth, DFlash2-specific metadata
+IS :  shared speculative state, in the verify/addressing path, released or
+      reallocated on a boundary whose period scales with prompt length and with
+      concurrency
+```
+
+### 34.1 The MBT experiment is now the right next probe
+
+The reviewer's chunk-count hypothesis can now be tested against a *speculative*
+baseline rather than a mixture. Fixed prompt of exactly 16,384 tokens with the
+DFlash2 arm, varying only `--max-num-batched-tokens` (the launcher hardcodes
+2048, so this needs the direct-launch route used for the `none` arm):
+
+| MBT | prefill chunks/request | predicted fault index if chunk-count driven |
+| --- | --- | --- |
+| 1024 | 16 | ~6 |
+| 2048 | 8 | **12 (measured)** |
+| 4096 | 4 | ~24 |
+
+An inverse relationship would put the conserved quantity at model-runner
+invocations rather than KV bytes, and would point the instrumentation at the
+runner's static buffers. A fault index that stays at 12 regardless of MBT would
+instead implicate a per-request persistent resource.
