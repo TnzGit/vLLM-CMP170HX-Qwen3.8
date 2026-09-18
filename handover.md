@@ -5772,3 +5772,52 @@ because they are the only remaining places an address can go wrong:
 
 Neither is proven to be the fault. Both are exactly the shape of "individually valid
 arguments, wrong address", which is what the evidence demands.
+
+### 55.1 The partial-store address arithmetic transiently exceeds the buffer
+
+Reading `_plan` in full exposes a zero-slack boundary that the static analysis in
+§55 only partially captured.
+
+With the real numbers (`q_len=8`, `G=6`, `D=256`):
+
+```
+rows    = q_len * G = 48                -> rows <= 64, so block_m = 64
+qt      = max(1, block_m // G) = 10
+ntile   = cdiv(q_len, qt) = 1
+ri      = qtile*QT + r // G             r in [0,64)  ->  ri in [0, 10]
+row_ok  = (r < QT*G) & (ri < q_len)     r < 60       ->  ri <= 9
+                                        ri < 8       ->  stored ri <= 7
+```
+
+so for **masked** lanes (`r` in 60..63) `r // G = 10`, i.e. `ri` reaches exactly
+`QMAX`. The store index for such a lane is
+
+```
+pidx = ((req*Hq + hrow)*QMAX + ri)*NSEG + seg
+     = ((3*24 + 23)*10 + 10)*16 + 15 = 15,375      while  part_n - 1 = 15,359
+```
+
+**The computed address is 16 elements past the end of the partial buffer.** It is not
+dereferenced only because `tl.store(..., mask=row_ok)` predicates the access, and
+`row_ok` is false for exactly those lanes.
+
+Consequences worth stating plainly:
+
+- the buffers have **zero slack**: they are sized to the largest index the kernel can
+  produce *for stored lanes*, while the address arithmetic for masked lanes already
+  goes out of range. Any error in mask construction, mask broadcast, or the
+  `Hq`/`QMAX`/`NSEG` values between allocation and launch turns this into a real
+  out-of-bounds store;
+- it is precisely the shape the evidence demands -- individually valid arguments
+  (`req`, `hrow`, `ri` all within their intended ranges), with the out-of-range value
+  arising only from the in-kernel `r // G` computation, which no host-side guard can
+  see;
+- it also explains why host-side guarding kept coming back clean (§46, §50, §52):
+  the offending value is produced *inside* the kernel, from a lane index, not read
+  from any input tensor.
+
+This is a **candidate**, not a proven cause: with `row_ok` correct, the store does not
+fault, and the fault may still be elsewhere. It is however the first concrete in-kernel
+quantity found that exceeds its allocation, and the device-side guard in
+`inject_spec_attn_guard_device.py` checks exactly it (`pidx` vs `part_n`), so the next
+run distinguishes the two possibilities rather than arguing about them.
