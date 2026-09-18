@@ -5352,3 +5352,87 @@ Immediate next steps:
    zero Xid);
 3. measure the performance cost of the `VLLM_SPEC_DECODE_ATTN` workaround (§48.5) so
    the interim recommendation is quantified.
+
+## 50. Host-side bounds are clean too: the defect is inside the kernel's own arithmetic
+
+§49 proposed two unguarded bounds in `_spec_attn_partial` and predicted a bad block
+table or block id. Both are now **checked and clean**.
+
+### 50.1 The v1 guard was itself incomplete, and that mattered
+
+The first guard (v1) dropped the **column** check to avoid a per-step sync. That was
+the wrong trade, and it was caught before the result was used: the fault reproduces
+under `CUDA_LAUNCH_BLOCKING=1` (§47), so it is deterministic addressing rather than a
+timing race, and synchronising cannot mask it. v2 checks both hazards.
+
+### 50.2 The v2 result
+
+16K, C1, DFlash2 k=7, custom kernel **on**, both bounds checked immediately before
+the `_spec_attn_partial` launch:
+
+| quantity | value |
+| --- | --- |
+| guard invocations | **785** |
+| block-table column overrun | none |
+| block-table row overrun | none |
+| block id `>= num_blocks` | none |
+| requests before fault | 11 ok, fault on the 12th |
+| Xid 31 | 79 -> **80** |
+
+So at every launch, for every request, `ceil(max_kv_len / block_size) <=
+block_table.shape[1]`, `num_reqs <= block_table.shape[0]`, and every block id
+referenced is `< num_blocks`. **The kernel still faults.**
+
+### 50.3 What this eliminates and what it leaves
+
+Eliminated: that the fault is caused by a bad *input* to this kernel -- the block
+table and block ids it receives are in range at every launch.
+
+Left: the kernel's **internal** address arithmetic, which host-side checks cannot see:
+
+- the **partial-buffer indexing**: `pidx = ((req * Hq + hrow) * QMAX + ri) * NSEG + seg`
+  stored into buffers sized `max_num_reqs * num_heads * qmax * nseg`. Note the buffers
+  are sized with `max_num_reqs` fixed **at the first call**
+  (`max_reqs = max(max_num_seqs, cu_seqlens_q.shape[0] - 1)`) and the instance is
+  cached by `(num_heads, head_size, device)` only -- so if a later call passes a larger
+  `num_reqs`, `req` runs past the buffer. That is the leading remaining candidate and
+  it is checkable host-side: compare `num_reqs` and `max_query_len` against
+  `att.max_num_reqs` and `att.qmax` (the code already asserts both, so a violation
+  would raise rather than fault -- but the *assert* uses `num_reqs <=
+  self.max_num_reqs`, and the buffers use `num_heads` while the key uses
+  `impl.num_heads`, which may differ for GQA);
+- the **`combine` kernel** launch `(num_reqs, Hq, max_query_len)`: `max_query_len` is
+  `max_seqlen_q` from the caller, while `QMAX` in the buffer indexing is `self.qmax`;
+  if `max_query_len` can exceed `qmax` the combine kernel indexes past the partial
+  buffers. The `assert max_query_len <= self.qmax` at the top of `run` should prevent
+  this, so either it holds (and this is not it) or the assert is not on the path that
+  faults;
+- `NSEG` segmentation: `tiles_per_seg = ceil(tiles_total / NSEG)`; with
+  `t0 = seg * tiles_per_seg` the last segments can compute `t0 > tiles_total`, making
+  `range(t0, t1)` empty -- safe -- but the `pos` values for the *first* segment still
+  reach `kv_len`, which is the scan length the table must cover (checked in 50.2).
+
+### 50.4 Honest status
+
+The fault is **localised to one kernel** (`_spec_attn_partial`, §47/§48) and its
+**inputs are verified in range** (50.2). The remaining candidates are the kernel's
+internal indexing, and the highest-value one is the `req`-vs-`max_num_reqs` and
+`max_query_len`-vs-`qmax` relationship, which is checkable on the host with the same
+technique and no new hypothesis.
+
+This is a good place to stop this turn and take stock:
+
+- **what is established**: the fault is in the custom spec-decode verify attention
+  kernel; `VLLM_SPEC_DECODE_ATTN` unset is a working workaround; and every other
+  subsystem has been excluded by measurement;
+- **what is not**: the specific line inside that kernel. Two rounds of host-side
+  guarding (GDN state index: 1919 checks; spec-attn block table: 785 checks) have both
+  come back clean, which is itself informative -- the bug is not a bad index *entering*
+  a kernel but something computed *within* one;
+- **next**: one more host-side check on `num_reqs`/`max_query_len` vs the instance's
+  frozen `max_num_reqs`/`qmax` (cheap, no new tree), and if that is clean, Compute
+  Sanitizer on this now-single-kernel repro, where memcheck's serialisation is
+  unlikely to prevent reproduction given §47's determinism.
+
+The workaround should also be quantified (§48.5) so the interim recommendation carries
+a number.
