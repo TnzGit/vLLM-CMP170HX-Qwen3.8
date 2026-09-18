@@ -5094,3 +5094,70 @@ Given §46.3, the honest summary is that this line has eliminated its strongest
 remaining specific hypothesis and now needs kernel attribution rather than another
 hypothesis. If attribution points outside the GDN/speculative path, parking is the
 right call per the stop condition.
+
+## 47. Kernel attribution: the fault is in the speculative verify attention kernel
+
+§46.4 named the missing piece: attribute the fault to a kernel rather than propose
+another hypothesis. Done, by running the same repro under
+`CUDA_LAUNCH_BLOCKING=1` so the error surfaces at the offending launch instead of at
+an unrelated later synchronize.
+
+### 47.1 The result
+
+16K, DFlash2 k=7, to the fault (11 ok, fault on request 12), with launch blocking:
+
+```
+RuntimeError: Triton Error [CUDA]: an illegal memory access was encountered
+  triton/runtime/jit.py:761 in run
+  triton/backends/nvidia/driver.py:328 in __call__
+  vllm/v1/attention/backends/flash_attn.py:1778 in _spec_attn_run
+  vllm/v1/attention/ops/spec_decode_attn.py:220 in run
+```
+
+(The `model_runner.py:1702 in shutdown` frames that follow are the *second*,
+downstream error at teardown -- the same misleading tail that has been in every
+traceback from the start. With launch blocking, the **first** error is the
+informative one, and it names the kernel.)
+
+**The fault is in the speculative verify attention path** --
+`flash_attn.py::_spec_attn_run` dispatching `spec_decode_attn.py:220` -- i.e. the
+custom split-KV speculative attention kernel. **Not GDN/Mamba**, which §46 had
+already refuted by measurement.
+
+### 47.2 This is consistent with the whole evidence set
+
+- **speculation required** (§34): `_spec_attn_run` only runs with a drafter, and
+  `SPEC=none` is clean -- exactly right;
+- **drafter-independent** (§34): the kernel consumes target-side draft/verify
+  metadata and is shared by DFlash2 and MTP -- exactly right;
+- **period in requests, set by length and concurrency** (§35): verify-batch geometry
+  is a function of scheduled requests, not of context length per se;
+- **unmapped, 4 KiB-aligned, outside the allocator map** (§45.2): a KV-page/block
+  address computed with a bad block id or offset would be page-aligned and can be
+  tens of MiB out, matching the measured 57.68 MiB magnitude.
+
+### 47.3 The contradiction that must be resolved
+
+Earlier (§26.3, carried into the report) it was recorded that **`SPEC_ATTN=0` still
+faults**. If the fault is *in* `_spec_attn_run`, then `SPEC_ATTN=0` -- which should
+route to stock Triton attention and skip this kernel -- must not fault. One of the
+two observations is wrong, and the earlier one was a **single sample** of a ~17%
+per-request event (§32.7 established the rate), so it is the weaker of the two.
+
+This must be re-tested properly before either is relied on: run `SPEC_ATTN=0` at
+16K x 24 with the same protocol (distinct content, exact tokens, restart on fault,
+fault **rate** rather than one observation). That is the immediate next step, and it
+is cheap.
+
+### 47.4 What the address evidence now means
+
+`_spec_attn_run` takes the KV block table and page geometry for the verify batch. A
+bad block id or a wrong page stride there produces exactly the observed signature
+(§45.2: page-aligned, outside the allocator map). The relevant guard is therefore
+the **block-table / slot-mapping bound on the verify batch**, not the GDN state
+index -- and the same first-error technique applies, at
+`spec_decode_attn.py:220`'s index derivation.
+
+Note this also re-frames §45.6's missing `num_cache_lines` guard in
+`causal_conv1d.py`: it remains a genuine latent defect worth an upstream report, but
+it is not this fault, and the two should not be conflated.
