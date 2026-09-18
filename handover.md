@@ -5718,3 +5718,57 @@ fresh engine -> exact 16K reproducer -> filter _spec_attn_partial only
 and the settings that matter are now fixed in one place: no timeout, 
 `--report-api-errors no` so a version warning cannot consume the print budget,
 `--print-limit 10`, and PID-only cleanup (no `pgrep -f`).
+
+## 55. Static bounds analysis of `_spec_attn_partial` (all indices verified bounded)
+
+While the definitive memcheck run proceeds, the kernel's geometry was checked
+statically against the real model config, because every host-side guard is already
+clean and memcheck cannot intercept the hardware exception (§54).
+
+Model geometry (`Qwen3.8-27B-W4A16-AutoRound-fast`):
+
+```
+layers           64 = 48 linear_attention (GDN) + 16 full_attention
+verify kernel    runs only on the 16 full-attention layers
+num_attention_heads 24, num_key_value_heads 4, head_dim 256   -> G = 24/4 = 6
+constants        BLOCK_M = 64, QMAX_TOKENS = 64, NUM_SEGMENTS = 16
+derived qmax     min(64, max(1+7, 64//6)) = min(64, max(8,10)) = 10
+```
+
+Buffer sizing vs the kernel's store index:
+
+```
+part_* elements  n = max_num_reqs * num_heads * qmax * nseg = 4*24*10*16 = 15,360
+pidx (max)       ((req*Hq + hrow)*QMAX + ri)*NSEG + seg
+                 = ((3*24 + 23)*10 + 9)*16 + 15 = 15,359 = n - 1
+```
+
+so the partial buffers are sized **exactly** to the largest index the kernel can
+produce -- not oversized, which is worth knowing: any error in `QMAX`, `Hq`, `NSEG`
+or `max_num_reqs` between allocation and launch would overflow immediately rather
+than being absorbed by slack.
+
+Indices checked and found bounded:
+
+| quantity | bound | where verified |
+| --- | --- | --- |
+| `req` | `< num_reqs <= max_num_reqs` | `assert num_reqs <= self.max_num_reqs` in `run()` |
+| `hrow = kvh*G + rg` | `< Hq = 24` | kvh `< Hkv`, rg `< G` |
+| `ri` | `< q_len <= max_query_len <= qmax` | `row_ok` mask + `assert max_query_len <= self.qmax` |
+| `seg` | `< NSEG = 16` | grid dimension |
+| `pos // BLOCK_SIZE` | `< block_table.shape[1]` | host guard, 785 checks clean (§50) |
+| `blk` | `< key_cache.shape[0]`, and `>= 0` | host guard, 785 checks clean (§50, v3) |
+
+Two structural facts that follow, and that the device-side guard is designed to test
+because they are the only remaining places an address can go wrong:
+
+1. `_SPEC_ATTN_QMAX` is a **module-level global** computed once from the first `group`
+   it sees and cached for the process. With G=6 on every full-attention layer it is
+   consistent here, but the buffers are sized from it, so any layer with a different G
+   would size them wrongly -- this is a latent defect, not necessarily this fault;
+2. the buffer is sized with `num_heads` from the **cache key** while the kernel
+   indexes with `Hq = q.shape[1]` taken at launch. Those are equal on this model
+   (24), but nothing asserts it, and the buffers have zero slack (see above).
+
+Neither is proven to be the fault. Both are exactly the shape of "individually valid
+arguments, wrong address", which is what the evidence demands.
