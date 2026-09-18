@@ -60,10 +60,12 @@ def build_ids(tok, length: int, salt: int) -> list[int]:
     if not unit:
         raise SystemExit("tokenizer produced no tokens for the filler")
     body = (unit * (length // len(unit) + 1))[:length]
-    # rotate the head so different salts differ early, without changing length
+    # rotate the head so different salts differ early; a full-length reassignment
+    # cannot change the length (a slice assignment with a longer RHS would).
     if salt and len(body) > 8:
         k = salt % 8
         body = body[k:] + body[:k]
+    assert len(body) == length, f"built {len(body)} tokens, wanted {length}"
     return body
 
 
@@ -117,6 +119,11 @@ def main() -> None:
     ap.add_argument("--period", type=int, default=0,
                     help="with --centre, sweep centre..centre+period-1")
     ap.add_argument("--decode-tokens", type=int, default=8)
+    ap.add_argument("--k-residues", default="",
+                    help="comma-separated draft depths; for each, also probe the "
+                         "lengths implied by 'bad residue = 117 + k' so a "
+                         "spec-geometry fault appears as a shift with k instead of "
+                         "requiring a full 128-length scan")
     ap.add_argument("--no-restart", action="store_true",
                     help="do not restart the engine after a fault (diagnosis only)")
     args = ap.parse_args()
@@ -129,6 +136,19 @@ def main() -> None:
     else:
         lengths = list(range(args.start, args.end + 1))
 
+    if args.k_residues:
+        # bad prompt residue is 123 for k=7 in the historical series; each step
+        # down in k moves it by 2 (117 + k). Probe each implied length +-1.
+        base = args.centre or args.start or 65531
+        ks = [int(x) for x in args.k_residues.split(",")]
+        extra = []
+        for kk in ks:
+            implied = base + (kk - 7) * -2
+            extra += [implied - 1, implied, implied + 1]
+        lengths = sorted(set(extra))
+        print(f"k-residue probe (base {base}, bad residue 117+k): lengths {lengths}",
+              flush=True)
+
     first_fault, ok_count, fault_count = None, 0, 0
     for i, L in enumerate(lengths):
         n = int(subprocess.run(["wc", "-l", args.log], capture_output=True,
@@ -136,6 +156,11 @@ def main() -> None:
         ids = build_ids(tok, L, i)
         try:
             dt, u = call(args.port, args.key, ids, args.decode_tokens)
+            got = u.get("prompt_tokens")
+            if got != L:
+                raise RuntimeError(
+                    f"length mismatch: requested {L} tokens, server saw {got}; "
+                    "an OK here would not be evidence about length L")
             f = faults_since(args.log, n)
             if f:
                 raise RuntimeError(f"{f} fault records in log")

@@ -2900,3 +2900,112 @@ stopped or modified by this work.
    `bench/int8-g64/spec_bench.py`;
 5. only then consider a paired gate/up Marlin+SwiGLU kernel, and first measure
    the standalone `silu_and_mul` share to bound the payoff.
+
+## 32. Review corrections applied, and the residue-123 hypothesis is refuted (2026-09-18)
+
+### 32.1 Committed artifacts that were missing (review item 4 — correct)
+
+`exact_residue_sweep.py` had never been `git add`ed: section 30 documented the
+65531/65536 result while the harness that produced it existed only on the lab
+host. Worse, the API-key fallback fix from `56c83df` was also still in the working
+tree, so the *pushed* harnesses would have 401'd against the isolated units.
+
+Both are committed now. This was the third time in this session that a result was
+recorded before its harness was tracked, so the rule is now explicit: **a result
+is not recorded until its harness is committed**, and `bench/int8-g64/README.md`
+says so.
+
+### 32.2 Three code defects the review found, all confirmed and fixed
+
+1. **`spec_bench.py --exact-tokens` did not guarantee the length.** It assumed an
+   8-token tail, and its rotation `rot[-4:] = ids[-(4+idx%4):] + ids[-4:-(4+idx%4)]`
+   assigns a right-hand side of 5-7 elements into a 4-element slice, which
+   **grows the list** (verified: 20 -> 21 tokens at idx=1, 20 -> 23 at idx=3). The
+   mode was therefore unusable for exactly the residue work it was built for.
+   Replaced with a full-length reassignment plus
+   `assert usage.prompt_tokens == requested` on every call.
+2. **`SpecDecoding metrics` windows were not aligned to the measured reps.** The
+   logger emits periodic windowed-and-reset counters, and the old code took a
+   median over every window after a start marker. Now each measured request is
+   bracketed (log line count before/after) and only windows inside the bracket are
+   read.
+3. **`estimated_ms_per_target_pass`, not `ms_per_target_pass`.** vLLM's
+   `Mean acceptance length` is `1 + accepted_draft_tokens / num_spec_steps`, so
+   the product with ms/output-token is a derived estimate from two independently
+   windowed measurements, not a request-local counter. Renamed until the engine
+   exposes per-request `num_spec_steps` / `num_accepted_draft_tokens`.
+
+Also fixed: `step_profile.py`'s summariser had been adding `cuda_runtime` events
+(CPU-side `cudaLaunchKernel` / `cudaMemcpyAsync`) into "total CUDA kernel time".
+Those are now a separate host-overhead bucket, so GPU kernel time is not
+double-counted.
+
+And `exact_residue_sweep.py` gained a hard `assert len(body) == length`, a check
+that the server's `prompt_tokens` equals the requested length (so an "OK" cannot
+mean "shorter prompt"), and a `--k-residues` mode that probes the lengths implied
+by the historical `bad residue = 117 + k` relation.
+
+### 32.3 The residue-123 hypothesis is refuted by measurement
+
+The review suggested that `65531 mod 128 = 123` matches the historical
+`117 + k = 124` bad residue for k=7, and that the fault might therefore be the
+known spec/prefix residue family. That is a good hypothesis and it is now tested
+and **fails**: at every length with residue 123 that is small enough to run, the
+request passes.
+
+| length | mod 128 | result |
+| --- | --- | --- |
+| 123 | 123 | OK |
+| 251 | 123 | OK |
+| 379 | 123 | OK |
+| 507 | 123 | OK |
+| 1023 | 127 | OK |
+| 2047 | 127 | OK |
+| 4095 | 127 | OK |
+| 8191 | 127 | OK |
+| 16383 | 127 | OK |
+
+So residue 123 alone is not sufficient: the fault needs a **large** length as well
+as the residue. That is consistent with the review's own warning that 65531 and
+65536 may be two different failure classes, and it means the `117 + k` series is
+not the whole story here. The `--k-residues` probe is kept for the case where the
+sanitizer is inconclusive.
+
+### 32.4 Review items accepted without change
+
+- the fault should **not** be attributed to "4096 blocks" yet: `65531..65535` all
+  need 4096 blocks and only 65531 faults, so the block count alone cannot explain
+  it — recorded as strongly suggestive only, not as a conclusion;
+- sanitizer should be run at **65531 and 65536 separately**, and with
+  `--target-processes all` written explicitly (vLLM forks an EngineCore worker);
+- the `pkill` gotcha's causal story was wrong and has been corrected: with
+  `Restart=no` and `disabled`, systemd does not restart a unit because a child was
+  SIGKILLed. The likely cause was the parent `vllm serve` still being alive and
+  respawning EngineCore, or a sweep helper calling `systemctl start`. The
+  operational rule (use `systemctl --user stop`) stands; the explanation is now
+  marked as unverified and the diagnostic commands are recorded instead of a
+  story;
+- the W4A8 plan should be validated on the **exact hot shapes**
+  (`M=16,N=34816,K=5120` gate_up and `M=16,N=5120,K=17408` down) as a locked-1350
+  interleaved single-kernel A/B *before* any whole-model run, with a gate of
+  >=10% on the dominant GEMM and >=8% after activation-quant overhead;
+- `cmp170hx-mixed-fp8-full-256k` runs a **different checkpoint**
+  (`Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4`) from the recent control
+  (`Qwen3.8-27B-W4A16-AutoRound-fast`), so it is a long-context
+  research/stability/profiling platform but **not** a matched whole-model A/B
+  baseline without first confirming the Marlin packing/scales are equivalent.
+
+### 32.5 The `[8.5, 14.4, 13.6]` pattern is not yet explained (review item 5)
+
+Section 30.1 concluded it was ordering/warmup and that the first repetition
+should be discarded. That conclusion was premature, and the review's alternative
+is better: each rep uses a **different salt** (case200/201/202) and the six reruns
+repeat the same three salts, so a stable per-salt DFlash acceptance difference
+would produce exactly the same stable pattern.
+
+`spec_bench.py --permute-salts` now runs the same three salts in three orders
+(200,201,202 / 202,200,201 / 201,202,200) and reports acceptance alongside
+timing: if the timing follows the salt it is a content/proposal effect, and if it
+follows the position it is an ordering effect. Until that is run, **"discard the
+first rep" is not a benchmark contract** and 30.1's conclusion is downgraded to a
+hypothesis.

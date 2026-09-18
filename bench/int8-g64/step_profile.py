@@ -129,15 +129,26 @@ def summarize(path: str) -> None:
         tr = json.load(f)
     events = tr.get("traceEvents", tr if isinstance(tr, list) else [])
     per_kernel: dict[str, list] = defaultdict(lambda: [0.0, 0])
+    runtime_calls: dict[str, list] = defaultdict(lambda: [0.0, 0])
     for e in events:
-        if e.get("ph") != "X" or e.get("cat") not in ("kernel", "Kernel", "cuda_runtime"):
+        if e.get("ph") != "X":
             continue
+        cat = e.get("cat", "")
         name = e.get("name", "")
         dur = float(e.get("dur", 0.0))  # microseconds
         if dur <= 0 or not name:
             continue
-        per_kernel[name][0] += dur
-        per_kernel[name][1] += 1
+        # Only true device-kernel events count as GPU kernel time. `cuda_runtime`
+        # events are CPU-side CUDA API calls (cudaLaunchKernel, cudaMemcpyAsync,
+        # ...); adding them to the total would double-count launch overhead as
+        # execution time, which is exactly the pollution this summariser exists
+        # to avoid. They are reported separately as host overhead.
+        if cat in ("kernel", "Kernel"):
+            per_kernel[name][0] += dur
+            per_kernel[name][1] += 1
+        elif cat in ("cuda_runtime", "CudaRuntime"):
+            runtime_calls[name][0] += dur
+            runtime_calls[name][1] += 1
     if not per_kernel:
         print("no kernel events found -- was the trace captured in the ENGINE process?",
               file=sys.stderr)
@@ -155,6 +166,12 @@ def summarize(path: str) -> None:
     print(f"{'bucket':<22}{'ms':>10}{'share':>9}")
     for label, dur in sorted(buckets.items(), key=lambda x: -x[1]):
         print(f"{label:<22}{dur / 1000.0:>10.3f}{100.0 * dur / total:>8.1f}%")
+    if runtime_calls:
+        rt = sum(v[0] for v in runtime_calls.values())
+        print(f"\nhost CUDA API time (cuda_runtime, NOT kernel execution): {rt / 1000.0:.3f} ms")
+        for name, (dur, n) in sorted(runtime_calls.items(), key=lambda x: -x[1][0])[:5]:
+            print(f"  {dur / 1000.0:9.3f} ms  x{n:<6} {name[:60]}")
+
     print("\ntop kernels:")
     for name, (dur, n) in sorted(per_kernel.items(), key=lambda x: -x[1][0])[:12]:
         print(f"  {dur / 1000.0:9.3f} ms  x{n:<6} {name[:64]}")
