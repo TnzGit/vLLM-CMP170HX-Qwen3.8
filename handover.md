@@ -5517,3 +5517,78 @@ of mistake as reading a drop-in as "the config that took effect": both substitut
 apparent location for the actual one. The check that would have caught it is one
 line -- confirm which backend the engine reports -- and it is now recorded as part of
 the standing rule.
+
+## 52. Filtered memcheck is running; workaround A/B prepared (2026-09-18)
+
+### 52.1 Why the attribution is to `triton_attn.py`, restated as the call chain
+
+Correcting §47 as §51 set out, the path is:
+
+```
+triton_attn.py:813   guard: _kv_quant_mode == INT8_PER_TOKEN_HEAD and k_scale_cache is not None
+  -> _spec_attn_run             (defined in flash_attn.py:1760, imported by triton_attn.py)
+    -> SpecDecodeAttention.run  (spec_decode_attn.py:206)
+      -> _spec_attn_partial     (spec_decode_attn.py:220)   <- the faulting launch
+```
+
+The kernel is *designed* for this configuration (its comment: "int8 per-token-head
+only: the kernel folds the per-(token, head) scales in after each dot"), and the
+flash-attention call site is excluded here precisely because
+`is_quantized_kv_cache("int8_per_token_head")` is True. There is exactly one
+`_spec_attn_partial` launch site in the tree.
+
+### 52.2 The three guards are all clean
+
+| guard | checks | result |
+| --- | --- | --- |
+| GDN state index (§46) | 1919 | no violation (positive control proved the instrument live) |
+| block table + block id, all columns (§50) | 785 | no violation |
+| negative block id, **active columns only** (§52, v3) | 785 | no violation (positive control: fires correctly with `FORCE_NB=0`) |
+
+v3 was added because v2 never tested for a **negative** id, and a negative id times
+the MiB-scale page stride lands *below* the pool -- the shape the Xid 31 records
+actually show (§45.2). It is now tested and clean, so the fault is not a bad index
+*entering* the kernel: it is computed *inside* one.
+
+### 52.3 The memcheck run
+
+Command shape (`/tmp/run_sanitized_specattn.sh`):
+
+```
+compute-sanitizer --tool memcheck \
+  --target-processes all \
+  --kernel-name regex=_spec_attn \      # note: '=' not ':', and this is what makes it affordable
+  --print-limit 1 \
+  --log-file /tmp/sanitizer_specattn.%p.txt \
+  <venv>/bin/vllm serve ... --compilation-config '{"cudagraph_mode":"NONE",...}'
+```
+
+with `VLLM_SPEC_DECODE_ATTN=1` (the configuration that faults) and eager graph mode
+(memcheck serialises anyway, and §38 showed eager faults identically, so nothing is
+lost).
+
+Filtering is doing real work: prefill launches are excluded by the kernel's own
+`1 < max_seqlen_q` guard, so only the ~192 verify launches per request are
+instrumented. Measured rate is **~20 minutes per request**, i.e. ~4 hours to reach the
+fault at request 12. GPU utilisation is 100% throughout, confirming the time is in the
+instrumented kernels rather than idle waiting.
+
+16K is the cheapest possible length for this: the fault needs 12 requests x 16K =
+196,608 tokens of cumulative work, against 5 x 57K = 286,720 and 4 x 65K = 262,144 at
+the other reproducing lengths.
+
+### 52.4 Workaround A/B is prepared and blocked only on the GPU
+
+`bench/int8-g64/spec_attn_ab.py` measures custom-kernel-on vs custom-kernel-off with
+the same three separated metrics as `spec_bench.py` (ms/output-token, accepted/pass,
+estimated ms/target-pass) so a proposal-efficiency difference is not read as a kernel
+difference. Its mode detection reads `/proc/<engine-pid>/environ` and requires a
+python `argv[0]`, so it cannot mistake the compute-sanitizer wrapper for the engine,
+and it reports `UNVERIFIED` rather than guessing if no engine is found -- because the
+whole point of §48.1 is that a launcher's intent is not evidence of the engine's
+state.
+
+Prediction to test, from the kernel's own comment ("FA2 does not split the KV sequence
+when max_seqlen_q > 1, leaving most SMs idle"): the fallback cost should **grow with
+context length**. If it does not, the workaround is close to free and should be
+adopted immediately; if it does, the number belongs in the interim recommendation.
