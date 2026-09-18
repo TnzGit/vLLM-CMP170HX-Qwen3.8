@@ -3672,3 +3672,106 @@ rather than from removing a microsecond-scale activation.
 `marlin_shape_bench.py` remains in the tree as a superseded skeleton: it reads
 GPTQ-format keys that this compressed-tensors checkpoint does not have (§36.1),
 and the engine A/B above is both cheaper and ABI-correct.
+
+## 38. Graph mode is exonerated: true eager faults identically (2026-09-18)
+
+The review's last configuration A/B before instrumentation: `FULL` / `PIECEWISE` /
+`eager` at 16K x 24, DFlash2 k=7, fresh engine per arm.
+
+**A methodological catch first, because the first attempt was invalid.** Driving
+`CUDAGRAPH_MODE=NONE` through the launcher produced a run that *looked* like an
+eager arm but was not: reading back the engine's effective config showed
+`cudagraph_mode: <CUDAGraphMode.FULL_AND_PIECEWISE: (2,1)>` with
+`cudagraph_capture_sizes: [1,2,4,8,16,24,32]`, i.e. capture fully active. The
+launcher's `CG_MODE` plumbing did not express `NONE` on this path, and the arm
+would have been recorded as "eager still faults" while measuring captured
+execution. It was discarded and re-run by direct launch, and the replacement was
+**verified** from the log before the measurement was believed:
+
+```
+cudagraph_mode': <CUDAGraphMode.NONE
+cudagraph_capture_sizes': []
+```
+
+This is the same class of error as §28.4 and §35 -- a config that did not reach
+the engine -- and it is now the third time it has produced a would-be wrong
+conclusion in this investigation. Every arm must have its effective configuration
+read back out of the engine log, not assumed from the environment.
+
+**Result** (16,384 exact tokens, 24 requests, capture verified from the log):
+
+| graph mode | capture sizes | 16K x 24 |
+| --- | --- | --- |
+| `FULL_AND_PIECEWISE` (baseline) | `[1,2,4,8,16,24,32]` | **2/24 -- requests 12, 24** |
+| `NONE` (true eager) | `[]` | **2/24 -- requests 12, 24** |
+
+**Bit-for-bit the same failure, with no CUDA graph anywhere in the process.**
+
+So CUDA graph retained pointers, static graph input buffers, and capture-lifetime
+state are all eliminated: there is no capture to retain anything. `FULL` and
+`PIECEWISE` are therefore unnecessary to run as separate arms for this question --
+the fully-uncaptured case is the strongest version of the test and it faults
+exactly like the captured one, which also means graph-mode choice cannot fix this.
+
+By the review's stated criterion, this pushes the probability decisively onto
+**hybrid GDN/Mamba per-request speculative state reuse** rather than graph state
+or the plain KV allocator.
+
+### 38.1 The remaining suspect class, precisely
+
+Everything below the request lifecycle is now excluded, and everything
+speculation-specific and drafter-independent remains:
+
+```
+req_id -> input_batch.idx_mapping -> persistent req_state_idx -> {
+    Mamba/GDN state index,
+    block-table row,
+    num_accepted_tokens,
+}
+```
+
+with the cross-request persistent GPU tensors in
+`GDNAttentionMetadataBuilder` (`spec_state_indices_tensor`, `spec_sequence_masks`,
+`spec_token_indx`, `spec_query_start_loc`, `num_accepted_tokens`) and the
+`_mamba_state_idx_gpu` / `_mamba_src_col_gpu` / `_mamba_src_off_gpu` /
+`num_accepted_tokens_gpu` buffers as the natural first targets. These advance on
+the speculative accept path -- which is exactly the path that `SPEC=none` does not
+enter, matching §34's classification.
+
+### 38.2 Instrumentation design (review-specified, not yet built)
+
+The review's guidance is adopted in full because a timing-sensitive fault is at
+issue and the naive approach can erase it:
+
+- **no printf, no per-step `.cpu()` / `torch.cuda.synchronize()`** in the hot path;
+  heavy synchronisation can move or hide the bug;
+- a **device-side first-error record buffer**: a small struct
+  (`error_code, request_ordinal, req_state_idx, seq_len, num_computed,
+  num_accepted, mamba_state_idx, src_col, src_off, block_table_col, block_id,
+  num_blocks`) written once via `atomicCAS(error_code, 0, MY_ERROR)` on the first
+  invariant violation, read back only after the request finishes;
+- invariants checked immediately before each dereference:
+  `0 <= req_state_idx < max_num_reqs`;
+  `mamba_state_idx` within its valid row range;
+  `block_table_col < row_width`;
+  `block_id == NULL_BLOCK_ID or 0 <= block_id < physical_block_count`;
+- **request-slot generation tagging**: `generation[slot] += 1` on every
+  add/free/reuse, with `(request ordinal, req_id, slot, generation, seq_len,
+  mamba_state_idx, block_table row)` recorded. The hypothesis this tests directly
+  is a slot that has been freed and reused while some associated state still
+  carries the previous generation;
+- **state diff of requests #10/#11/#12 only** -- find the *first* field that
+  differs at #12 versus #11, rather than dumping everything;
+- **allocation-relative fault addresses**: record KV pool / Mamba state pool /
+  graph buffer / spec persistent buffer base addresses and widths at startup, then
+  convert each Xid 31 VA to `fault_va - allocation_base`. The absolute-address
+  statistics (63 Xid 31, 34 distinct VAs, a few repeating 7x/5x/5x) are not
+  actionable; a repeating *relative* offset would be. `FAULT_PDE VIRT_READ` is
+  consistent with a stale or freed VA, so a constant relative offset would be a
+  strong signal.
+
+No configuration knob sweep should be run after this. Compute Sanitizer follows
+the instrumentation (on the narrowed path), not the reverse, since memcheck's
+serialisation may prevent a timing-sensitive fault from reproducing at all, and
+even when it fires it reports only the final illegal load rather than when the
+metadata first went bad.
