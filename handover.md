@@ -3113,3 +3113,57 @@ none`. A rate that moves with an axis identifies the subsystem; a rate that does
 not move exonerates it. `compute-sanitizer` remains worth running, but a
 probabilistic fault may not reproduce under memcheck's serialising execution, so
 the rate comparison should run first.
+
+### 32.9 The trigger is cumulative request/token volume, not length
+
+Three rate measurements, each on a fresh engine, all with distinct content and
+exact token counts:
+
+| length | repeats | faults | rate | fault at request # |
+| --- | --- | --- | --- | --- |
+| 16,384 | 30 | 2 | 0.067 | **12, 24** |
+| 57,344 | 10 | 2 | 0.200 | **5, 10** |
+| 65,536 | 6 | 1 | 0.167 | 4 |
+
+Two things stand out. First, the fault is **reproducibly periodic in the request
+count** (16K: every 12th request; 56K: every 5th), not random. Second, the period
+shortens as the length grows, and the product is roughly constant:
+
+```
+16,384 x 12 = 196,608 tokens
+57,344 x  5 = 286,720 tokens
+65,536 x  4 = 262,144 tokens
+```
+
+So the trigger is **cumulative KV volume processed by one engine instance**
+(~200-290K tokens), not prompt length and not a per-request coin flip. The
+"length threshold above 64K" model, the "discrete at 2^16" model and the
+"probabilistic per request" model are all wrong; this supersedes them.
+
+That also explains why 49,152 passed 5/5 (5 x 48K = 245K, just under the ~200-290K
+band it might have hit at request 5) and why 16K looked clean in earlier
+single-request tests: both were sampling below the cumulative threshold.
+
+### 32.10 Consequence: axis testing moves to 16K, 3.5x cheaper
+
+Because the trigger is cumulative volume, a **cheap short-context run reaches it**
+simply by issuing more requests: 16K needs 12 requests, at ~30 s each, versus 56K
+at ~105 s each. Per-sample cost drops **3.5x**, and the periodicity makes the
+outcome predictable rather than requiring large sample counts to resolve a rate.
+
+This is the answer to "why is this taking so long": the experiment was designed
+around the wrong model of the fault. Under the corrected model the same axis
+comparison costs hours, not tens of hours.
+
+### 32.11 `ASYNC_SCHED` is exonerated
+
+`ASYNC_SCHED=0` and `=1` produced **identical** results at 56K: both 2/10 faults,
+both at requests 5 and 10. A fault that does not move when async scheduling is
+disabled is not an async-scheduling race, so the closest published upstream match
+(hybrid GDN + MTP + async) is not this bug.
+
+Next axes, in the order that best discriminates under the cumulative model:
+`k=3/5/7` (does the period scale with draft depth, as the historical `117 + k`
+series suggests?), then `DFlash2 vs MTP vs none` (does the drafter matter at all,
+or only the target's KV churn?), then `FULL/PIECEWISE/eager` (is a graph's
+retained state involved?), then the pre-fault state dump.
