@@ -3277,3 +3277,89 @@ Recommendation, for the human to choose: either (a) bound this to one more axis
 (the prefix-reuse test, which is both discriminating and cheap), then park it with
 the evidence recorded, or (b) park it now and spend the time on the W4A8 Marlin
 line, which is ready (`marlin_shape_bench.py`) and does not depend on this bug.
+
+## 33. Driver/environment gate: CLEAN — this is not the cmpunlocker WPR2 defect (2026-09-18)
+
+Upstream vLLM #55279 is the same symptom family (CMP 170HX / SM80 / vLLM 0.27.1 /
+DFlash2 / Xid 31 `FAULT_PDE`), and its maintainer's first request was not more
+vLLM debugging but a specific environment check: confirm whether this card and
+driver are hitting **`amoghmunikote/cmpunlocker#32`**, where the unlocker
+registers the highest reserved framebuffer region into the PMA even though it is
+actually **WPR2 + GSP firmware heap**. That would let the CUDA allocator hand out
+memory the GPU then faults on — producing exactly Xid 31 / `FAULT_PDE` /
+`ACCESS_TYPE_VIRT_READ`.
+
+Everything about this machine matched the affected combination
+(`10de:20c2`, CMP 170HX 64 GB, nvidia-open 610.43.02), so this had to be checked
+before any further vLLM work. **It is fixed on this host.** The boot log carries
+the decisive line:
+
+```
+NVRM: GPU0 memmgrSec2DebugLateExtendHighPmaRegion: SEC2_DEBUG_LATE_PMA:
+      candidate=6 base=0xff7300000 limit=0xfffffffff left reserved (backs WPR2)
+```
+
+`left reserved (backs WPR2)` is the post-fix behaviour; the defect would show
+this candidate being *registered* instead. The region size is
+`rsvdSize=0x8d00000` = **141 MiB**, matching the ~141 MiB WPR2 region the issue
+describes, and the PMA/heap split is consistent:
+
+```
+numFBRegions=7 numPmaRegions=1 stockFb=0x200000000
+pma_total=0xfd8f50000 pma_free=0xfd8f50000 heap_total=0x1000000000 heap_free=0xa133000
+```
+
+Corroborating details: device ID `10de:20c2`; driver
+`610.43.02` nvidia-open built locally (`Sun Sep 13 12:43:04 PM PST 2026`) and
+installed from the cmpunlocker tree at
+`/lib/modules/7.0.0-31-generic/updates/cmpunlocker/nvidia.ko`; idle free memory
+**64,898 MiB**, which sits at the reviewer's *fixed* reference point (~64,908)
+rather than the pre-fix one (~65,049).
+
+One caveat worth stating rather than glossing: the local cmpunlocker git clone
+(`/home/base-node/cmpunlocker-ee41902`, HEAD `ee41902` "Add support for
+615.71.09") does **not** contain the fix commit object
+`ed579213998acc4da3d0391ae5106e8b5f870f12`, so ancestry could not be checked from
+the source tree. The boot-log message is the stronger evidence and it is
+conclusive: whatever commit it came from, the installed module leaves the WPR2
+region reserved. A second tree, `cmpunlocker.incomplete-20260913-1226`, has no
+git metadata at all.
+
+**Conclusion: the WPR2 environment gate passes. This IMA is a software defect in
+the serving stack, not a driver mapping defect.** The line is closed and no
+driver change or reboot is required.
+
+### 33.1 Next, in the order the review set
+
+1. ~~driver gate~~ — done, clean (above);
+2. `SPEC=dflash2 / mtp / none` at 16K x 24 (cheap, and the single most
+   discriminating axis left: the earlier "70K with SPEC=none passes" was **one
+   request**, which cannot exclude a fault whose period is 5-12 requests);
+3. fixed 16K while varying `--max-num-batched-tokens` 1024 / 2048 / 4096 — if the
+   fault follows **prefill-chunk / model-runner invocation count** rather than KV
+   volume, the fault index should scale inversely with MBT;
+4. only then `FULL / PIECEWISE / eager`, to test graph retained state;
+5. pre-fault state dump (with the cross-request persistent state the review
+   listed: request slot id, block-table and slot-mapping and KV-pool pointers,
+   free/used block counts, graph input buffer pointers, and above all the
+   **scheduler/model-runner invocation counter and prefill chunk index**);
+6. Compute Sanitizer on the minimised reproducer.
+
+### 33.2 The conserved quantity is not yet identified (review correction accepted)
+
+32.9/32.14 said "cumulative KV volume is the right shape". The review is right
+that this is still too strong: 196,608 / 286,720 / 262,144 do not converge on a
+constant, whereas the **chunk** interpretation is more suggestive at the
+current `max_num_batched_tokens=2048`:
+
+```
+57,344 / 2048 = 28 chunks/request  x 5 requests  = 140
+65,536 / 2048 = 32 chunks/request  x 4 requests  = 128
+49,152 / 2048 = 24 chunks/request  x 5 requests  = 120   (this one was CLEAN)
+16,384 / 2048 =  8 chunks/request  x 12 requests =  96
+```
+
+140 and 128 bracketing a clean 120 is not decisive, but it is close enough that
+MBT is now the right knob. Corrected wording: **cumulative work proportional to
+prompt length; whether the conserved quantity is KV blocks, prefill chunks /
+model-runner invocations, or another per-request resource is not established.**
