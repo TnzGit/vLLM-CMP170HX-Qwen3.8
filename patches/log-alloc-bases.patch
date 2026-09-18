@@ -1,0 +1,48 @@
+Log the base address, size and extent of each KV cache backing allocation.
+
+Why: the Xid 31 fault addresses in this stack are page-aligned and recur at a
+fixed allocator-relative offset -- a ~57 MiB window at 552-610 MiB into whichever
+2 GiB band they land in (handover 38.3). Absolute CUDA virtual addresses cannot be
+matched to anything, but `fault_va - allocation_base` can, so the bases have to be
+observable. Neither nvidia-smi nor torch.cuda.memory_snapshot() reports these
+buffers: vLLM allocates them directly rather than through the torch caching
+allocator.
+
+Logging only. No allocation, layout or lifetime is altered, so this cannot change
+whether the fault reproduces.
+
+Apply from the installed vllm package directory:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/log-alloc-bases.patch
+
+Written against vLLM 0.27.1.
+
+--- a/v1/worker/gpu_model_runner.py
++++ b/v1/worker/gpu_model_runner.py
+@@ -7341,6 +7341,27 @@
+             for layer_name in kv_cache_tensor.shared_by:
+                 kv_cache_raw_tensors[layer_name] = tensor
+ 
++        # syv patch: log every distinct backing allocation so a fault address can
++        # be converted to an allocation-relative offset (see
++        # patches/log-alloc-bases.patch). Logging only -- nothing about the
++        # allocation, layout or lifetime is changed, so this cannot alter whether
++        # the fault reproduces.
++        try:
++            _seen = {}
++            for _name, _t in kv_cache_raw_tensors.items():
++                _ptr = _t.data_ptr()
++                if _ptr in _seen:
++                    continue
++                _seen[_ptr] = _name
++                logger.info(
++                    "ALLOC kv_cache base=0x%016x size=%d bytes (%.2f MiB) "
++                    "end=0x%016x first_layer=%s",
++                    _ptr, _t.numel(), _t.numel() / (1024 * 1024),
++                    _ptr + _t.numel(), _name,
++                )
++        except Exception:
++            pass
++
+         layer_names = set()
+         for group in kv_cache_config.kv_cache_groups:
+             for layer_name in group.layer_names:
