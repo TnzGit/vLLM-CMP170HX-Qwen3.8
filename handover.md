@@ -3054,3 +3054,62 @@ turned out to be an artifact of single observations (the first was the "repeated
 prefix / changed context" attribution in 25.3, corrected in 28). The methodological
 rule to carry forward: **for a fault with no confirmed mechanism, measure a rate,
 never a boundary.**
+
+### 32.7 Measured: the fault is probabilistic, and 65531/65536 are the same bug
+
+`bench/int8-g64/fault_rate.py` sends N independent requests per length (distinct
+content, exact token count verified against the server's `prompt_tokens`) and
+restarts the engine after every fault, because a crashed engine keeps returning
+stale failures. Six repeats each at the two lengths that section 30 believed were
+special:
+
+| length | ok | fault | rate | pattern |
+| --- | --- | --- | --- | --- |
+| 65536 | 5 | 1 | **0.167** | ok ok ok ok FAULT ok |
+| 65531 | 5 | 1 | **0.167** | ok ok ok FAULT ok ok |
+
+Two conclusions, both firm:
+
+1. **The fault is probabilistic, not length-deterministic.** The same length
+   passes 5 times out of 6 and faults once, and the failure lands at a different
+   request index for each length (4th and 5th). So there is no length arithmetic
+   to find: section 30's "discrete at 2^16" model is retracted (32.6) and this
+   confirms the retraction with a rate rather than a second anecdote.
+2. **65531 and 65536 are the same bug, not two failure classes.** The review
+   reasonably suspected two classes because 65531..65535 all need 4096 blocks yet
+   only 65531 faulted in the first pass. With a measured rate both lengths fault
+   at exactly 1/6, which is what a single shared probabilistic fault looks like
+   when sampled twice. The "4096 blocks" and "residue 123" stories were both
+   artefacts of reading single observations as deterministic.
+
+This also explains, in hindsight, every earlier inconsistency: the `63K OK / 66K
+FAULT` pair, `70K` passing with `SPEC=dflash2` while `66K` failed, and `65536`
+faulting then passing. All were single samples of a ~17%-per-request event.
+
+### 32.8 What this changes about the diagnosis
+
+A probabilistic fault at roughly constant rate across neighbouring lengths, with
+no dependence on request index, is the signature of a **race or stale-state**
+defect rather than an out-of-bounds index computed from the length. That
+reprioritises the candidate list:
+
+- **speculative scheduler / draft bookkeeping** (slot reuse, accepted-token
+  state, the free-slot accounting the launcher notes already implicate at
+  `117 + k`);
+- **GDN recurrent state** under speculation (the repo carries
+  `vllm-pr50021-gdn-spec-bounds.patch` for exactly this class, and it is already
+  applied, so this would be a *second* such defect);
+- **CUDA graph state lifetime** (workspace/buffer reuse across replays);
+- **async scheduling** (`--async-scheduling` is on; the upstream hybrid
+  GDN + MTP + async IMA reports are the closest published match).
+
+and it deprioritises "block table / slot mapping arithmetic", which a
+length-determined fault would have fitted.
+
+The measurement to run next is therefore a **rate comparison**, not a boundary
+search: same `fault_rate.py` protocol, varying one axis at a time —
+`ASYNC_SCHED=1/0`, `k=3/5/7`, `FULL/PIECEWISE/eager`, and `DFlash2 vs MTP vs
+none`. A rate that moves with an axis identifies the subsystem; a rate that does
+not move exonerates it. `compute-sanitizer` remains worth running, but a
+probabilistic fault may not reproduce under memcheck's serialising execution, so
+the rate comparison should run first.
