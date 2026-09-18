@@ -4415,3 +4415,73 @@ Three checks, all host-side or read-only, in increasing strength:
 If confirmed, the fix is to bind from the **persistent** tables exactly as site A
 does (or to size the captured tensor to `max_num_reqs`), and the requalification
 matrix from §38.2/§41.3 applies.
+
+## 43. Self-correction: the mamba state-copy subsystem is INACTIVE in the faulting arms
+
+§38.10 established `mamba_cache_mode` is `"none"` (the 0.27.1 default) in all four
+faulting arms. I then built §41 and §42 on the mamba state-copy machinery without
+first checking whether that machinery runs in `"none"` mode. **It does not**, and
+the checks below are what should have preceded that analysis.
+
+Every entry point into it is gated:
+
+| code | gate | active in our arms? |
+| --- | --- | --- |
+| `MambaHybridModelState.preprocess_state` -> `_ensure_align_ctx` -> `initialize_from_forward_context` (site A) | `if not self._align_mode: return` | **no** |
+| `postprocess_mamba_all` (site B) | `if self.cache_config.mamba_cache_mode == "all"` | **no** |
+| `postprocess_align` (site C) | align only; `mamba_bufs.postprocess_align is None` otherwise | **no** |
+| `mamba_utils.preprocess_mamba(...)` | `if self.cache_config.mamba_cache_mode == "align"` | **no** |
+
+and the runner's own comment states the consequence plainly: *"without it,
+`mamba_bufs.postprocess_align` is None and the staging buffers don't exist."*
+
+So in `mode="none"`: `MambaSpecDecodeGPUContext` is never created, no
+`state_base_addrs` / `block_table_ptrs` are ever captured, and the fused
+`postprocess_mamba_fused_kernel` never launches. My §41.1 claim that it "runs every
+step in non-align mode" was **wrong** -- I inferred that from a docstring about the
+*align* path rather than from the call-site gates.
+
+**Consequences:**
+
+1. §42's hypothesis (three call sites racing with different block tables) is
+   **not testable as stated**, because only site A is align-gated and the other two
+   require `mode="all"` or align. It is retained only as a *latent* defect: the
+   route is real if `align` or `all` is ever enabled, and the mismatch between the
+   capture block's comment ("the persistent 2D block-table tensor ... stable for the
+   engine's lifetime") and sites B/C passing `get_device_tensor(num_reqs)` is a
+   genuine inconsistency worth reporting upstream -- but it is **not** this fault,
+   since `PREFIX_CACHE=1` (which enables align) faulted at the same rate and the
+   same request indices as `PREFIX_CACHE=0` (§32.14);
+2. the GDN/Mamba speculative state-copy family is **excluded** as the cause, not by
+   argument but because its code does not execute in the faulting configuration;
+3. this narrows the field further than §41/§42 suggested: the fault is in the
+   **speculative path that runs in `mode="none"`**, which is the target forward plus
+   the persistent speculative buffers the runner stages every step
+   (`slot_mappings_by_group`, `self.mamba_state_idx` as data passed through,
+   `num_accepted_tokens`, the spec-token and draft-id buffers, and the
+   `input_batch` metadata), and *not* in the state-copy kernels.
+
+This is the fourth time in this investigation that a plausible mechanism turned out
+to be gated off (align precopy §38.10, graph state §38, chunk count §35, and now the
+mamba copy path). The reusable lesson, now recorded as the standing rule for this
+work: **before analysing any code path, read its gate and confirm from the running
+engine's effective config that the gate is open.** Every one of these four was
+"plausible, well-evidenced, and not executing".
+
+### 43.1 What this leaves as the live target
+
+With the mamba copy machinery and align mode both excluded, the fault lies in
+machinery that is active under `mamba_cache_mode="none"` **with speculation on**:
+
+- the target forward's attention path with the persistent speculative metadata
+  (`slot_mapping`, block tables, `num_accepted_tokens`, `num_spec_tokens`);
+- the runner's per-step staging buffers that exist only when a speculator is
+  present (the `len(scheduler_output.scheduled_spec_decode_tokens) > 0` branch);
+- the drafter's own buffers -- though MTP and DFlash2 faulting identically (§34)
+  argues against anything drafter-specific and for the shared staging.
+
+The next step is therefore to enumerate the buffers allocated **only when
+`num_spec_tokens > 0`** and check each for a size or lifetime that depends on
+`num_reqs` or sequence geometry, since that is the shape the evidence demands
+(a per-request resource, exhausted on a length- and concurrency-dependent
+boundary, read after free, in unmapped space, at a deterministic offset).
