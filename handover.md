@@ -4627,3 +4627,61 @@ configuration A/B.
 
 The review's requalification matrix (DFlash2 + MTP, C1/C4, >=10x the old period at
 16K, 65K/126K, FULL/eager, zero Xid) applies once a candidate fix exists.
+
+### 44.6 Prediction 1 confirmed by code read: which buffers can be excluded
+
+```python
+if self.num_spec_tokens:
+    self.draft_token_ids_event        = torch.Event()      # spec-only
+    self.draft_token_ids_copy_stream  = torch.cuda.Stream()
+    self.draft_token_ids_cpu          = torch.empty((max_num_reqs, num_spec_tokens), ...)
+    if self.use_async_scheduling:
+        self.valid_sampled_token_count_event       = torch.Event()      # async AND spec
+        self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+        self.valid_sampled_token_count_cpu         = torch.empty(max_num_reqs, ...)
+```
+
+versus
+
+```python
+self.prev_num_draft_tokens = self._make_buffer(...)                   # unconditional
+self.prev_positions        = self._make_buffer(max_num_reqs, dtype=torch.int64)
+```
+
+So the gating is:
+
+| buffer | spec only | async only | exists in both scheduling modes? |
+| --- | --- | --- | --- |
+| `valid_sampled_token_count_{event,copy_stream,cpu}` | yes | **yes** | **no** |
+| `draft_token_ids_{event,copy_stream,cpu}` | yes | no | yes |
+| `prev_positions`, `prev_num_draft_tokens` | no (unconditional) | no | yes |
+| `num_accepted_tokens`, `num_computed_tokens` | no | no | yes |
+
+**`ASYNC_SCHED=0` did not change the fault rate (§32.11), and in that mode the
+`valid_sampled_token_count_*` tensors are never allocated at all.** A fault that
+survives async scheduling being off therefore cannot be a read of those tensors.
+That eliminates the buffer set that §44.2's table had listed first, and it is a
+clean elimination rather than a rate argument -- the objects do not exist.
+
+The candidate set is now exactly the **speculation-gated, mode-independent**
+persistent buffers:
+
+```
+draft_token_ids_cpu   (max_num_reqs x num_spec_tokens, int64, PINNED CPU)
+prev_positions        (max_num_reqs, int64)
+prev_num_draft_tokens (max_num_reqs)
+num_accepted_tokens   (max_num_reqs)
+num_computed_tokens   (max_num_reqs)
++ the input_batch per-row metadata
+```
+
+Two of these are worth noting as unusual: `draft_token_ids_cpu` is a **pinned CPU
+buffer of shape `(max_num_reqs, num_spec_tokens)`** copied asynchronously on a
+dedicated stream, and `prev_positions` is `int64` (not int32 like its siblings).
+A CPU-pinned buffer written by an async copy on its own stream and read for
+structured outputs is a plausible place for a lifetime/ordering defect, and it is
+the only buffer here whose ownership is split across two memory spaces.
+
+The next check, still code-only: for each of the five, find every write and every
+read, and identify one whose read can occur a step after its row was recycled --
+with the period set by request count, as §35 measured.
