@@ -2489,3 +2489,50 @@ argument, which is the natural place to attach such an epilogue.
 The immediate prerequisite is 26.3: without a working 120K+ path there is no way
 to measure whether any of this moves the long-context number the ceiling table is
 about.
+
+## 27. Milestone artifacts committed (2026-09-17)
+
+Sections 19-26 were documentation only; the bridge, the tests and the harnesses
+lived outside the repository. They are now tracked under `bench/int8-g64/`
+(31 files) with `bench/int8-g64/README.md` as the entry point, committed as
+`dac97b5 bench: ship the INT8-G64 integration, tests and A/B harnesses`.
+
+What moved in, and what was changed on the way:
+
+- **bridge**: `int8_g64.py` is the corrected module (page-local views, strided
+  E38 loader, tensor-core prefill route) that was actually deployed and
+  measured. `make_runtime_candidate.py` was **not** shipped: it rebuilt that
+  module from the stale `vllm_int8_g64_module.py`, so it was circular once the
+  corrected file became the source of truth. The stale root-level
+  `vllm_int8_g64_module.py` stays untracked for the same reason;
+- **patches**: `int8-g64-vllm.patch` had its header rewritten to describe the
+  page-local ABI instead of the contiguous global planes that 20.1 disproved.
+  `int8-g64-triton.patch` was **regenerated from the real diff** between the
+  pristine `triton_attn.py` and the deployed one, because the tracked copy was an
+  early revision missing the prefill route, the graph-safety fix and the E38
+  gate fix. It now applies cleanly and reproduces the deployed file
+  byte-for-byte (verified with `patch -p1` against the pristine source);
+- **E38 adapters**: both the pristine `v7_verifier_e38_int8.orig.cu` and the
+  batch-fixed `v7_verifier_e38_int8.cu` are shipped, so the `constexpr int
+  Batch = 2` defect behind 21.1 is visible as a diff inside the repository;
+- **tests**: the ten component tests that produced the recorded evidence,
+  including `test_e38_decode_sweep.py` (the RED->GREEN for the batch defect) and
+  `test_e38_orig_adapter_sweep.py` (the control that proved it pre-existing);
+- **harnesses**: `ab_bench.py`, `ab_split_bench.py`, `ab_quality.py`,
+  `ab_quality_compare.py`, `step_profile.py`, `bounded_correctness_probe.py`;
+- **deploy**: `apply_int8_g64_remote.py`, `deploy_int8_g64_layout_fix.py`, and
+  the two units as `.service.example` with `VLLM_API_KEY` blanked, matching the
+  tracked `deploy/*.service.example` convention.
+
+Path hygiene applied before committing: lab-absolute paths were removed from the
+scripts (they now resolve relative to the file, and take the NInfer tree from
+`VLLM_INT8_G64_NINFER_ROOT` with an explicit error if unset); the `pixelml-bench`
+API key literal was replaced by the repo's existing convention
+(`VLLM_API_KEY`, else `api_key.txt`, else empty); and a secret scan over the
+whole set is clean. `NInfer` kernel headers remain external by design and are
+supplied through that env var.
+
+The README states the frozen status up front, carries the kill-gate table, and
+documents the measurement protocol the two shared-engine faults force (one
+context per fresh engine; distinct text per request) so the earlier spurious
+in-process sweeps are not repeated.
