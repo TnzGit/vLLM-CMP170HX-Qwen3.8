@@ -2536,3 +2536,88 @@ The README states the frozen status up front, carries the kill-gate table, and
 documents the measurement protocol the two shared-engine faults force (one
 context per fresh engine; distinct text per request) so the earlier spurious
 in-process sweeps are not repeated.
+
+## 28. Correction: the "shared-engine bugs" were a measurement-protocol error, not an engine bug
+
+Sections 25.3 and 26.3 recorded two engine faults and concluded that measurement
+had to use one context length per engine lifetime. Bisection this session shows
+that conclusion was **wrong in its attribution**, and the cost was real: the
+over-conservative protocol forced a full engine restart (40-175 s) per row.
+
+### 28.1 What actually reproduces, and what does not
+
+On a **freshly started** engine, none of the following fault, on either arm:
+
+| probe | result |
+| --- | --- |
+| sequential context changes 4K -> 8K -> 16K -> 32K in one process | OK, 0 faults |
+| 3 and 8 repeated full-context prefills at 16K, distinct text | OK, 0 faults |
+| 3 byte-identical prompts repeated at 16K | OK, 0 faults |
+| a full `--reps 3` context sweep across five contexts | OK (see 28.3) |
+
+The fault is therefore **not** triggered by changing context length, by repeating
+a long prefix, or by repeating prefills — the three hypotheses in 25.3/26.3.
+
+### 28.2 The real rule: a crashed engine stays poisoned
+
+What reproduces is a fault **only on an engine that has already faulted**. After
+one `illegal memory access`, the same engine returns stale failures for
+everything afterwards — a probe that reports `faults=0` on the next request is
+seeing the *previous* crash, not a new one. That is why the earlier session kept
+"reproducing" the fault: it was measuring on an already-corrupted engine, and
+each new crash made the next row invalid. It is also why the first clean
+reproduction attempt at 3 prefills failed while 8 prefills passed — the 8-prefill
+run had a fresh engine and the 3-prefill run did not.
+
+The protocol that is actually justified:
+
+- **restart the engine after any fault**, before trusting another measurement;
+- a single engine may otherwise run a whole multi-context, multi-repetition
+  sweep, so the per-row cold start is unnecessary;
+- `CUDA_LAUNCH_BLOCKING=1` must not be set for timing or sweep work: it breaks
+  CUDA-graph replay and will manufacture exactly this fault. It was left in a
+  drop-in during the earlier bisection and caused a full false-negative sweep
+  (see 28.4).
+
+`one_engine_sweep.sh` implements this: one engine, many contexts, restart only
+when a row faults.
+
+### 28.3 Confirmation
+
+One engine, G64 arm, `--reps 3` per context, distinct text per request:
+
+```
+ctx=4096   prefill 1762.6 tok/s   decode 8.090 ms/step
+ctx=16384  prefill 1429.3 tok/s   decode 8.087 ms/step
+ctx=32768  prefill 1151.4 tok/s   decode 13.569 ms/step
+ctx=48000  prefill  978.7 tok/s   decode 8.977 ms/step
+```
+
+All four completed on one engine with zero faults, where the old protocol would
+have paid four cold starts.
+
+### 28.4 A configuration-pollution mistake worth recording
+
+A sweep labelled "G64" actually ran the **control** configuration: a leftover
+`repro262.conf` drop-in set `CTX=long`, which overrides the unit's own `CTX=g64`,
+and it also carried `CUDA_LAUNCH_BLOCKING=1`. The run therefore measured
+`TRITON_ATTN`/`int8_per_token_head` under launch blocking, faulted on every row
+after the first, and would have been read as "G64 fails at 16K+". The lesson is
+mechanical: **a drop-in silently overrides the main unit's `Environment=`, so
+verify the effective environment before every sweep**, not the file you think you
+edited:
+
+```
+systemctl --user show <unit> -p Environment | tr ' ' '\n' | grep -E 'CTX|G64|SPEC'
+```
+
+### 28.5 Open: within-context variance is not yet explained
+
+The same sweep shows large spread across the three repetitions at a fixed
+context — at 32K, `[8.528, 14.416, 13.569]` ms/step. That is 1.7x, far above the
+±0.3% seen in the earlier fresh-engine runs, and it is why the 32K row's median
+(13.569) disagrees with the fresh-engine measurement (10.200). Until that spread
+is explained — warmup ordering, block reuse, or DFlash acceptance drift — a
+multi-context sweep on one engine is **not** yet a substitute for the per-context
+protocol for *timing*, even though it is now clearly sufficient for *liveness*.
+This is the next thing to settle before resuming the A/B.
