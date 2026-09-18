@@ -4485,3 +4485,84 @@ The next step is therefore to enumerate the buffers allocated **only when
 `num_reqs` or sequence geometry, since that is the shape the evidence demands
 (a per-request resource, exhausted on a length- and concurrency-dependent
 boundary, read after free, in unmapped space, at a deterministic offset).
+
+## 44. Narrowed live target: the async spec-decode row-correction path (2026-09-18)
+
+Following §43, the search is restricted to machinery active under
+`mamba_cache_mode="none"` **with speculation**. One switch and one code path stand
+out, both of which are `True`/taken only in this configuration.
+
+### 44.1 The switch
+
+```python
+self.use_async_spec_decode = (
+    self.use_async_scheduling and self.num_spec_tokens > 0
+)
+```
+
+`--async-scheduling` is on and `num_spec_tokens=7`, so this is **True** in every
+faulting arm and **False** in the `SPEC=none` arm that is clean (§34). That is
+precisely the discrimination the evidence demands: a boolean that is on exactly
+when the fault is present.
+
+Note the interaction with §32.11: `ASYNC_SCHED=0` did **not** change the fault rate.
+That is consistent -- `use_async_spec_decode` requires *both* async scheduling and
+speculation; turning off async scheduling turns this flag off, so if the fault were
+*inside* this path, `ASYNC_SCHED=0` should have cured it. It did not. So the live
+suspect is not `use_async_spec_decode` itself but the **persistent per-row state
+that this path maintains and that other paths also read**, i.e. the buffers below,
+which exist whenever speculation is on regardless of the async switch.
+
+### 44.2 The buffers, and why they fit every measured property
+
+The async spec-decode correction consumes previous-step, row-indexed state:
+
+```python
+self.prev_positions.copy_to_gpu(num_reqs)
+self.prev_num_draft_tokens.copy_to_gpu()
+update_num_computed_tokens_for_batch_change(
+    self.num_computed_tokens,
+    self.num_accepted_tokens.gpu[:num_reqs],
+    self.prev_positions.gpu[:num_reqs],
+    self.valid_sampled_token_count_gpu,
+    ...
+)
+```
+
+with the comment *"corrects rows that had drafts from `valid_sampled_token_count`"*,
+and `valid_sampled_token_count_gpu` / `_cpu` / `_event` / `_copy_stream` allocated
+only when `self.use_async_spec_decode` (line 1352 region, allocated at 908-930).
+
+These are the only structures found so far that satisfy **all** of:
+
+| property | how these fit |
+| --- | --- |
+| speculation required (§34) | allocated only when a speculator exists |
+| drafter-independent (§34) | shared by DFlash2 and MTP; nothing drafter-specific |
+| per-request resource (§35) | `[:num_reqs]` row-indexed, `max_num_reqs`-sized, reused every step |
+| period depends on length and concurrency (§35) | row occupancy and step count set how fast the rows are recycled |
+| read after free, unmapped space (§40) | row index into a reused persistent buffer, consumed a step later |
+| deterministic offset (§38.9/§40.3) | `row_index * row_stride`, a product of small integers and a fixed stride |
+| 4 KiB aligned (§38.5) | offsets are element/tensor-sized multiples, not arbitrary |
+
+### 44.3 The specific check to run next
+
+The hypothesis is now testable as a **size/consistency assertion**, not a kernel
+change:
+
+1. at allocation, record `max_num_reqs`, the buffer's shape and `data_ptr()`;
+2. each step, record `num_reqs`, `prev_req_id_to_index`, the largest row index
+   consumed, and the buffer's `data_ptr()` (to catch reallocation);
+3. flag any step where a consumed row index is `>= max_num_reqs`, or where
+   `prev_req_id_to_index` maps to an index past the buffer, or where the
+   `valid_sampled_token_count_*` tensors disagree in length with the rows read.
+
+This is a **host-side, per-step** check on Python-side metadata (`num_reqs`,
+`prev_req_id_to_index`), so it cannot perturb GPU timing inside a step, and the
+`data_ptr()` comparison catches reallocation. It requires no kernel instrumentation
+and no new A/B.
+
+Given §43's lesson (four plausible mechanisms turned out to be gated off), the first
+action is to confirm from the running engine that this path is genuinely taken --
+`use_async_spec_decode` is `True` and `update_num_computed_tokens_for_batch_change`
+is called -- before analysing it further.
