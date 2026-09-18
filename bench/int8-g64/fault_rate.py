@@ -72,6 +72,18 @@ def log_lines(path):
                               text=True).stdout.split()[0])
 
 
+def restart_cmd(cmd, log, wait_s=180):
+    """Restart a directly-launched engine and wait for readiness."""
+    subprocess.run(["bash", "-c", cmd], capture_output=True)
+    for _ in range(wait_s // 5):
+        time.sleep(5)
+        tail = subprocess.run(["tail", "-n", "80", log],
+                              capture_output=True, text=True).stdout
+        if "Application startup complete" in tail:
+            return True
+    return False
+
+
 def restart(unit, log, wait_s=150):
     subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True)
     time.sleep(3)
@@ -97,11 +109,18 @@ def main() -> None:
     ap.add_argument("--key", default=_api_key())
     ap.add_argument("--log", required=True)
     ap.add_argument("--unit", default="triton-int8-control-8002.service")
+    ap.add_argument("--restart-cmd", default="",
+                    help="shell command that stops and restarts the SAME engine "
+                         "configuration being measured; required when the arm was "
+                         "launched directly rather than via a systemd unit, because "
+                         "restarting the unit would silently change the config "
+                         "(e.g. --max-num-batched-tokens) and invalidate the arm")
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--lengths", required=True)
     ap.add_argument("--repeats", type=int, default=8)
     ap.add_argument("--decode-tokens", type=int, default=8)
     ap.add_argument("--tag", default="rate")
+    ap.add_argument("--ready-wait", type=int, default=300)
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -127,7 +146,13 @@ def main() -> None:
             except Exception as e:
                 fault += 1
                 detail.append(f"fault:{type(e).__name__}")
-                if not restart(args.unit, args.log):
+                # A crashed engine keeps returning stale failures, so a fault must
+                # be followed by a restart of the SAME configuration before the
+                # next sample is meaningful (handover 28.2). Only the fault path
+                # restarts; on success there is nothing to do.
+                restarted = (restart_cmd(args.restart_cmd, args.log, args.ready_wait)
+                             if args.restart_cmd else restart(args.unit, args.log))
+                if not restarted:
                     print("  engine restart FAILED -- aborting", flush=True)
                     table[L] = {"ok": ok, "fault": fault, "rate": None,
                                 "detail": detail, "aborted": True}
