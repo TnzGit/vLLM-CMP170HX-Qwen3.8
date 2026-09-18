@@ -5981,3 +5981,18 @@ custom kernel is now safe to use, and it exists to avoid leaving SMs idle when
 about choosing a workaround, but about confirming there is no performance regression
 from the widened multiply (there should be none: the multiply happens once per KV
 tile, not per element).
+
+### 57.4 Long-context legs also pass
+
+```
+65K  x 12 : 12/12 OK, 0 faults
+126K x  8 :  8/8  OK, 0 faults
+xid31_delta = 0   (81 -> 81)
+```
+
+So the fix holds at the contexts where the fault was originally observed, not only at
+16K. Combined with §57: **16K x 120, 65K x 12, 126K x 8, zero faults, zero Xid delta.**
+
+126K is the context this investigation opened with, and 65K is where the control arm's
+decode measurement first tripped -- both now serve cleanly with the custom verify
+kernel enabled.
