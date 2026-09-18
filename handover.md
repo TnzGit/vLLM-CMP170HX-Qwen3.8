@@ -4204,3 +4204,57 @@ It is:
 `bench/int8-g64/match_fault_seg.py` performs the naming step for any fault VA and
 map; it should be run on the next fault before the engine is restarted, since
 restarting destroys the map that makes the answer meaningful.
+
+### 40.3 The claim is verified, and the gap is the same 1990.316 MiB
+
+Verified that "unmapped" is not an artefact of an incomplete map
+(`bench/int8-g64/verify_unmapped.py`), using the same-process map of 390 segments:
+
+```
+mapped span               0x0000010007e00000 .. 0x000070661ee00000  (112.399 TiB)
+fault VA                  0x00007054a39af000
+segments containing it    0
+nearest segment below     0x000001001c400000 (44 MiB)  -- 116 TiB away, irrelevant
+nearest segment above     0x0000705520000000 (5192 MiB) -- starts 1990.316 MiB above
+enclosing hole            116,740,112 MiB
+```
+
+Two independent things now agree on the same number: §38.7 measured the fault VA
+sitting **1990.316 MiB below the lowest recurrent-state pool** using a *different*
+engine generation's bases, and this same-process match finds the nearest segment
+above the fault VA is **the 5192 MiB pool, starting 1990.316 MiB above it.** The
+identical gap from two independent measurements means the displacement is real and
+reproducible, not a coincidence of one run's layout.
+
+So the faulting address is consistently:
+**exactly 1990.316 MiB below the base of the recurrent-state pool region, in
+unmapped space, page-aligned.**
+
+A gap of that exact size, below the pools, in every generation is a strong
+indication of a **specific structure that the code expects to find at a fixed
+offset below the pools** and that is not there -- e.g. a companion buffer
+(workspace, scratch, or metadata region) that is allocated adjacent to the pools in
+some configuration and absent in this one, with an address computed by the same
+arithmetic either way.
+
+### 40.4 What to check next, precisely
+
+Given the size and the position, the highest-value check is a **static read of the
+address arithmetic that produces the 1990.316 MiB / 0x39af000 displacement** rather
+than more runtime probing. Concretely: search the attention/GDN/spec code for
+subtractions or negative offsets applied to a pool base, and for a buffer whose
+size or presence depends on configuration (`block_size`, `max_num_seqs`, page size,
+spec tokens) in a way that could leave a 1.94 GiB hole where something is expected.
+
+Two candidate structures fit a ~1.94 GiB region adjacent to a 5192 MiB pool:
+
+- the **draft/spec KV** or a second pool for a different group, present when the
+  layout differs (e.g. a `MambaSpec` group and an attention group with different
+  page sizes) -- the repo's own `hybrid-kv-groups-v2-cudagraph.patch` and
+  `hybrid-sw-block-promote.patch` touch exactly this area;
+- a **workspace sized from the pool**, allocated once and referenced by an offset
+  that assumes adjacency.
+
+This is now a code-reading task with a numeric target (`1990.316 MiB`, `0x39af000`,
+`5192 MiB` pools), which is cheaper and more likely to converge than further
+engine-level bisection. The runtime evidence is sufficient to aim it.
