@@ -5821,3 +5821,92 @@ fault, and the fault may still be elsewhere. It is however the first concrete in
 quantity found that exceeds its allocation, and the device-side guard in
 `inject_spec_attn_guard_device.py` checks exactly it (`pidx` vs `part_n`), so the next
 run distinguishes the two possibilities rather than arguing about them.
+
+## 56. ROOT CAUSE FOUND: int32 multiply overflow in `_spec_attn_partial`
+
+The definitive filtered memcheck run returned the location, and the arithmetic checks
+out exactly.
+
+### 56.1 The finding
+
+```
+========= Invalid __global__ read of size 1 bytes
+=========     at _spec_attn_partial+0x7160 in spec_decode_attn.py:109
+=========     by thread (64,0,0) in block (0,0,0)
+=========     Access to 0x7a8a039af040 is out of bounds
+=========     and is 2,086,997,952 bytes before the nearest allocation
+              at 0x7a8a80000000 of size 5,444,206,592 bytes
+========= ERROR SUMMARY: 2048 errors
+```
+
+Line 109 is the K load of the **INT8** KV path (`read of size 1`):
+
+```python
+blk    = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
+slot   = pos % BLOCK_SIZE
+k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
+k      = tl.load(k_ptrs, mask=k_ok[:, None], other=0.0)      # line 109 -- faults here
+```
+
+### 56.2 The arithmetic is an int32 wrap, and it is exact
+
+```
+fault VA                        0x7a8a039af040
+nearest allocation (KV pool)    0x7a8a80000000  size 5,444,206,592 bytes
+offset below                    -2,086,997,952 bytes
+2**31 - 2,086,997,952        =   60,485,696 = 0x39af040   <- the fault VA's low bits
+```
+
+An address of the form `base - (2**31 - low_bits)` is the signature of a **signed
+int32 product that wrapped negative**. The pool is **5,444,206,592 > 2**31**, and with
+a byte stride around 898,560 (block_size 864 x Hkv 4 x row 260) the overflow begins at
+block id ~**2,390 of ~6,059** -- roughly 40% of valid block ids.
+
+`blk` comes from an **int32** block table, so `blk * stride_kb` is evaluated in int32
+and wraps.
+
+### 56.3 This explains every measured property at once
+
+| observation | explanation |
+| --- | --- |
+| needs long context (16K/57K/64K, never small) | a high block id must actually be referenced, which needs enough KV |
+| periodic in requests, period set by length | depends on which block ids the allocator hands out |
+| concurrency changes the period (32.14) | changes the order/ids allocated |
+| `SPEC=none` clean, DFlash2 and MTP identical (34) | only the speculative verify kernel does this multiply |
+| 4 KiB aligned with constant low bits `0x39af000` (45.2) | the wrapped offset is deterministic arithmetic |
+| lands in unmapped VA (40) | the wrapped address is ~1.9 GiB below the pool |
+| host-side guards all clean (46, 50, 52) | **the block id is perfectly valid**; the multiply overflows |
+| `k`/`async`/graph/MBT not implicated | none of them changes this arithmetic |
+
+This is the first hypothesis consistent with all of the evidence, and it is confirmed
+by the sanitizer's own address arithmetic rather than by inference.
+
+### 56.4 The fix
+
+One operand widening, and the same codebase already does it in the GDN path
+(`v1/worker/mamba_utils.py`) with an explicit comment about this exact failure mode:
+
+> "Widen block ids to int64 before they reach `block_id * state_block_stride` below:
+> state_block_stride can exceed 2**31 bytes for large mamba caches, and Triton would
+> otherwise do the multiply in int32 and wrap."
+
+`_spec_attn_partial` was missing it. Applied as
+`patches/spec-decode-attn-int64-block-id.patch`:
+
+```python
+blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE,
+              mask=k_ok, other=0).to(tl.int64)
+```
+
+The `k_ptrs` / `v_ptrs` / scale-pointer multiplies all inherit int64 through `blk`.
+This is a root-cause fix: no index changes, no buffer grows, no clamp, and NSEG is
+untouched. The block id was always valid; only the multiplication overflowed.
+
+### 56.5 What remains
+
+Requalification, to the matrix fixed in advance in `bench/int8-g64/requalify.py`
+(120 requests at 16K, i.e. 10x the measured 12-request period, plus DFlash2 and MTP,
+C1 and C4, 65K/126K, FULL and eager, asserting a zero Xid 31 **delta**). A single
+clean run is not evidence -- three retracted models in this investigation came from
+exactly that -- so the period multiple and the zero-Xid assertion are both required.

@@ -1,0 +1,64 @@
+Widen the spec-decode verify kernel's block id to int64 before the stride multiply.
+
+ROOT CAUSE. `_spec_attn_partial` (v1/attention/ops/spec_decode_attn.py) builds its K/V
+addresses as
+
+    blk    = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
+    k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + ...
+    v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + ...
+    k      = tl.load(k_ptrs, mask=k_ok[:, None], other=0.0)
+
+`blk` is loaded from an int32 block table, and `stride_kb` / `stride_vb` are byte
+strides (block_size * num_kv_heads * (head_dim + pad)). The KV pool on this
+configuration is 5,444,206,592 bytes, i.e. greater than 2**31, so for any block id
+above roughly 2,390 of ~6,059 the product `blk * stride_kb` exceeds 2**31 and Triton
+evaluates the multiply in int32, wrapping it negative. The resulting address lands
+BELOW the pool:
+
+    compute-sanitizer: Invalid __global__ read of size 1 bytes
+      at _spec_attn_partial+0x7160 in spec_decode_attn.py:109
+      Access to 0x7a8a039af040 is out of bounds and is 2,086,997,952 bytes before
+      the nearest allocation at 0x7a8a80000000 of size 5,444,206,592 bytes
+
+The GPU then raises Xid 31 / MMU FAULT_PDE on an unmapped read, which is the
+long-context illegal memory access this project has been chasing: periodic in the
+request count with a length-dependent period, requiring speculative decoding, and
+reproducing identically for DFlash2 and MTP.
+
+The same codebase already guards this exact class in the GDN path
+(v1/worker/mamba_utils.py):
+
+    # Widen block ids to int64 before they reach `block_id * state_block_stride`
+    # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
+    # and Triton would otherwise do the multiply in int32 and wrap.
+    dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+
+`_spec_attn_partial` was missing that widening.
+
+WHY THIS IS THE ROOT-CAUSE FIX, NOT A WORKAROUND. The block id itself is valid:
+host-side guards on the block table width, block ids, and negative ids on active
+columns were all clean (785 checks each, handover 50/52), and widening the operand
+changes no index and no allocation size. It is the multiplication that overflows.
+This is not a clamp, not a larger buffer, and not a reduced NSEG.
+
+Apply from the installed vllm package directory:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/spec-decode-attn-int64-block-id.patch
+
+Written against vLLM 0.27.1.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -102,7 +102,12 @@
+     for t in range(t0, t1):
+         pos = t * TILE + tl.arange(0, TILE)
+         k_ok = pos < kv_len
+-        blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
++        # Widen to int64 BEFORE the stride multiply: stride_kb/stride_vb are
++        # byte strides and this KV pool is > 2**31 bytes, so an int32 product
++        # wraps negative and addresses below the pool (handover 56). Same
++        # widening the GDN path already applies in v1/worker/mamba_utils.py.
++        blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE,
++                      mask=k_ok, other=0).to(tl.int64)
+         slot = pos % BLOCK_SIZE
+         k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+         v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
