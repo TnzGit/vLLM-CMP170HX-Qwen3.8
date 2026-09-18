@@ -5996,3 +5996,26 @@ So the fix holds at the contexts where the fault was originally observed, not on
 126K is the context this investigation opened with, and 65K is where the control arm's
 decode measurement first tripped -- both now serve cleanly with the custom verify
 kernel enabled.
+
+### 57.5 MTP leg passes too
+
+```
+MTP (k=7) 16K x 24 : 24/24 OK, 0 faults
+mtp_xid31 delta    = 0   (81 -> 81)
+```
+
+The fault was drafter-independent (DFlash2 and MTP faulted identically, §34), so the
+fix had to be shown to hold for both drafters. It does.
+
+Cumulative verification of the int64 widening:
+
+| leg | requests | result | Xid 31 delta |
+| --- | --- | --- | --- |
+| DFlash2, 16K (10x the 12-request period) | 120 | 120/120 OK | 0 |
+| DFlash2, 65K | 12 | 12/12 OK | 0 |
+| DFlash2, 126K | 8 | 8/8 OK | 0 |
+| MTP, 16K | 24 | 24/24 OK | 0 |
+
+Still to run: C4 (concurrency changes the period, §32.14) and the FULL graph mode
+(the verification so far used eager, which is the stricter case per §38, but FULL is
+what production runs).
