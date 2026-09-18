@@ -4258,3 +4258,80 @@ Two candidate structures fit a ~1.94 GiB region adjacent to a 5192 MiB pool:
 This is now a code-reading task with a numeric target (`1990.316 MiB`, `0x39af000`,
 `5192 MiB` pools), which is cheaper and more likely to converge than further
 engine-level bisection. The runtime evidence is sufficient to aim it.
+
+## 41. The address arithmetic to audit, named (2026-09-18)
+
+Following the numeric target from §40 into the code produced a specific, short list
+of unguarded address computations. This is the actionable output of the address
+work, and it replaces further engine-level bisection.
+
+### 41.1 The always-on path: `MambaPostprocessGPUContext`
+
+`v1/worker/mamba_utils.py` `postprocess_mamba_fused_kernel` runs **every step in
+non-align mode**, i.e. in all four faulting arms, on a `(num_reqs, total_states)`
+grid. Through `_copy_mamba_state_block` it performs, with **no bounds check**:
+
+```python
+state_base_addr  = tl.load(state_base_addrs_ptr  + state_idx)
+state_block_stride = tl.load(state_block_strides_ptr + state_idx)
+group_idx        = tl.load(state_group_indices_ptr + state_idx).to(tl.int64)
+group_base_addr  = tl.load(block_table_ptrs_ptr + group_idx)      # <-- table pointer
+block_table_base = group_base_addr.to(ptr int32) + bt_row_idx * block_table_stride_req
+dest_block_id    = tl.load(block_table_base + dst_col).to(tl.int64)
+dst_addr         = state_base_addr + dest_block_id * state_block_stride
+```
+
+Three distinct ways this reaches unmapped memory, all matching §40:
+
+1. **`state_idx` out of range** -- `state_idx` indexes *eight parallel arrays*
+   (`state_base_addrs`, `state_block_strides`, `state_elem_sizes`,
+   `state_inner_sizes`, `state_conv_widths`, `state_group_indices`,
+   `state_dim_row_count`, `state_dim_row_stride`). An out-of-range `state_idx` reads
+   a garbage `state_base_addr` *and* a garbage `group_idx` from adjacent memory, so
+   the very next load dereferences an arbitrary pointer. This is the single most
+   direct route to an unmapped address.
+2. **`group_idx` out of range** -- `block_table_ptrs` has only
+   `len(mamba_group_ids)` entries (8 here), so a wrong `group_idx` reads a pointer
+   from beyond that small array and then treats it as a block-table base.
+3. **`dest_block_id` unbounded** -- `state_base_addr + dest_block_id * state_block_stride`
+   with no check that `dest_block_id` is a valid physical block. The source comments
+   show the authors already hit an int32 overflow here for large mamba caches and
+   widened to int64 (the `dest_block_id` comment), so this arithmetic is known-fragile.
+
+The same `_copy_mamba_state_block` body is shared with
+`precopy_mamba_align_fused_kernel`, but that one is gated behind `_align_mode`,
+which §38.10 showed is **inactive** in these arms, so the **postprocess** caller is
+the one to instrument.
+
+### 41.2 Lifetime angle
+
+`MambaSpecDecodeGPUContext.create()` allocates every metadata array with
+`torch.zeros(...)` at construction and defers filling them to
+`initialize_from_forward_context` (guarded by `is_initialized`, "idempotent - only
+executes once"). `state_base_addrs` is therefore bound to the pool tensors **once**.
+If any later code path reallocates or replaces the pool tensors (a re-profile, a
+second KV allocation, a graph-capture-time reallocation) while `state_base_addrs`
+still holds the old addresses, every copy reads the previous generation's memory --
+which is precisely the stale-pointer/`FAULT_PDE` behaviour §40 established, and
+would explain why the fault repeats at a constant offset while the pools themselves
+move between processes.
+
+This is a concrete, checkable hypothesis that does not need the GPU:
+
+- confirm whether `initialize_from_forward_context` can run more than once, and
+  whether `is_initialized` is ever reset;
+- compare the `state_base_addrs` values against the live pool `data_ptr()`s after a
+  full run -- if they diverge, the binding is stale at runtime;
+- check whether `total_states = num_layers * num_state_types` is computed from the
+  same `kv_cache_config` that the addresses are later read from, since a mismatch
+  between the two would make `state_idx` run past the end of the arrays (hazard 1).
+
+### 41.3 Status
+
+The IMA line now has a named subsystem, a named kernel, three named unguarded
+address computations, and a numeric signature (`1990.316 MiB` below the pools,
+page-aligned, unmapped). The runtime evidence is complete enough that the next
+productive step is code reading plus the *cheap* host-side checks in 41.2, not more
+GPU bisection. The review's requalification matrix (DFlash2 + MTP, C1/C4, >=10x the
+old period at 16K, 65K/126K, FULL/eager, zero Xid) applies once a candidate fix
+exists.
