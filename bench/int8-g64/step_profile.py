@@ -73,16 +73,26 @@ BUCKETS = [
 
 
 def _api_key() -> str:
+    """Resolve the serving key.
+
+    Order: VLLM_API_KEY, then api_key.txt (the repo's convention), then the
+    local test key the isolated 8002 units themselves set. That last fallback is
+    not a secret -- it is written in plain text into the unit files -- but
+    without it these harnesses 401 against the lab units, which is a regression
+    the first version of this helper introduced.
+    """
     env = os.environ.get("VLLM_API_KEY")
     if env:
         return env
     for cand in ("api_key.txt", os.path.join(os.path.dirname(__file__), "api_key.txt")):
         try:
             with open(cand, encoding="utf-8") as f:
-                return f.read().strip()
+                val = f.read().strip()
+            if val:
+                return val
         except OSError:
             continue
-    return ""
+    return "pixelml-bench"
 
 
 def prompt_for(ctx: int) -> str:
