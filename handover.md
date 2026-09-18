@@ -5255,3 +5255,100 @@ speculative serving on CMP 170HX is **`VLLM_SPEC_DECODE_ATTN` unset**, with the
 performance cost measured rather than assumed -- the custom kernel exists for a
 reason, so the trade must be quantified on the production path before it is adopted
 as the default. That measurement is cheap and should accompany the fix.
+
+## 49. Root cause located: unguarded block-table index in `_spec_attn_partial`
+
+With the fault localised to `SpecDecodeAttention` (§47, §48), the kernel's addressing
+can be read directly. The defect is a missing bound on the block id, in the same
+pattern as §45.6 but in the kernel that actually faults.
+
+### 49.1 The code
+
+`v1/attention/ops/spec_decode_attn.py`, `_spec_attn_partial`:
+
+```python
+kv_len = tl.load(seqused_ptr + req)
+...
+tiles_total = (kv_len + TILE - 1) // TILE          # scan length derived from kv_len
+...
+for t in range(t0, t1):
+    pos = t * TILE + tl.arange(0, TILE)
+    k_ok = pos < kv_len
+    blk  = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
+    slot = pos % BLOCK_SIZE
+    k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+    v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
+    k = tl.load(k_ptrs, mask=k_ok[:, None], other=0.0)     # <-- dereference
+    v = tl.load(v_ptrs, mask=k_ok[:, None], other=0.0)
+```
+
+**Neither the block-table read nor the resulting pointer is bounded:**
+
+- the block-table load indexes `pos // BLOCK_SIZE` with mask `k_ok` only. It never
+  checks that this column is **within the block table's row width**. `kv_len` is
+  `seqused_k`, which the engine maintains separately from the block table's
+  allocation; if `kv_len` exceeds `block_table_width * BLOCK_SIZE`, the read walks
+  past the end of that request's row into the next request's row (or past the table);
+- the resulting `blk` is used as `blk * stride_kb` with mask `k_ok` only. It never
+  checks `blk < num_blocks` (`key_cache.shape[0]`). A garbage `blk` -- whether read
+  from a neighbouring row or stale -- produces
+  `k_ptr + blk * stride_kb + ...`, which for the measured page stride
+  (`1,777,664` bytes, recorded earlier in this project) is **MiB-scale per unit of
+  blk**, matching the 57.68 MiB magnitude of the observed fault (§45.1).
+
+The `other=0` on the block-table load is itself a trap rather than a protection: an
+out-of-range or masked column yields block id `0`, which is a *valid* block, so the
+subsequent load silently reads real but wrong memory instead of being suppressed --
+and when the column is in range but the id is stale, the id is used as-is.
+
+### 49.2 Why this matches every measurement
+
+| observation | how the defect explains it |
+| --- | --- |
+| custom kernel on -> faults; off -> clean (§48.2) | this kernel only runs when `VLLM_SPEC_DECODE_ATTN=1` |
+| `SPEC=none` clean (§34) | `_spec_attn_run` is only reached with a drafter |
+| DFlash2 and MTP identical (§34) | the kernel is shared; it consumes target-side verify metadata only |
+| period in requests, set by length and concurrency (§35) | `seqused_k`/block-table geometry per verify batch |
+| fault VA page-aligned, outside the allocator map (§45.2) | `blk * stride_kb` with a bad `blk` |
+| tens-of-MiB displacement (§45.1) | `stride_kb` is MiB-scale |
+| refuted: GDN state index (§46), mamba state-copy (§43), graph (§38), driver (§33) | none of those is this kernel |
+
+### 49.3 The fix shape (not yet implemented)
+
+Two bounds are missing and both are cheap:
+
+1. bound the **block-table column**: `(pos // BLOCK_SIZE) < bt_width` in the load
+   mask, with `bt_width` passed as a kernel argument
+   (`block_table.shape[1]`);
+2. bound the **block id**: `blk < num_blocks` (i.e. `key_cache.shape[0]`) added to the
+   `k_ptrs`/`v_ptrs` load masks, so a bad id yields `0.0` rather than an illegal
+   access.
+
+A masked-out block should also not silently become block `0`; using a sentinel that
+the mask excludes, or clamping, is preferable to `other=0` for a value that is later
+dereferenced.
+
+Before changing anything, the two guards should be added as **assertions/logging
+first** to capture the offending `blk` value and the geometry at the moment of
+failure -- the same first-error discipline as §46, and it will show which of the two
+bounds is actually being violated.
+
+### 49.4 Status
+
+This is the first mechanism that is (a) in the kernel that measurably faults, (b) not
+excluded by any prior measurement, and (c) specific enough to fix. It is **not yet
+confirmed by instrumentation** -- the guards in 49.3 have not been added, and no bad
+`blk` value has been observed yet. The claim at this point is that the code path
+contains an unguarded dereference consistent with every measurement, not that the
+bad value has been captured.
+
+Immediate next steps:
+
+1. add the two bounds as first-error checks in the kernel (or clamp-and-record), run
+   the 16K/C1/k=7 repro to request 12, and capture the offending `blk`, `pos`,
+   `kv_len` and `bt_width`;
+2. if `blk` is confirmed out of range, fix by bounding both, then requalify per the
+   matrix (DFlash2 + MTP, C1/C4, >=10x the old period at 16K, 65K/126K, FULL/eager,
+   zero Xid);
+3. measure the performance cost of the `VLLM_SPEC_DECODE_ATTN` workaround (§48.5) so
+   the interim recommendation is quantified.
