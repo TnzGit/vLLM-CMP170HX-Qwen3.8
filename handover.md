@@ -5592,3 +5592,20 @@ Prediction to test, from the kernel's own comment ("FA2 does not split the KV se
 when max_seqlen_q > 1, leaving most SMs idle"): the fallback cost should **grow with
 context length**. If it does not, the workaround is close to free and should be
 adopted immediately; if it does, the number belongs in the interim recommendation.
+
+### 52.5 Operational note: the memcheck driver must not carry a short timeout
+
+The first driver invocation was wrapped in `timeout 3000` (50 minutes), inherited from
+the earlier fast runs. Under memcheck the run needs ~4 hours, so it was killed after 2
+of 12 requests and ~40 minutes were spent for no result. Two lessons:
+
+- **do not reuse a timeout from the non-instrumented protocol** -- memcheck is ~40x
+  slower per request here (~20 min vs ~30 s), so any timeout calibrated on the normal
+  path is wrong by that factor;
+- the sanitized **engine** survives the driver being killed (it is a separate process),
+  so the driver can be relaunched without paying the ~6 minute instrumented startup
+  again -- the run resumed at request 3 rather than restarting.
+
+The driver now runs un-timed from `/tmp/drive_sanitized.sh`, with
+`/tmp/await_sanitizer.sh` watching for the first finding or termination and writing
+`/tmp/sanitizer_result.txt`.
