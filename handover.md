@@ -5609,3 +5609,45 @@ of 12 requests and ~40 minutes were spent for no result. Two lessons:
 The driver now runs un-timed from `/tmp/drive_sanitized.sh`, with
 `/tmp/await_sanitizer.sh` watching for the first finding or termination and writing
 `/tmp/sanitizer_result.txt`.
+
+## 53. Memcheck reproduced the fault and counted 2067 errors — but the print quota was eaten by a benign warning
+
+The filtered memcheck run **worked**: the engine took its illegal access after 10
+successful requests (request 11 under instrumentation, vs 12 without -- instrumented
+execution shifts it slightly, which is expected and does not affect the diagnosis),
+and the sanitizer reported
+
+```
+========= ERROR SUMMARY: 2067 errors
+========= ERROR SUMMARY: 2066 errors were not printed. Use --print-limit option to adjust the number of printed errors
+```
+
+So **at least one real memory error was detected**, and 2066 more were suppressed by
+`--print-limit 1`.
+
+### 53.1 The one printed "error" was not a memory error
+
+The single slot allowed by `--print-limit 1` was consumed by a benign API warning:
+
+```
+========= CUDA API Error: cudaVersion argument (13041) exceeds the driver version (13030)
+```
+
+The venv ships CUDA 13.0 libraries against a 13.0.30 driver, so this fires at startup
+and -- with a limit of 1 -- used up the entire quota. The 2066 memory errors were never
+written to the log, so **this run yields a count but no location**.
+
+### 53.2 The fix, and the lesson
+
+`--report-api-errors no` stops API warnings from consuming the error budget, and a
+slightly larger `--print-limit` keeps several memory errors in the log even if
+something else prints first. The lesson generalises: **a print budget of 1 is fragile
+whenever the tool can emit unrelated first messages**, and this is the same class of
+mistake as the earlier configuration traps -- the instrument ran, produced a real
+answer, and the answer was thrown away by a setting nobody checked.
+
+Also worth recording: the sanitizer engine's `RuntimeError: CUDA driver error: an
+illegal memory access was encountered` at teardown is the *same* downstream artefact
+seen in every traceback from the beginning (the error surfacing at a later
+synchronise). With memcheck the informative output is the sanitizer log, not the
+Python traceback.
