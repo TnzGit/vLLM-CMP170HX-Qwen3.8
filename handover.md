@@ -2621,3 +2621,129 @@ is explained — warmup ordering, block reuse, or DFlash acceptance drift — a
 multi-context sweep on one engine is **not** yet a substitute for the per-context
 protocol for *timing*, even though it is now clearly sufficient for *liveness*.
 This is the next thing to settle before resuming the A/B.
+
+## 29. Benchmark-infrastructure corrections (review feedback, 2026-09-18)
+
+Three corrections to what this session recorded. The first two are outright
+errors in the harnesses and are fixed in `bench/int8-g64/`.
+
+### 29.1 "ms/step" was actually ms per output token
+
+`ab_split_bench.py` computed
+
+```python
+dec_n = full["s"] - pre["s"]; dec_n = completion_tokens - 1
+decode_ms = dec_t / dec_n
+```
+
+`completion_tokens - 1` is the number of **generated output tokens**, not the
+number of DFlash verify passes. DFlash2 accepts ~3.3-3.4 tokens per target pass
+(the repo's own table below), so the reported figure is
+**milliseconds per output token** and the claim in 25.2 that "ms/step is
+independent of DFlash acceptance" is **wrong** — it is exactly the metric
+acceptance moves.
+
+This does **not** change the freeze decision: the A/B gap was measured on the
+same end-to-end quantity for both arms, and 10-20% slower user-visible decode is
+sufficient reason not to rewrite the allocator. But it does invalidate the
+stronger claim that "the native s8 compute path did not pay off": that cannot be
+concluded from an end-to-end number, because a faster target pass with worse
+acceptance would produce the same reading. Whether G64's target pass is itself
+faster is **unmeasured**.
+
+`bench/int8-g64/spec_bench.py` replaces it and reports the three quantities that
+move independently:
+
+```
+ms per output token        (what a user feels)
+ms per target verify pass  (kernel efficiency)
+accepted tokens per pass   (proposal efficiency)
+```
+
+with `target_passes_per_100_out` and the raw `drafted/accepted` counters read
+from the server's own `SpecDecoding metrics` log lines.
+
+### 29.2 step_profile.py could not profile anything
+
+It wrapped the HTTP request in a client-side `torch.profiler`. A client process
+only sees CUDA work it submits itself; the vLLM engine runs the kernels in a
+separate worker, so the trace was empty of the kernels the script claimed to
+attribute. The reference breakdown in `docs/cmp170hx-mixed-fp8-engineering.md`
+is unaffected (it was produced properly), but shipping this script implied it
+could be reproduced this way, which is false.
+
+Rewritten: it now either `--drive-only` (send a warmed long generation so a
+profiler started elsewhere has work to measure) or `--summarize <trace.json>`
+(bucket kernels from a trace captured in the engine process). The docstring
+states both supported capture routes — vLLM's own
+`--profiler-config.profiler=torch --profiler-config.torch_profiler_dir`, or
+`nsys profile` around the server — and the `--help` path errors out rather than
+pretending to profile. The old file is kept as `step_profile_TODO_BROKEN.py`.
+
+### 29.3 "production FP8 control" was conflating two different stacks
+
+25.2 and 26.2 measured `CTX=long` (`TRITON_ATTN` + `int8_per_token_head`) and
+called it the production control. That is a real, current recipe and a fair
+control for the G64 arm — but it is **not** the same as this PR's
+`CTX=cmp-mixed-fp8` route (FlashInfer FP8 target KV + static FP8 q8 split-KV
+verifier), and that latter stack has long-context records this session's wording
+wrongly cast doubt on:
+
+| input | segments | decode tok/s | accepted tok/step | verifier ms/pass |
+| --- | --- | --- | --- | --- |
+| 126K | 16 | 54.2 | 3.42 | 62.8 |
+| 126K | 32 | 68.2 | 3.41 | 50.0 |
+| 250K | 16 | 32.5 | 3.38 | 103.3 |
+| 250K | 32 | 42.2 | 3.28 | 77.5 |
+
+(`docs/cmp170hx-mixed-fp8-engineering.md`, qualified with zero preemptions.)
+
+So the accurate statement is: **the `CTX=long int8_per_token_head + DFlash2`
+qualification path is what faults above ~64K, not the card's ability to serve
+long context.** 26.3's "not measurable" applies to that path only. The
+`cmp170hx-mixed-fp8-full-256k` route remains a working long-context research
+platform and should be used so performance work does not stall behind this bug.
+
+### 29.4 "it needs speculative decoding" was overclaimed
+
+The evidence matrix was `70K SPEC=none` PASS, `70K SPEC=dflash2` PASS,
+`66K SPEC=dflash2` FAIL — which cannot establish speculation as a *sufficient*
+trigger. Corrected wording: the fault has so far been observed **only** in
+speculative configurations, and a non-speculative 70K control passes, but
+DFlash2 at 70K also passes, so speculation is not proven sufficient.
+
+### 29.5 What the review changes about the plan
+
+Accepted, and it reorders the next steps:
+
+1. **Fix the infrastructure first** (29.1, 29.2) — done in this commit;
+2. **Long-context IMA**: exact-token residue sweep (the repo already has the
+   right primitive, `bench/context_ab.py:exact_prompt_ids`, because a previous
+   bug in this repo broke at one prompt length in 128); then spec-source
+   bisection `DFlash2 vs MTP vs none`; then `ASYNC_SCHED=1/0`; then
+   `FULL/PIECEWISE/eager`; then a pre-fault state dump
+   (`seq_len`/`positions`/`slot_mapping`/`block_table` tail/`num_spec_tokens`/
+   accepted/scheduled draft IDs/workspace shape/graph desc). Compute Sanitizer
+   memcheck is the right tool for a CUDA OOB and should be installed rather than
+   substituted with more configuration bisection;
+3. **Do not let the IMA block performance work** — use the known-good
+   mixed-FP8 256K service as the long-context research platform in parallel;
+4. First performance experiment after that is **gate_up-only W4A8-INT8 Marlin**,
+   not Marlin+SwiGLU fusion: the repo already carries
+   `marlin-int8-negative-scales.patch` and `marlin-int8-layer-select.patch`, and
+   `VLLM_MARLIN_INPUT_DTYPE=int8` is the upstream-supported route on
+   non-SM89/SM12x. At the 126K split (Marlin 13.219 ms of a 30.426 ms step), a
+   20% Marlin win is ~8.7% whole-step;
+5. Then a DFlash `k=3/5/7` sweep on `accepted/pass x pass time`, since
+   speculation changes only proposal efficiency and a 3.4 -> 3.8 acceptance gain
+   is worth ~12% output throughput with no kernel change;
+6. **Marlin+SwiGLU fusion is demoted**, and 26.4's "the `bias` argument is the
+   natural hook" was half wrong: bias is `C[n] += bias[n]`, whereas SwiGLU needs
+   the gate and up halves (17408 apart in a 34816-wide output) in the same
+   program. That is paired gate/up output scheduling, i.e. a kernel redesign, and
+   E40's own data shows the win comes from the changed dataflow, not from
+   removing a few-microsecond activation kernel. Measure the standalone
+   `silu_and_mul` share first; if it is microseconds, epilogue fusion has almost
+   no headroom and only the paired-schedule redesign is worth anything.
+7. Verifier micro-optimisation (E43) stays parked unless a fresh long-context
+   profile puts verifier attention back above ~50% of the step.

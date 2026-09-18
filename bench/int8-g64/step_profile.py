@@ -1,70 +1,88 @@
 #!/usr/bin/env python3
 """Whole-step kernel attribution for the production path.
 
-The repo already has one authoritative profile
-(`docs/cmp170hx-mixed-fp8-engineering.md`, 126K: verifier partials 42.2% / target
-Marlin GEMMs 43.4% / GatedDeltaNet 3.7% / combine 0.4% / other 10.3%). This
-harness reproduces that breakdown so any change can be measured against it, and
-extends it with the numbers that decide the next target:
+STATUS: this drives the server; it does NOT itself capture GPU kernels.
 
-  * per-kernel total time and share over a decode window;
-  * the top Marlin shapes with call counts, since the profile above found
-    `M=16,N=34816,K=5120` (64 calls) and `M=16,N=5120,K=17408` (64 calls)
-    dominating;
-  * how much of the step is *not* attention and *not* Marlin, i.e. the fusion
-    headroom the review points at.
+An earlier revision of this file wrapped the HTTP request in a client-side
+``torch.profiler`` and claimed to reproduce the reference breakdown. That cannot
+work: ``torch.profiler`` only sees CUDA work submitted by *its own* process, and
+the vLLM engine runs the kernels in a separate worker process. The client
+profiler therefore records nothing useful, and the numbers it appeared to
+produce were not the server's kernels.
 
-Method: drive the server with one long generation at a chosen context while a
-torch profiler window covers the steady-state decode, then attribute CUDA kernel
-time by name. torch.profiler with CUDA activity is enough for per-kernel totals
-and does not need nsys.
+Use one of the two mechanisms below instead. Both run inside the engine worker,
+which is the only place the kernels are visible.
 
-Usage: step_profile.py --port 8002 --ctx 126000 --tag prod-126k
+Option A -- vLLM's built-in torch profiler (preferred; no extra tooling)
+-----------------------------------------------------------------------
+Start the engine with profiling enabled, drive it, then stop profiling and read
+the trace from ``<dir>/capture_traces``:
 
-Runs on the serving host: it imports torch only to read the profiler's
-device-time fields, and needs no GPU of its own.
+    --profiler-config.profiler=torch \\
+    --profiler-config.torch_profiler_dir=/path/to/prof_dir
+
+The API exposes start/stop endpoints when the server is built with them; the
+simplest reliable driver is to start the server with the config above, send the
+requests with ``--drive-only`` below, then stop the server, which flushes the
+trace. Attribute kernels from the trace with ``--summarize <trace.json>``.
+
+Option B -- Nsight Systems around the server process
+----------------------------------------------------
+    nsys profile -o prof --trace=cuda --duration=30 \\
+        <the server's ExecStart command>
+
+then ``nsys stats --report cuda_gpu_kern_sum prof.nsys-rep``. This is the
+lowest-effort route when the server is already running under systemd, because
+nsys can attach to the PID.
+
+This script keeps the two jobs that are safe from the client side:
+  * ``--drive-only``: send a warmed long generation at a chosen context so a
+    profiler started elsewhere has something to measure;
+  * ``--summarize``: bucket kernels from a torch-profiler trace into the same
+    categories as the reference profile in
+    ``docs/cmp170hx-mixed-fp8-engineering.md`` (126K: verifier partials 42.2% /
+    target Marlin GEMMs 43.4% / GatedDeltaNet 3.7% / combine 0.4% / other 10.3%).
+
+Usage:
+  step_profile.py --port 8002 --ctx 126000 --tag prod-126k --drive-only
+  step_profile.py --summarize trace.json
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import sys
 import time
 import urllib.request
 from collections import defaultdict
-
-import torch
-
-
-import os as _os
-
-
-def _api_key() -> str:
-    """Follow the repo convention: VLLM_API_KEY, else api_key.txt, else empty."""
-    env = _os.environ.get("VLLM_API_KEY")
-    if env:
-        return env
-    for cand in ("api_key.txt", _os.path.join(_os.path.dirname(__file__), "api_key.txt")):
-        try:
-            with open(cand, encoding="utf-8") as f:
-                return f.read().strip()
-        except OSError:
-            continue
-    return ""
-
-
 
 FILLER = ("The quick brown fox jumps over the lazy dog. "
           "Pack my box with five dozen liquor jugs. ")
 
 BUCKETS = [
-    ("verifier_attention", re.compile(r"spec_attn|partial|combine|reduce|gqa|attention|flash|fmha|decode_i8", re.I)),
+    ("verifier_attention",
+     re.compile(r"spec_attn|partial|combine|reduce|gqa|attention|flash|fmha|decode_i8", re.I)),
     ("marlin_gemm", re.compile(r"marlin|gptq", re.I)),
     ("gdn_mamba", re.compile(r"gdn|mamba|conv1d|ssm|chunk", re.I)),
     ("draft_dflash", re.compile(r"dflash|draft|resample|selector", re.I)),
     ("norm_act", re.compile(r"rms|norm|silu|gelu|act_quant|quant", re.I)),
     ("sampler", re.compile(r"sample|softmax|topk|argmax|rejection|logprob", re.I)),
 ]
+
+
+def _api_key() -> str:
+    env = os.environ.get("VLLM_API_KEY")
+    if env:
+        return env
+    for cand in ("api_key.txt", os.path.join(os.path.dirname(__file__), "api_key.txt")):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return ""
 
 
 def prompt_for(ctx: int) -> str:
@@ -85,66 +103,73 @@ def call(port: int, key: str, prompt: str, max_tokens: int) -> dict:
     return {"s": time.perf_counter() - t0, "usage": out.get("usage", {})}
 
 
+def drive(args) -> None:
+    call(args.port, args.key, prompt_for(256), 4)      # discard
+    call(args.port, args.key, prompt_for(args.ctx), 16)  # warm the context
+    print(f"driving {args.max_tokens} tokens at ctx={args.ctx}; start your profiler now",
+          flush=True)
+    res = call(args.port, args.key, prompt_for(args.ctx), args.max_tokens)
+    print(json.dumps({"ctx": args.ctx, "wall_s": round(res["s"], 3),
+                      "usage": res["usage"]}), flush=True)
+
+
+def summarize(path: str) -> None:
+    """Bucket kernels from a torch-profiler chrome trace."""
+    with open(path, encoding="utf-8") as f:
+        tr = json.load(f)
+    events = tr.get("traceEvents", tr if isinstance(tr, list) else [])
+    per_kernel: dict[str, list] = defaultdict(lambda: [0.0, 0])
+    for e in events:
+        if e.get("ph") != "X" or e.get("cat") not in ("kernel", "Kernel", "cuda_runtime"):
+            continue
+        name = e.get("name", "")
+        dur = float(e.get("dur", 0.0))  # microseconds
+        if dur <= 0 or not name:
+            continue
+        per_kernel[name][0] += dur
+        per_kernel[name][1] += 1
+    if not per_kernel:
+        print("no kernel events found -- was the trace captured in the ENGINE process?",
+              file=sys.stderr)
+        raise SystemExit(2)
+    total = sum(v[0] for v in per_kernel.values())
+    buckets: dict[str, float] = defaultdict(float)
+    for name, (dur, _n) in per_kernel.items():
+        for label, rx in BUCKETS:
+            if rx.search(name):
+                buckets[label] += dur
+                break
+        else:
+            buckets["other"] += dur
+    print(f"total CUDA kernel time: {total / 1000.0:.3f} ms")
+    print(f"{'bucket':<22}{'ms':>10}{'share':>9}")
+    for label, dur in sorted(buckets.items(), key=lambda x: -x[1]):
+        print(f"{label:<22}{dur / 1000.0:>10.3f}{100.0 * dur / total:>8.1f}%")
+    print("\ntop kernels:")
+    for name, (dur, n) in sorted(per_kernel.items(), key=lambda x: -x[1][0])[:12]:
+        print(f"  {dur / 1000.0:9.3f} ms  x{n:<6} {name[:64]}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8002)
     ap.add_argument("--key", default=_api_key())
-    ap.add_argument("--tag", required=True)
-    ap.add_argument("--ctx", type=int, required=True)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--ctx", type=int, default=126000)
     ap.add_argument("--max-tokens", type=int, default=256)
-    ap.add_argument("--warm", type=int, default=64)
-    a = ap.parse_args()
-
-    call(a.port, a.key, prompt_for(256), 4)  # discard
-
-    from torch.profiler import profile, ProfilerActivity
-
-    # Warm the exact context first so the profile window contains steady-state
-    # decode rather than allocator/graph/kernel-selection work.
-    call(a.port, a.key, prompt_for(a.ctx), a.warm)
-
-    prof = profile(activities=[ProfilerActivity.CUDA], record_shapes=False)
-    prof.start()
-    res = call(a.port, a.key, prompt_for(a.ctx), a.max_tokens)
-    prof.stop()
-
-    events = prof.key_averages()
-    per_kernel = []
-    for e in events:
-        if e.device_type != torch.autograd.DeviceType.CUDA and not e.self_device_time_total:
-            continue
-        t = e.self_device_time_total  # microseconds
-        if t <= 0:
-            continue
-        per_kernel.append((e.key, t, e.count, getattr(e, "input_shapes", "")))
-    total = sum(t for _, t, _, _ in per_kernel)
-
-    buckets = defaultdict(float)
-    for name, t, _, _ in per_kernel:
-        for label, rx in BUCKETS:
-            if rx.search(name):
-                buckets[label] += t
-                break
-        else:
-            buckets["other"] += t
-
-    marlin = sorted([(n, t, c, s) for n, t, c, s in per_kernel
-                     if BUCKETS[1][1].search(n)], key=lambda x: -x[1])
-
-    row = {
-        "tag": a.tag,
-        "ctx": a.ctx,
-        "completion_tokens": res["usage"].get("completion_tokens"),
-        "wall_s": round(res["s"], 3),
-        "total_cuda_ms": round(total / 1000.0, 3),
-        "buckets_ms": {k: round(v / 1000.0, 3) for k, v in sorted(buckets.items(), key=lambda x: -x[1])},
-        "buckets_pct": {k: round(100.0 * v / total, 1) for k, v in sorted(buckets.items(), key=lambda x: -x[1])},
-        "top_kernels": [{"name": n[:70], "ms": round(t / 1000.0, 3), "calls": c}
-                        for n, t, c, _ in sorted(per_kernel, key=lambda x: -x[1])[:12]],
-        "top_marlin_shapes": [{"name": n[:60], "ms": round(t / 1000.0, 3), "calls": c}
-                              for n, t, c, _ in marlin[:6]],
-    }
-    print(json.dumps(row, indent=2), flush=True)
+    ap.add_argument("--drive-only", action="store_true",
+                    help="just drive the server so an external profiler has work to measure")
+    ap.add_argument("--summarize", default="",
+                    help="bucket kernels from a torch-profiler chrome trace")
+    args = ap.parse_args()
+    if args.summarize:
+        summarize(args.summarize)
+        return
+    if args.drive_only:
+        drive(args)
+        return
+    ap.error("choose --drive-only (client side) or --summarize <trace.json>; "
+             "this script cannot profile the engine from the client process")
 
 
 if __name__ == "__main__":
