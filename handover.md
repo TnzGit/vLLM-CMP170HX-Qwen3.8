@@ -3959,3 +3959,39 @@ fault VA, yields exactly `0x39af000` is the region being read out of range.
 
 Until that is done, no further configuration A/B should run; the address is
 already specific enough that instrumentation should aim at it directly.
+
+### 38.9 The fault address decomposes exactly: base(2 GiB-aligned) + 0x39af000
+
+Correcting a misreading in 38.7 and sharpening the result. The eight logged pools
+are **all `linear_attn` (GDN/Mamba) groups**, 5191.12 MiB each, 2 GiB-aligned,
+totalling 40.56 GiB -- they are the recurrent-state pool family, not the paged
+attention KV. Every one of their bases has **low 21 bits = 0**.
+
+Against that, the same-process fault VA decomposes exactly:
+
+```
+fault VA                      0x00007377a39af000
+fault VA - 0x39af000        = 0x00007377a0000000     <- 2 GiB-aligned
+lowest logged pool base     = 0x0000737820000000
+gap between them            = 1,990.316 MiB = 1.9437 GiB
+```
+
+So the faulting read is **an allocation base (2 GiB-aligned) plus `0x39af000`**, and
+that base lies 1.94 GiB below the lowest recurrent-state pool. Because *all* logged
+bases are 2 GiB-aligned and the low 21 bits of the fault VA are `0x1af000`, the
+`0x39af000` cannot be "an offset inside a logged pool" -- it is the offset into an
+allocation that was never logged.
+
+The four-generation repetition from 38.7 now reads differently and more usefully:
+the *whole* VA is not constant, but `va - (va & ~0x1FFFFF)` is, i.e. the fault
+recurs at a **fixed 2 MiB-page offset of `0x39af000`** in whichever allocation the
+allocator placed at that spot in each process. That is the signature of a
+**constant computed displacement** -- the same index arithmetic evaluated the same
+way every run -- landing in an allocation whose base moves.
+
+This is now a concrete, falsifiable target: find which allocation occupies
+`fault_va - 0x39af000` and the displacement `0x39af000` names the structure. Note
+`0x39af000` = 3,777,536 bytes, and that the recurrent-state reservation the
+launcher documents is ~0.098 GiB per `(k+2)` per request -- so the offset should be
+checked against the per-request slot stride of that pool rather than treated as an
+arbitrary number.
