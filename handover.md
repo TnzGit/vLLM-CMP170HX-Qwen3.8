@@ -5651,3 +5651,70 @@ illegal memory access was encountered` at teardown is the *same* downstream arte
 seen in every traceback from the beginning (the error surfacing at a later
 synchronise). With memcheck the informative output is the sanitizer log, not the
 Python traceback.
+
+## 54. Memcheck cannot intercept this fault, and the window-bisection detour is closed
+
+Two results, one technical and one methodological. Both are corrections of my own
+recent work.
+
+### 54.1 The windowed "finding" was not a memory error
+
+A windowed run (`--launch-skip 1200 --launch-count 800`) ended with:
+
+```
+========= Internal Sanitizer Error: The Sanitizer failed to handle a hardware exception.
+========= ERROR SUMMARY: 1 error
+```
+
+That is **memcheck failing to process the hardware exception**, not a detected memory
+error. There is no read/write, no size, no address and no PC, because none was
+produced. The same run instrumented 800 launches and reported **zero** memory errors,
+while the earlier full run reported 2067 "errors" -- which, on this evidence, were
+likely the same internal accounting rather than 2067 real invalid accesses.
+
+The technical reading: an MMU-level `FAULT_PDE` on an unmapped virtual address is a
+**hardware** exception, and memcheck's instrumentation does not necessarily intercept
+it as a per-access violation. So "run memcheck and read the first invalid access" may
+never yield a location for *this* class of fault, however long it runs.
+
+### 54.2 The bisection premise was refuted by its own data
+
+The windowed approach assumed errors were spread across launches at roughly constant
+density (inferred from `2067 errors / ~1570 matching launches = 1.3 per launch`). The
+measurements that premise implied:
+
+| window | instrumented launches | memory errors found |
+| --- | --- | --- |
+| 1..4 | 4 | 0 |
+| 5..204 | 200 | 0 |
+| 1201..2000 | 800 | 0 (one internal sanitizer error) |
+
+Zero across all three, while the full run reported 2067. The density model is
+therefore wrong: the errors are not per-launch, they are bound to the single fatal
+event. **Windowing cannot find a first error that only exists at the fatal access.**
+
+### 54.3 Methodological correction (the review is right)
+
+Trying to save hours kept changing the experiment's infrastructure, and each change
+introduced a way to invalidate a run:
+
+| change made to save time | how it invalidated the run |
+| --- | --- |
+| `timeout 3000` inherited from the fast protocol | killed a full run after 2 of 12 requests (~40 min wasted) |
+| `--print-limit 1` | consumed by a benign CUDA version warning; 2066 errors never printed |
+| `pgrep -f` cleanup | matched the invoking shell twice, killing the session and once the engine |
+| `--launch-skip`/`--launch-count` windows | built on a launch-density model the data refutes |
+
+None of these is a kernel defect; all of them are state added to the harness. The
+counter-productive pattern is **optimising the wrapper while the root cause is one
+step away**. The disciplined protocol from here is the boring one:
+
+```
+fresh engine -> exact 16K reproducer -> filter _spec_attn_partial only
+             -> no skip, no count, no timeout
+             -> wait for the first precise error
+```
+
+and the settings that matter are now fixed in one place: no timeout, 
+`--report-api-errors no` so a version warning cannot consume the print budget,
+`--print-limit 10`, and PID-only cleanup (no `pgrep -f`).
