@@ -2420,15 +2420,43 @@ fresh engine per context, 191 decode steps, greedy:
 Whole-request throughput at 4K (prefill included) reads 142-164 tok/s depending on
 prompt, which brackets the review's 161 "current" figure.
 
-### 26.3 New blocker: this configuration cannot serve 120K+
+### 26.3 New blocker: long-context decode faults above ~64K (partially characterised)
 
-A **single 120K request on a freshly started control engine** dies with
-`illegal memory access` (4 fault records), and the 126K/250K rows fail the same
-way. This is the production control arm, not INT8-G64, so it is unrelated to the
-frozen G64 work. Consequence: the 126K and 250K rows of the review's ceiling
+A single long request on the freshly started control engine dies with
+`illegal memory access` from roughly 66K upward; 126K and 250K fail the same way.
+This is the production control arm, not INT8-G64, so it is unrelated to the
+frozen G64 work. The pool is not the limit (1,137,362 tokens at
+`max_len=150000`). Consequence: the 126K and 250K rows of the review's ceiling
 table **cannot currently be measured on this isolated configuration at all**, and
-neither could a G64 comparison at those lengths. The pool is not the limit
-(1,137,362 tokens); something in the long-context verify path faults.
+neither could a G64 comparison at those lengths.
+
+What is established, by controlled single-variable tests:
+
+| probe | result |
+| --- | --- |
+| prefill-only at 70K and 85K | **OK** (0 faults, both in one process) |
+| decode at 63K | OK |
+| decode at 66K / 85K / 100K / 120K | fault (4 records each) |
+| decode at 70K, `SPEC=none` | OK |
+| decode at 70K, `SPEC=dflash2`, `max_len=150000` | OK |
+| decode at 120K, same config | fault |
+| `VLLM_SPEC_DECODE_ATTN_QMAX=64` | no change |
+| `SPEC_ATTN=0` (stock Triton attention) | no change |
+| `CUDA_LAUNCH_BLOCKING=1` present or absent | no change |
+| GDN `causal_conv1d` bounds patch | already applied in this runtime |
+
+So it is **decode-specific** (prefill at the same lengths is fine), it needs
+**speculative decoding** (70K passes with `SPEC=none`), and it is **not** in the
+split-KV verify kernel, not the KV dtype, not `QMAX`, and not the known GDN
+accept-bound bug. The 70K-with-dflash2 pass against a 66K fault means the trigger
+is not a clean context threshold, which is where the characterisation stops.
+
+The one probe that would settle it has not been run: **`compute-sanitizer` is not
+installed on this host** (`ncu` is), and the failure only reproduces at long
+context, so the practical route is `ncu --launch-count` over a failing 120K
+decode rather than more setting bisection. Until then this stays an open,
+partially-characterised blocker, and the honest status of the 126K/250K rows is
+"not measurable", not "measured and slow".
 
 This joins the two measurement faults already recorded in 25.3 (context-length
 change within one process; repeated identical long prefix) as the three
