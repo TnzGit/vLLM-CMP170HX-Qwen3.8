@@ -3513,3 +3513,85 @@ already-loaded `qweight`/`scales` straight off a real AutoRound `gate_up` /
 `down_proj` layer, which also removes the "is a random synthetic weight
 representative of production packing" variable. **Do not run it or quote numbers
 from it until then.** It is left in the tree as a skeleton with this caveat.
+
+## 36. W4A8 already exists in this repo — do the engine A/B, not a microbench (2026-09-18)
+
+Two findings while trying to build the review's M1 (gate_up-only W4A8-INT8 Marlin)
+as a single-kernel microbench. Both change the plan.
+
+### 36.1 The checkpoint is compressed-tensors, not GPTQ
+
+`marlin_shape_bench.py` was written to read `qweight` / `scales` / `qzeros` /
+`g_idx` off a real layer. It found nothing, because this checkpoint stores
+
+```
+model.language_model.layers.N.mlp.{gate,up,down}_proj.weight_packed
+model.language_model.layers.N.mlp.{gate,up,down}_proj.weight_scale
+model.language_model.layers.N.mlp.{gate,up,down}_proj.weight_shape
+```
+
+i.e. **compressed-tensors W4A16**, which vLLM repacks to Marlin at load time.
+There are therefore no GPTQ-format tensors to read, and a microbench cannot get
+"the real production packing" by opening the checkpoint -- it has to go through
+vLLM's own loader/repack. Combined with the three defects the review already
+found in that file (packing along the wrong axis, a `device=` argument that
+0.27.1's `gptq_marlin_repack` does not accept -- confirmed by signature
+inspection -- and an INT8 scale derived after the value was overwritten), the
+microbench is **not** the cheapest way to answer the question. It is left in the
+tree marked as superseded.
+
+### 36.2 The repo already implements gate_up-only W4A8, correctly
+
+`patches/marlin-int8-layer-select.patch` adds exactly the review's M1 shape:
+
+```
+VLLM_MARLIN_INPUT_DTYPE=int8
+VLLM_MARLIN_INT8_INCLUDE_RE=<regex>     # restrict the int8-activation path
+VLLM_MARLIN_INT8_EXCLUDE_RE=lm_head|mtp # default
+```
+
+matched against the **layer name**, plus the critical detail that the two new
+vars are registered in `envs.py` so they participate in the torch.compile cache
+key -- without which switching the selection replays a stale compiled graph and
+crashes with `KeyError: 'input_global_scale'`.
+
+And `patches/marlin-int8-negative-scales.patch` already fixes the AutoRound
+negative-group-scale corruption that the review cited as upstream #48905 (the
+kernel reads the requantised scales as *unsigned* int16, so every negative group
+becomes garbage while still benchmarking fine).
+
+So the experiment the review asked for is a **one-environment-variable engine
+A/B**, not a new kernel harness:
+
+```
+arm A (baseline): CTX=long, int8_per_token_head, W4A16                (measured)
+arm B (W4A8):     same + VLLM_MARLIN_INPUT_DTYPE=int8
+                  + VLLM_MARLIN_INT8_INCLUDE_RE='mlp\.(gate|up)_proj'
+```
+
+with the same quality instrumentation already built (`ab_quality.py`,
+`ab_quality_compare.py`) and the same decode protocol (`spec_bench.py`). That
+reuses the production packing, needs no ABI reconstruction, and directly measures
+the thing the review's gate is about ("gate_up kernel >=10%, whole-step >=8%
+after activation-quant overhead").
+
+### 36.3 Where the IMA line stands, for the record
+
+Since 33 the following are settled, each with matched measurement:
+
+- **driver/WPR2 clean** (33) -- not the cmpunlocker defect;
+- **speculation necessary**: `SPEC=none` 24/24 clean, DFlash2 and MTP both fault
+  at requests 12 and 24 (34);
+- **drafter not implicated**: two structurally different drafters, identical
+  period (34);
+- **`max_num_batched_tokens` not implicated**: 1024/2048/4096 give fault indices
+  11/12/11, so a 4x change in prefill chunk count moves nothing (35) -- this
+  refutes the chunk-count / model-runner-invocation model and, by the review's
+  own criterion, leaves a **per-request persistent resource in the shared
+  speculative path** as the target;
+- already excluded earlier: `k`, async scheduling, prefix-cache option, KV dtype,
+  attention backend, split-KV verifier.
+
+The next IMA step is instrumentation (pre-fault state dump with the cross-request
+persistent fields listed in 33.1), not more A/B. The next performance step is the
+W4A8 engine A/B above, which does not depend on the IMA.
