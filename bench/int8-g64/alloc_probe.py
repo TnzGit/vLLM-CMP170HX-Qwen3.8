@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """List every CUDA allocation in the engine process with base addresses.
 
-The fault address decomposes as `<2 GiB-aligned base> + 0x39af000` (handover
-38.9), and that base lies ~1.94 GiB below the lowest recurrent-state pool, so the
-owning allocation is one that `patches/log-alloc-bases.patch` does not cover. This
-enumerates everything, so the base can be named.
+The fault address' owning allocation is not covered by
+`patches/log-alloc-bases.patch`, so this enumerates every segment in the engine
+process.
+
+CORRECTION (handover 45): an earlier version claimed the fault decomposes as
+`<2 GiB-aligned base> + 0x39af000`. That is false -- `fault - 0x39af000` is not
+2 GiB-aligned -- and the constant was mis-stated besides. This script therefore no
+longer applies that heuristic; it dumps the map and lets `fault_va_invariants.py`
+report the invariants that actually hold (4 KiB alignment, a shared 2 MiB-page
+offset).
 
 Installed as a sitecustomize hook in the ENGINE process (a client process sees
 none of these). Two outputs:
@@ -66,22 +72,12 @@ def dump(out_path: str) -> None:
               f"active {r['active_mib']:10.3f} MiB  blocks {r['n_blocks']}",
               flush=True)
 
-    # Which segment, if any, has an internal offset of exactly FAULT_OFFSET such
-    # that base + FAULT_OFFSET is a plausible fault address? Report every segment
-    # whose extent could contain such an address.
-    print("\nsegments that could own a fault at base + 0x39af000:", flush=True)
-    hit = False
-    for r in rows:
-        lo = r["address"] + FAULT_OFFSET
-        hi = r["address"] + r["size"]
-        if lo < hi:
-            hit = True
-            print(f"  {r['address_hex']} + 0x39af000 = 0x{lo:016x}  "
-                  f"(inside, size {r['size_mib']:.3f} MiB)", flush=True)
-    if not hit:
-        print("  none -- the owning allocation is not a torch segment; it is "
-              "allocated outside the torch allocator (e.g. by vLLM directly)",
-              flush=True)
+    # The map is the evidence; the invariants are computed by
+    # fault_va_invariants.py. Deliberately no base+offset heuristic here, because
+    # the one previously used was arithmetically wrong (handover 45).
+    print("\nsegment map written. To interpret a fault address, first establish "
+          "which invariants it satisfies (fault_va_invariants.py); the only "
+          "supported ones are 4 KiB alignment and a 2 MiB-page offset.", flush=True)
 
 
 def _delayed(out_path: str, delay: float) -> None:

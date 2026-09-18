@@ -1,3 +1,6 @@
+"""CORRECTION (handover 45): the `base + 0x39af000` premise below is WITHDRAWN --
+that decomposition is arithmetically false. Kept only for the log-parsing half
+(recovering the segment table), which remains useful."""
 #!/usr/bin/env python3
 """Recover the segment map from the engine log and match the fault displacement.
 

@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Verify that a fault VA really is unmapped, rather than merely unmapped *in the
-torch segment list*.
+"""Quantify where a fault VA sits relative to the torch caching allocator's map.
 
-A strong claim ("the address is in unmapped space") should not rest on a map that
-might be incomplete. Two things can make it incomplete:
+THIS SCRIPT CANNOT ESTABLISH USE-AFTER-FREE. Read this before quoting its output.
 
-  * the probe dumped the process at a moment when some allocation did not yet
-    exist (it is dumped 120 s after start, after model load but before the run);
-  * torch.cuda.memory_snapshot() only reports the caching allocator's segments --
-    anything reserved by cuMemCreate/cuMemMap directly, or by a library outside
-    torch, would be absent.
+An earlier version concluded from a large hole that the address "was never mapped by
+this process". That is **too strong**, and handover 45 withdraws it. What the data
+supports is narrower:
 
-This script quantifies the claim from the map itself: where the VA sits relative to
-the nearest segment on each side, and how large the enclosing hole is. A VA in a
-multi-GiB hole bounded by large segments is convincingly unmapped; a VA a few MiB
-above a segment could simply be a missing small allocation.
+  * `torch.cuda.memory_snapshot()` sees only the **PyTorch caching allocator's**
+    segments. It is blind to raw `cudaMalloc`, `cuMemCreate`/`cuMemMap`, third-party
+    CUDA libraries, some custom-op workspaces, pinned/UVA mappings, and any lazy
+    allocation made after the dump. A hole in this map is a hole *in this map*;
+  * Xid 31 `FAULT_PDE` reliably tells us only that the final VA had no valid page
+    directory entry **at the moment of the access**. Both of these produce that:
+      - a stale pointer to freed/unmapped memory, and
+      - a live tensor base plus a bad block/state index multiplied by a large
+        stride, computing an address outside the allocation and into unmapped VA.
+    Only the first is use-after-free, and nothing here distinguishes them.
+
+Since the state/KV addressing in this stack is full of `base + id * stride`, the
+second explanation is at least as likely, and it needs no lifetime defect at all.
+
+So this script reports geometry (containment, distance to the nearest segment, hole
+size) and explicitly refrains from a verdict. Use it to say "the read landed outside
+the allocator's map"; do not use it to say "the pointer was freed".
 
 Usage: verify_unmapped.py <alloc_probe.json> <fault_va_hex>
 """
@@ -74,11 +83,10 @@ def main() -> None:
         a = min(above, key=lambda s: s["address"])
         hole = (a["address"] - (b["address"] + b["size"])) / 2**20
         print(f"\nenclosing hole size: {hole:.3f} MiB")
-        print("=> a hole of this size bounded by large segments is strong evidence "
-              "the address was never mapped by this process"
-              if hole > 1024 else
-              "=> the hole is small enough that a missing small allocation could "
-              "explain it; do not over-claim")
+        print("outside the torch caching allocator's map (hole size is reported for "
+              "context only -- it does NOT distinguish a freed pointer from a bad "
+              "index computed into unmapped VA, and it cannot see non-torch "
+              "allocations at all)")
 
 
 if __name__ == "__main__":

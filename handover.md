@@ -4685,3 +4685,155 @@ the only buffer here whose ownership is split across two memory spaces.
 The next check, still code-only: for each of the five, find every write and every
 read, and identify one whose read can occur a step after its row was recycled --
 with the period set by request count, as §35 measured.
+
+## 45. CORRECTION: the address arithmetic in 38.9/40.3 is wrong, and two conclusions are withdrawn
+
+This section supersedes 38.9, 40.2 and 40.3. They are kept above only as a record of
+the reasoning; **do not use their numbers or their decomposition.** Two independent
+errors, both caught by review.
+
+### 45.1 `0x39af000` was mis-stated by a factor of 16
+
+```
+0x39af000 = 60,485,632 bytes = 57.6836 MiB
+```
+
+§38.9 wrote "3,777,536 bytes". That decimal is `0x39a400` -- a transcription slip
+that survived into the text. The correct figure is **57.6836 MiB**.
+
+### 45.2 The decomposition `<2 GiB-aligned base> + 0x39af000` is arithmetically false
+
+```
+fault VA                    0x7377a39af000
+fault - 0x39af000         = 0x7377a0000000
+is that 2 GiB-aligned?    = NO, it sits 512.0 MiB past a 2 GiB boundary
+```
+
+So the claimed form does not hold even for the example it was derived from.
+
+What the observed addresses *do* share, recomputed properly across the four
+consecutive generations:
+
+| fault VA | mod 2 MiB | mod 2 GiB |
+| --- | --- | --- |
+| `0x77ca239af000` | `0x01af000` | `0x0239af000` |
+| `0x748b239af000` | `0x01af000` | `0x0239af000` |
+| `0x7377a39af000` | `0x01af000` | `0x0239af000` |
+| `0x7e34639af000` | `0x01af000` | **`0x0639af000`** |
+
+The invariant that actually holds is **4 KiB alignment** (72/72) and a shared
+**2 MiB-page offset of `0x1af000`**. The `mod 2 GiB` value is *not* shared -- three
+agree and the fourth differs -- so "a fixed 2 GiB-relative displacement" has no
+support and is **withdrawn**.
+
+The correct statement: *every observed fault address is 4 KiB-aligned and shares a
+2 MiB-page offset of `0x1af000`; the higher bits vary with the process's allocator
+layout.*
+
+### 45.3 "Stale/freed page mapping" is withdrawn down to what the evidence supports
+
+§40 concluded the fault reads freed memory. The reasoning rested on
+`torch.cuda.memory_snapshot()` showing the VA outside every segment, and on the
+(now withdrawn) fixed displacement.
+
+That reasoning is insufficient:
+
+- `memory_snapshot()` sees only the **PyTorch caching allocator's** segments. It is
+  blind to raw `cudaMalloc`, `cuMemCreate`/`cuMemMap`, third-party CUDA libraries,
+  some custom-op workspaces, pinned/UVA mappings, and anything allocated after the
+  dump. It is also a **snapshot**: it cannot show whether a mapping existed earlier;
+- Xid 31 `FAULT_PDE` tells us only that the final VA had no valid page directory
+  entry **at the moment of access**. Two very different mechanisms produce that:
+  1. a stale pointer to freed/unmapped memory (**use-after-free**), and
+  2. a live tensor base plus a bad block/state index multiplied by a large stride,
+     computing an address outside the allocation and into unmapped VA
+     (**bad address arithmetic**).
+
+Only (1) is a lifetime defect, and nothing measured here distinguishes them. Given
+that this stack's state and KV addressing is full of `base + id * stride`, (2) is at
+least as likely -- and notably, `base + bad_id * state_row_stride` with a
+MiB-scale row stride lands tens of MiB away, which is exactly the magnitude of the
+`57.68 MiB` figure that §45.1 mis-stated and §38.9 then over-interpreted.
+
+**Corrected statement:** *the dereference lands on an address with no valid PDE;
+use-after-free and bad-index address arithmetic are not yet distinguished.*
+
+### 45.4 Consequence: the target is the GDN speculative state addressing, not buffer lifetime
+
+§44.6 narrowed to five small persistent metadata buffers and proposed auditing their
+lifetimes. The review is right that this is the wrong abstraction, and §43's own
+exclusion supports it in a way I had misread:
+
+> what §43 excluded is the **Mamba align / state-copy machinery**
+> (`mamba_cache_mode` align or all). It did **not** exclude the ordinary
+> **GDN recurrent-state speculative forward**, which runs in `mode="none"`.
+
+That path satisfies every measurement at once:
+
+```
+shared speculative bookkeeping -> num_accepted_tokens
+block table -> spec_state_indices_tensor
+             -> causal_conv1d_update / fused_sigmoid_gating_delta_rule_update
+             -> GDN conv/recurrent state address
+```
+
+- `SPEC=none` does not take the multi-token spec GDN path -> **clean** (§34);
+- DFlash2 and MTP both do -> **fault identically** (§34);
+- `mamba_cache_mode="none"` skips align/state-copy -> consistent with §43, while the
+  GDN spec forward still runs;
+- a bad state/block id times a MiB-scale row stride produces a **tens-of-MiB**
+  displacement, matching the 57.68 MiB magnitude actually measured;
+- the read lands in unmapped VA, which `base + bad_id * stride` does without any
+  lifetime defect.
+
+**And there is a concrete unguarded dereference.** In `causal_conv1d_update`
+(`v1/attention/ops/...`), the first state read is masked **only** by
+`feature < dim`; it does **not** check
+`0 <= conv_states_input_coord < num_cache_lines`. A later load in the same kernel
+*does* carry a `conv_states_input_coord < num_cache_lines` mask, and the final target
+state store has no state-index range mask either. So one invalid entry in
+`spec_state_indices_tensor` is enough to compute
+
+```
+conv_state_ptr + bad_id * stride_conv_state_seq
+```
+
+and dereference unmapped memory, with nothing in the kernel to stop it.
+
+### 45.5 Revised priority, and the stop condition
+
+Priority, highest first:
+
+1. `spec_state_indices_tensor` containing an invalid/stale physical state block id;
+2. `num_accepted_tokens` / sequence metadata making the GDN kernel use a wrong state
+   column or offset;
+3. block-table / request-row ownership misaligned after a request is recycled;
+4. shared spec metadata row reuse;
+5. `_draft_token_ids` GPU source lifetime vs its copy stream;
+6. `draft_token_ids_cpu` pinned destination -- **low**: the sync chain
+   (`wait_stream` -> `copy_` -> `record` -> `synchronize`) is complete, it is a
+   **D2H** transfer while Xid reports a GPU `ACCESS_TYPE_VIRT_READ`, and the
+   structured-output path it serves is not exercised by this benchmark.
+
+Next step, exactly one round, per the review's stop condition:
+
+1. lightweight **device-side invariant check before any GDN state dereference**:
+   `0 <= state_id < num_state_rows`;
+2. also check `1 <= num_accepted_tokens <= k+1` and that `spec_query_start_loc` is
+   monotonic with its end within the real token count;
+3. on the **first** invalid value, write a **first-error record only** -- no sync, no
+   printf in the hot path -- fields: request ordinal, request slot, state_id,
+   max_state_rows, block-table row+col, accepted count, seq_len;
+4. smallest possible repro: **16K, C1, DFlash2 k=7, run to request #12**;
+5. if a bad `state_id` appears before #12 -> walk upward to
+   `block_table -> scheduler allocation/recycle` and fix the producer;
+6. if every state id is valid yet it still faults -> inspect the rest of the fused
+   GDN kernel's address arithmetic, then Compute Sanitizer on that kernel.
+
+Decision rule: if this round yields an invalid state id, continue to the producer; if
+Sanitizer localises it to the GDN kernel, continue; if all state metadata stays valid
+*and* the fault demonstrably does not fall in the GDN path, re-evaluate whether to
+park. No new broad hypothesis trees.
+
+`marlin_shape_bench.py` stays superseded and unrun; the W4A8 question is answered
+negatively at 4K (§37) and a longer context cannot rescue it (§37.1).

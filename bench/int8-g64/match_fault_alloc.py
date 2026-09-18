@@ -1,3 +1,6 @@
+"""CORRECTION (handover 45): the `base + 0x39af000` premise below is WITHDRAWN --
+that decomposition is arithmetically false. Superseded by match_fault_seg.py
+plus fault_va_invariants.py."""
 #!/usr/bin/env python3
 """Match the constant fault displacement 0x39af000 against the engine's segments.
 

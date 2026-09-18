@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Decide which engine allocation owns a given Xid 31 fault VA.
 
-The point of the whole allocation-map exercise: the fault VA decomposes as a
-2 GiB-aligned base plus a constant 0x39af000 (handover 38.9), and with the map of
-the *same* process the base can finally be named rather than guessed.
+The point of the whole allocation-map exercise: with the map of the *same*
+process, a fault VA can be resolved against real allocations.
+
+CORRECTION (handover 45): this previously assumed the VA was
+`<2 GiB-aligned base> + 0x39af000`. That is arithmetically false, so the script no
+longer subtracts a fixed constant. It reports containment, distance to the nearest
+allocation on each side, and -- because the code's own addressing is
+`base + block_id * stride` -- it also reports, for each allocation, the offsets
+that a small integer multiple of a plausible stride would produce, which is the
+form a real explanation must take.
 
 Verdicts, in order of usefulness:
 
@@ -50,10 +57,18 @@ def main() -> None:
             else:
                 print("  BELOW every mapped segment")
 
-        base_guess = va - FAULT_OFFSET
-        exact = [s for s in segs if s["address"] == base_guess]
-        print(f"  va - 0x39af000 = 0x{base_guess:016x}  "
-              f"is a known base: {'YES -> ' + str(exact[0]['size_mib']) + ' MiB segment' if exact else 'no'}")
+        # Report stride-product offsets instead of a subtracted constant: the
+        # addressing in this stack is base + id * stride, so a real explanation
+        # will be N * stride for a small N.
+        print("  candidate (offset, implied id at a few strides):")
+        if inside or below:
+            host = inside[0] if inside else below[0]
+            off = va - host["address"]
+            for stride_mib in (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 57.6836, 64.0):
+                stride = int(stride_mib * 2**20)
+                if stride:
+                    print(f"    offset {off / 2**20:12.4f} MiB / {stride_mib:7.4f} MiB "
+                          f"stride = id {off / stride:12.3f}")
         print()
 
 
