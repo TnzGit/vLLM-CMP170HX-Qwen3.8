@@ -3217,3 +3217,63 @@ draft depth, and it makes the remaining candidates sharper:
 `PREFIX_CACHE=1` is now the highest-value single experiment: it discriminates the
 prefix family, and if the fault still reproduces it collapses per-sample cost
 because repeated prefixes prefill almost for free.
+
+### 32.14 Prefix caching exonerated, and concurrency changes the period
+
+`PREFIX_CACHE=1` (which the launcher expands to `--enable-prefix-caching
+--mamba-cache-mode align`) at 16K, 16 requests: **1/16, fault at request 12** --
+identical to `PREFIX_CACHE=0`. So that configuration path is not the trigger.
+
+Note a limitation of that test as run: `fault_rate.py` gives every request
+distinct content, so prefix caching was enabled but never actually *hit*. The
+result therefore rules out the option's presence, not the "needs a cache hit"
+family. A follow-up that reuses one prefix is still the discriminating test for
+that family, and it would also collapse per-sample cost.
+
+**Concurrency changes the period.** `fault_rate_concurrent.py`, 16K, 4-way, 6
+rounds (24 requests):
+
+```
+round 0  ok=4   fault=0   ~65,536 tokens    55 s
+round 1  ok=8   fault=0   ~131,072 tokens  111 s
+round 2  FAULT (after ~131,072 tokens)
+round 3  ok=12  fault=4   ~196,608 tokens  267 s
+round 4  ok=16  fault=4   ~262,144 tokens  322 s
+round 5  FAULT (after ~262,144 tokens)
+```
+
+Faults landed after 8 and 16 successful requests, against **12 and 24** in the
+serial 1-way protocol at the same length. So the period depends on how the work is
+scheduled, not only on how much of it there is. That is further evidence against a
+pure token-count threshold and points at **live KV occupancy or block-allocation
+pattern** rather than a cumulative counter.
+
+Caveat on this run's numbers: when a round faults, all four requests in that round
+are counted as faults, so the reported 8/24 rate is an over-count -- the true
+per-request rate is between 0.062 (serial) and 0.333 (as counted). The harness
+should attribute the fault to the request that caused it; that is not yet done.
+
+### 32.15 Cost, and where this stands
+
+Concurrency gives **17.6 s/sample against ~30 s serial at 16K** (1.7x, not 4x,
+because four concurrent 16K prefills take longer than one). Combined with the
+16K-vs-56K choice (3.5x), the protocol is now ~6x cheaper than when this
+investigation started.
+
+Three axes have been eliminated (`ASYNC_SCHED`, draft depth `k`, prefix-cache
+option) and the fault is reproducibly periodic, so the search space is much
+smaller than at 32.1. But the mechanism is still unidentified, and each remaining
+candidate (KV block churn, graph retained state, a request-local counter on some
+boundary) needs its own rate comparison.
+
+Honest assessment of the remaining cost: at ~18 s/sample and needing enough
+samples to distinguish rates, one axis is ~30-60 min. The candidate list has
+roughly four entries left, so pinning the mechanism is a multi-hour, open-ended
+investigation of an **upstream** defect -- upstream carries several reports in this
+family (DFlash2 cumulative OOB on sm_80/v0.27.1, hybrid GDN + MTP + async IMA),
+and this is not a defect this project introduced.
+
+Recommendation, for the human to choose: either (a) bound this to one more axis
+(the prefix-reuse test, which is both discriminating and cheap), then park it with
+the evidence recorded, or (b) park it now and spend the time on the W4A8 Marlin
+line, which is ready (`marlin_shape_bench.py`) and does not depend on this bug.
