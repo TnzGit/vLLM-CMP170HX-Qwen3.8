@@ -3167,3 +3167,53 @@ Next axes, in the order that best discriminates under the cumulative model:
 series suggests?), then `DFlash2 vs MTP vs none` (does the drafter matter at all,
 or only the target's KV churn?), then `FULL/PIECEWISE/eager` (is a graph's
 retained state involved?), then the pre-fault state dump.
+
+### 32.12 Draft depth `k` is exonerated; the period is fixed per length
+
+At 16K, 16 requests each, three draft depths, fresh engine per arm, distinct
+content, exact token counts:
+
+| k | faults | rate | fault at request # |
+| --- | --- | --- | --- |
+| 3 | 1/16 | 0.062 | **12** |
+| 5 | 1/16 | 0.062 | **12** |
+| 7 | 2/30 | 0.067 | **12, 24** |
+
+The fault lands at **the same request index (12) for every k**, and the k=7 run
+faulted at 12 and 24, i.e. exactly on the period. So:
+
+- draft depth is **not** a factor, which exonerates the speculative
+  verify/free-slot geometry and the historical `117 + k` residue series as
+  explanations of *this* fault (that series may well be a real, separate bug --
+  the launcher documents it -- but it is not what is happening here);
+- the period is a property of the **length**, not of the draft: ~12 requests at
+  16K and ~5 at 56K.
+
+The cumulative-volume products do not land on one exact number
+(16K x 12 = 196,608; 56K x 5 = 286,720; 64K x 4 = 262,144), so "cumulative
+tokens" is the right *shape* of explanation but not yet a calibrated constant. A
+period in *requests* at a fixed length is equally consistent with per-request
+state that is only released on some boundary, so the honest statement is: **the
+fault is periodic in the request count with a length-dependent period, and the
+mechanism is not yet identified.**
+
+### 32.13 `ASYNC_SCHED` exonerated (32.11 restated with the k data)
+
+`ASYNC_SCHED=0` and `=1` at 56K gave identical 2/10 with faults at requests 5 and
+10, and now k=3/5/7 at 16K give identical request-12 faults. Two independent axes
+failing to move the fault is evidence the trigger is neither async scheduling nor
+draft depth, and it makes the remaining candidates sharper:
+
+- **target-side KV block churn / pool recycling** (the leading candidate: it is
+  the only thing that scales with cumulative tokens processed and would have a
+  length-dependent period);
+- **prefix-cache or block-reuse bookkeeping** (the launcher notes the historical
+  residue bug "needs a prefix-cache HIT to fire at all", and
+  `enable_prefix_caching` is **False** in this arm, so if this fault also needs a
+  hit it cannot be that family -- worth confirming with `PREFIX_CACHE=1`, which
+  would both test it and make the sweep far cheaper);
+- CUDA graph retained state across replays.
+
+`PREFIX_CACHE=1` is now the highest-value single experiment: it discriminates the
+prefix family, and if the fault still reproduces it collapses per-sample cost
+because repeated prefixes prefill almost for free.
