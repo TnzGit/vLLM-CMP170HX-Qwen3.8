@@ -3432,3 +3432,84 @@ An inverse relationship would put the conserved quantity at model-runner
 invocations rather than KV bytes, and would point the instrumentation at the
 runner's static buffers. A fault index that stays at 12 regardless of MBT would
 instead implicate a per-request persistent resource.
+
+## 35. The conserved quantity is a PER-REQUEST resource, not chunk count (2026-09-18)
+
+The review's leading alternative to "cumulative KV volume" was
+**prefill-chunk / model-runner invocation count**: with `max_num_batched_tokens`
+at 2048, the chunk products were 140 (57K), 128 (64K) and 120 (49K, the clean
+one), which is close enough to be suggestive. The discriminating experiment was
+to fix the prompt at exactly 16,384 tokens and vary only
+`--max-num-batched-tokens`, predicting an **inverse** relationship between MBT and
+the fault index.
+
+Measured (DFlash2, k=7, 16,384 tokens, `--decode-tokens 16`):
+
+| MBT | prefill chunks/request | predicted fault index if chunk-driven | **measured** |
+| --- | --- | --- | --- |
+| 1024 | 16 | ~6 | **11** |
+| 2048 | 8 | **12** | **12** |
+| 4096 | 4 | ~24 | **11** |
+
+**The fault index does not move when MBT changes by 4x.** The chunk-count /
+model-runner-invocation hypothesis is refuted, and by the review's own stated
+criterion ("if it is still request #12 however MBT changes, a per-request
+persistent resource / block lifecycle is more likely") the conserved quantity is
+**per-request**, not per-chunk and not a cumulative byte count.
+
+Note the launcher hardcodes `--max-num-batched-tokens 2048`, so these arms were
+launched directly with a hand-built command line. That exposed a harness defect
+worth recording: `fault_rate.py` restarted engines through the **systemd unit**,
+whose config is the 2048 one, so a directly-launched arm was silently restarted
+with the wrong configuration and then aborted on a length assertion. The harness
+now takes `--restart-cmd` so an arm restarts with *its own* config. Any arm that
+does not use a matching restart is not measuring what it claims to.
+
+### 35.1 Where the investigation now stands
+
+Necessary and sufficient evidence accumulated:
+
+| factor | status |
+| --- | --- |
+| speculation | **necessary** — `SPEC=none` is 24/24 clean; DFlash2 and MTP both fault (34) |
+| drafter identity | not a factor — DFlash2 and MTP fault identically |
+| draft depth `k` | not a factor — 3/5/7 all fault at request 12 (32.12) |
+| async scheduling | not a factor — 0/1 identical (32.11) |
+| prefix-cache option | not a factor — 0/1 identical (32.14) |
+| driver / cmpunlocker WPR2 | **clean** — `left reserved (backs WPR2)` (33) |
+| KV dtype / attention backend | not a factor between int8_g64 and int8_per_token_head |
+| split-KV verifier | not a factor — `SPEC_ATTN=0` still faults |
+| `max_num_batched_tokens` | not a factor — 4x change moves nothing (35) |
+| chunk-count / runner invocations | **refuted** (35) |
+
+So: a **per-request resource in the shared speculative path**, whose exhaustion or
+recycling on some boundary has a period set by prompt length (12 requests at 16K,
+5 at 57K, 4 at 64K) and by concurrency (8 at 16K with 4-way).
+
+That is now a narrow enough target for instrumentation rather than more A/B. The
+next step is the pre-fault state dump the review specified, especially the
+cross-request persistent state: **request slot id, block-table / slot-mapping /
+KV-pool pointers, free-vs-used block counts, graph input buffer pointers, and a
+scheduler/model-runner invocation counter** — plus the natural addition given
+§35, a per-request **resource index** (which slot, which block range) so the
+faulting request's identity can be compared against the previous 11.
+
+### 35.2 The `marlin_shape_bench.py` ABI is wrong (review — accepted, not yet fixed)
+
+The review is right and the harness is currently unusable for its purpose:
+
+1. the hand-rolled packing is `codes[:, 1::2] << 4 | codes[:, 0::2]`, i.e. two
+   nibbles **along N**, whereas vLLM's `gptq_pack` packs **8 x 4-bit along K**
+   (`q_res[i::8, :] << (4*i)`); the layouts are different;
+2. `ops.gptq_marlin_repack(..., device=...)` — the 0.27.1 signature takes no
+   `device`;
+3. the INT8 activation scale is derived **after** overwriting the tensor with the
+   quantized values, so it collapses to ~1 instead of
+   `original_fp16_row_max / 127`.
+
+It must be rebuilt on upstream primitives (`gptq_quantize_weights`, `gptq_pack`,
+`ops.gptq_marlin_repack`, `per_token_quant_int8`) or, better, by taking the
+already-loaded `qweight`/`scales` straight off a real AutoRound `gate_up` /
+`down_proj` layer, which also removes the "is a random synthetic weight
+representative of production packing" variable. **Do not run it or quote numbers
+from it until then.** It is left in the tree as a skeleton with this caveat.
