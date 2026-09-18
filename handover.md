@@ -3009,3 +3009,48 @@ timing: if the timing follows the salt it is a content/proposal effect, and if i
 follows the position it is an ordering effect. Until that is run, **"discard the
 first rep" is not a benchmark contract** and 30.1's conclusion is downgraded to a
 hypothesis.
+
+### 32.6 Correction: the fault is NOT deterministic in length — 65536 passed on re-test
+
+Section 30's central claim was that the fault is **discrete** at specific lengths
+(65531 and 65536 fault while their neighbours pass). The boundary re-test
+refutes that as stated:
+
+| length | blocks | this run | section 30 run |
+| --- | --- | --- | --- |
+| 65519 | 4095 | OK | -- |
+| 65520 | 4095 | OK | -- |
+| **65521** | **4096** | **FAULT** | -- |
+| 65535 | 4096 | OK | OK |
+| **65536** | 4096 | **OK** | **FAULT** |
+| 65537 | 4097 | OK | OK |
+| 65551 | 4097 | OK | -- |
+| **65552** | 4097 | **FAULT** | -- |
+
+**65536 faulted in the section 30 run and passed here.** A length cannot be both
+a deterministic trigger and not, so the "discrete at 2^16" model is wrong. What
+the data actually supports is a **probabilistic** fault in the ~64K+ region whose
+per-length outcome varies between runs, which also explains why the earlier
+`63K OK / 66K FAULT` pair and the "threshold somewhere above 64K" framing kept
+looking consistent with each new observation: single measurements at single
+lengths were never enough to distinguish the models.
+
+Consequences, and they matter for how this is reported:
+
+- 32.3's refutation of residue-123 still stands as a refutation of the
+  *hypothesis as stated* (residue alone is not sufficient), but it is weaker
+  evidence than it looked, because a passing length does not prove absence when
+  the fault is probabilistic;
+- the faulting lengths found so far (65521, 65531, 65536, 65552) are all in a
+  narrow band and 65521/65536/65552 are not separated by a clean period, so no
+  arithmetic pattern should be claimed from them;
+- the right experiment is now a **repeat-rate measurement**, not a boundary
+  search: for a fixed set of lengths near 64K, repeat each N times and report the
+  fault *rate*, then compare rates across `k`, `ASYNC_SCHED`, graph mode and
+  spec source. A single OK or FAULT at one length is not evidence either way.
+
+This is the second time in this session that a clean-looking discrete pattern
+turned out to be an artifact of single observations (the first was the "repeated
+prefix / changed context" attribution in 25.3, corrected in 28). The methodological
+rule to carry forward: **for a fault with no confirmed mechanism, measure a rate,
+never a boundary.**
