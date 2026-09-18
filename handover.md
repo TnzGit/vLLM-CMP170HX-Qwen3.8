@@ -3833,3 +3833,67 @@ allocation; (b) then the device-side first-error buffer and slot-generation
 tagging in §38.2, targeting the named allocation.
 
 Artifacts: `int8g64-layout-audit/fault_va_analysis.py` and `fault_va_bands.py`.
+
+### 38.5 Live allocation bases captured — and why cross-process VA comparison is invalid
+
+Added `patches/log-alloc-bases.patch` (logging only) and applied it to the KV
+allocator. Two findings, one of which is a correction to how the VA data in 38.3
+must be read.
+
+**The first attempt produced no output**, because vLLM 0.27.1 carries **two**
+KV-cache allocators with byte-identical bodies:
+
+```
+v1/worker/gpu_model_runner.py::_allocate_kv_cache_tensors   <- patched first, never called
+v1/worker/gpu/attn_utils.py::_allocate_kv_cache             <- the one this stack uses
+```
+
+Patching the first and seeing silence is the same "config did not reach the code"
+trap as 28.4/35/38, so the marker line was confirmed present in the module that
+actually runs before any conclusion was drawn.
+
+With the right module patched, the engine reports its KV backing allocations:
+
+```
+ALLOC kv_cache base=0x0000737f00000000 size=5443282944 bytes (5191.12 MiB) first_layer=...layers.16.linear_attn
+ALLOC kv_cache base=0x0000738060000000 size=5443282944 bytes (5191.12 MiB) first_layer=...layers.8.linear_attn
+ALLOC kv_cache base=0x00007381c0000000 size=5443282944 bytes (5191.12 MiB) first_layer=...layers.0.linear_attn
+```
+
+so the pools are **2 GiB-aligned, 5191.12 MiB each**, three of them (one per
+hybrid group), each holding 5,443,282,944 bytes.
+
+**Correction to 38.3.** Resolving the recorded fault addresses against these bases
+gives `inside = 0`: every historical fault VA is in a different address band from
+the current process (`0x1c...`, `0x38...`, `0x7469...` vs current `0x737f/0x7380/
+0x7381...`). `dmesg` is a ring buffer spanning many engine generations and CUDA
+places allocations at different bases in each, so **absolute VAs from different
+processes cannot be subtracted from the current process's bases**. 38.3's
+band-relative offsets remain valid as a *shape* observation -- the offsets do
+repeat -- but the specific numbers must not be matched against a live map obtained
+from a different process. The correct procedure is to capture the bases and the
+fault within the **same** engine generation.
+
+**What does hold, and is unchanged:** all 72 faulting addresses are 4 KiB-aligned
+(low 12 bits identically `0x000`), which is the signature of a stale or absent
+page mapping rather than misaligned pointer arithmetic, and consistent with
+`FAULT_PDE`. The most common 2 MiB-page offsets are `0x013c000` (x7), `0x01f9000`
+(x7), `0x0000000` (x5), `0x016c000` (x4) -- repeating, non-zero page offsets.
+
+### 38.6 The procedure from here
+
+Capture bases and faults in **one** engine generation, which requires the engine to
+fault while its own `ALLOC` lines are still the most recent in the log:
+
+1. start the engine (bases logged), record them;
+2. drive 16K x 24 until it faults;
+3. read the Xid 31 VA that appears **after** those bases were logged, via
+   `journalctl -k --since` or by timestamp comparison against the log;
+4. compute `fault_va - base`; the verdict is one of *inside a pool* (offset is
+   meaningful), *just past a pool end* (overrun), or *below/unmapped* (freed page);
+5. only then instrument the named region with the first-error buffer and slot
+   generation tags from 38.2.
+
+`bench/int8-g64/resolve_fault_va.py` implements steps 1-4 but must be given a log
+whose `ALLOC` lines come from the same process as the faults; it says so in its
+output rather than silently resolving across generations.
