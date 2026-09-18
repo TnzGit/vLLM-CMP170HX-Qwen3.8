@@ -5436,3 +5436,84 @@ This is a good place to stop this turn and take stock:
 
 The workaround should also be quantified (§48.5) so the interim recommendation carries
 a number.
+
+## 51. CORRECTION to §47's attribution: the call site is triton_attn.py, not flash_attn.py
+
+§47 read the traceback frame `flash_attn.py:1778 in _spec_attn_run` as evidence that
+the **flash-attention backend** was dispatching the kernel. That is wrong, and the
+correction matters because it resolves an apparent contradiction.
+
+### 51.1 What the frame actually is
+
+`_spec_attn_run` is *defined* in `flash_attn.py` (line 1760) but **called from more
+than one backend**. `triton_attn.py` imports it:
+
+```python
+from vllm.v1.attention.backends.flash_attn import (
+    _spec_attn_enabled,
+    _spec_attn_qmax,
+    _spec_attn_run,
+)
+```
+
+so a traceback frame naming `flash_attn.py:1778 in _spec_attn_run` means "inside the
+body of that function", **not** "called by the flash-attention backend". The
+`1778` line is the `att.run(...)` call inside the function body.
+
+### 51.2 The contradiction this resolves
+
+`flash_attn.py`'s call site (line 1059) is guarded by
+
+```python
+and not is_quantized_kv_cache(self.kv_cache_dtype)
+```
+
+and this arm's KV dtype is `int8_per_token_head`, for which
+`is_quantized_kv_cache` returns **True** (`kv_cache_quant_mode != NONE`). So the
+flash-attention route is genuinely unreachable here -- which was a real
+contradiction, since the traceback pointed into that function and toggling
+`VLLM_SPEC_DECODE_ATTN` changed the fault (§48.2).
+
+The resolution: the engine runs `--attention-backend TRITON_ATTN` (confirmed from the
+engine log), and `triton_attn.py` has its **own** call site at line 813 whose guard is
+the exact opposite -- it *requires* the quantized mode:
+
+```python
+if (
+    _spec_attn_enabled()
+    and self._kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD
+    and k_scale_cache is not None
+    and 1 < max_seqlen_q <= _spec_attn_qmax(self.num_heads // self.num_kv_heads)
+    and attn_metadata.causal
+    and (self.sliding_window is None or self.sliding_window == (-1, -1))
+    ...
+):
+    _spec_attn_run(...)
+```
+
+with the source comment: *"int8 per-token-head only: the kernel folds the
+per-(token, head) scales in after each dot, which is exact because they are constant
+along the head dim."*
+
+So the path is:
+
+```
+triton_attn.py:813  (guard: INT8_PER_TOKEN_HEAD, k_scale_cache present)
+  -> _spec_attn_run            (defined in flash_attn.py:1760)
+    -> SpecDecodeAttention.run (spec_decode_attn.py:206)
+      -> _spec_attn_partial    (spec_decode_attn.py:220)   <- the faulting launch
+```
+
+Everything in §48-50 stands -- the kernel, the workaround, the three clean guards --
+but the backend named in §47 was wrong, and the reason the flash-attention guard does
+not exclude this path is that **this is not the flash-attention path**.
+
+### 51.3 Why this is worth recording rather than quietly fixing
+
+It is the fifth instance in this project of a conclusion resting on a location that
+was not verified against the running configuration (28.4, 35, 38, 45, and now 47).
+Reading a traceback frame as "the backend that called it" is exactly the same class
+of mistake as reading a drop-in as "the config that took effect": both substitute an
+apparent location for the actual one. The check that would have caught it is one
+line -- confirm which backend the engine reports -- and it is now recorded as part of
+the standing rule.
