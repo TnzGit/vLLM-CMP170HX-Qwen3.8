@@ -7,6 +7,79 @@ the investigation.
 
 ---
 
+## 0. RESOLVED — root cause and fix
+
+**Status: fixed and verified.** The sections below are the investigation as it stood
+before the cause was known; they are kept because the ruled-out list and the
+measurement traps are the useful part of the record.
+
+**Cause.** An **int32 multiply overflow** in `_spec_attn_partial`
+(`v1/attention/ops/spec_decode_attn.py`). The kernel builds its K/V addresses as
+
+```python
+blk    = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
+k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+k      = tl.load(k_ptrs, mask=k_ok[:, None], other=0.0)          # line 109
+```
+
+`blk` is loaded from an **int32** block table and `stride_kb` is a byte stride. This
+configuration's KV pool is **5,444,206,592 bytes, i.e. greater than 2\*\*31**, so for
+any block id above roughly **2,390 of ~6,059** (~40% of valid ids) the product
+`blk * stride_kb` exceeds 2\*\*31, Triton evaluates the multiply in int32, and the
+result **wraps negative**. The address then lands *below* the pool.
+
+`compute-sanitizer --tool memcheck` located it, and the arithmetic closes exactly:
+
+```
+========= Invalid __global__ read of size 1 bytes
+=========     at _spec_attn_partial+0x7160 in spec_decode_attn.py:109
+=========     Access to 0x7a8a039af040 is out of bounds
+=========     and is 2,086,997,952 bytes before the nearest allocation
+              at 0x7a8a80000000 of size 5,444,206,592 bytes
+
+2**31 - 2,086,997,952 = 60,485,696 = 0x39af040   <- the fault address's low bits
+```
+
+That is the signature of a signed int32 wrap. The GPU raises Xid 31 / MMU `FAULT_PDE`
+on the unmapped read.
+
+**Why it looked like a "long context" bug.** It needs a large pool *and* a high block
+id to be referenced, which needs enough KV -- so short contexts and small caches never
+reach it. Only the speculative verify kernel does this arithmetic, so a drafter is
+required (any drafter: DFlash2 and MTP faulted identically). The block id itself is
+**valid**, which is why every host-side guard reported clean.
+
+**Fix** (`patches/spec-decode-attn-int64-block-id.patch`) -- one operand widening,
+which is what the GDN path in the same codebase already does, with a comment naming
+this exact failure mode:
+
+```python
+blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE,
+              mask=k_ok, other=0).to(tl.int64)
+```
+
+**Verification** (zero Xid 31 *delta* asserted on every leg, because `dmesg` retains
+all earlier runs' faults):
+
+| leg | requests | result | Xid delta |
+| --- | --- | --- | --- |
+| DFlash2 16K (10x the 12-request fault period) | 120 | 120/120 OK | 0 |
+| DFlash2 65K | 12 | 12/12 OK | 0 |
+| DFlash2 126K | 8 | 8/8 OK | 0 |
+| MTP 16K | 24 | 24/24 OK | 0 |
+| C4 (4-way) 16K | 32 | 32/32 OK | 0 |
+| FULL graph mode 16K | 24 | 24/24 OK | 0 |
+
+The C4 leg previously faulted after ~8 requests; it now completes 32 requests /
+524,288 tokens clean. `VLLM_SPEC_DECODE_ATTN=0` is no longer needed as a workaround.
+
+The upstream-relevant summary is two sentences: *`_spec_attn_partial` multiplies an
+int32 block id by a byte stride that can exceed 2\*\*31 for a KV pool larger than
+2 GiB, and Triton wraps the product negative. `v1/worker/mamba_utils.py` already
+widens the same operand for the same reason; this kernel does not.*
+
+---
+
 ## 1. Summary
 
 A vLLM 0.27.1 server serving `Qwen3.8-27B-W4A16` + `DFlash2` drafter on an
