@@ -3995,3 +3995,68 @@ This is now a concrete, falsifiable target: find which allocation occupies
 launcher documents is ~0.098 GiB per `(k+2)` per request -- so the offset should be
 checked against the per-request slot stride of that pool rather than treated as an
 arbitrary number.
+
+### 38.10 The documented align-precopy bug is NOT what this is
+
+Following the fault address into `v1/worker/gpu/model_states/mamba_hybrid.py` found
+a comment that describes a **very similar** failure, from a previous fix:
+
+> "port(kvarn-v2): use the MAMBA spec block size, not `cache_config.block_size` --
+> with an explicit `--block-size` (KVarN needs 128) the two diverge (128 vs 2176)
+> and the seed indexes far past the mamba block table -> **illegal memory access in
+> the align precopy on prefix-cache resume**"
+
+This is exactly the right *shape*: `_mamba_state_idx_gpu[req_index] = (num_computed_tokens - 1) // mamba_bs`
+computes an index used to address the recurrent-state pool, a wrong `mamba_bs`
+overshoots it, and the result is an `illegal memory access` reading outside the
+pool. It is also consistent with the constant `0x39af000` displacement seen across
+four processes (§38.9): the same arithmetic, mis-evaluated the same way.
+
+**It is nevertheless not this fault**, and the reason matters:
+
+```
+mamba_cache_mode default in vLLM 0.27.1       = "none"          (config/cache.py:145)
+the launcher only sets "align" when            PREFIX_CACHE=1
+all four faulting arms were launched with      no --mamba-cache-mode flag
+```
+
+and `mamba_hybrid.py:83` guards the whole structure behind
+`if self._align_mode:` -- so `_mamba_state_idx_gpu`, `_mamba_src_col_gpu` and
+`_mamba_src_off_gpu` are **never allocated** in these arms, and the align precopy
+never runs. The `PREFIX_CACHE=1` arm (which *did* enable align) faulted at the same
+rate and the same request indices as `PREFIX_CACHE=0` (§32.14), so enabling align
+neither causes nor cures it.
+
+This is worth recording because the resemblance is close enough that a reader
+following the address would otherwise land on the align path and stop there.
+
+### 38.11 What remains, stated precisely
+
+Confirmed non-causes, each by measurement rather than inspection: driver/WPR2 (§33);
+CUDA graph capture, including a verified `NONE` arm (§38); `ASYNC_SCHED`; draft
+depth; prefix-cache option and therefore align mode (§32.14, §38.10);
+`max_num_batched_tokens`; the paged KV pools (the fault VA is outside all of them,
+§38.7); and the `SPEC=none` path outright (§34 - it is clean).
+
+The fault remains, precisely described:
+
+```
+a read at <2GiB-aligned base> + 0x39af000, where the base sits ~1.94 GiB below the
+lowest recurrent-state pool, occurring only when speculation is active, with a
+period of 12 requests at 16K, 5 at 57K, 8 at 16K with C4
+```
+
+Two candidate readings of the constant displacement remain, and they are
+distinguishable:
+
+1. the base is a **spec-decode persistent buffer** (draft/verify workspace, logits
+   or sampler scratch) allocated below the recurrent-state pools, and `0x39af000`
+   is an index computed from accepted-token or draft bookkeeping running past its
+   end;
+2. the base is a **pool that is itself indexed with `mamba_bs`-style arithmetic**
+   under a code path that *is* active, and the displacement is a wrong stride.
+
+The distinguishing experiment is to log **every** allocation base in the engine and
+match `fault_va - 0x39af000` against the list; whichever allocation owns that base
+identifies the structure, and then only that kernel needs the first-error buffer
+from §38.2.
