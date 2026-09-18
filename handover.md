@@ -3897,3 +3897,65 @@ fault while its own `ALLOC` lines are still the most recent in the log:
 `bench/int8-g64/resolve_fault_va.py` implements steps 1-4 but must be given a log
 whose `ALLOC` lines come from the same process as the faults; it says so in its
 output rather than silently resolving across generations.
+
+### 38.7 Same-generation capture: the fault VA is a CONSTANT offset, and it is not in a KV pool
+
+Captured the KV pool bases and then drove the same engine (pid 572825) to fault, so
+the fault address and the bases belong to one process. This is the procedure 38.6
+called for, and it produced the sharpest result of the whole investigation.
+
+The four most recent Xid 31 events, from four consecutive engine generations:
+
+```
+pid=570013   faulted @ 0x77ca_239af000
+pid=570799   faulted @ 0x748b_239af000
+pid=572825   faulted @ 0x7377_a39af000     <- bases known for this process
+pid=573484   faulted @ 0x7e34_639af000
+```
+
+**Every one of them ends in `39af000`.** The high bits differ per process (as CUDA
+relocates allocations), but the low 21 bits are **identical across four separate
+engine processes**, and `0x39af000` is a 4 KiB-aligned offset inside its 2 MiB
+page. A constant offset repeated across processes is not a wild pointer: it is a
+fixed address computed the same wrong way every time, landing the same distance
+into whatever region the allocator put there.
+
+Resolving the same-process VA against the eight logged 2 GiB-aligned KV pools
+(5191.12 MiB each):
+
+```
+fault VA 0x00007377a39af000
+  nearest KV pool below : 0x0000737820000000   (fault is 1990.316 MiB BELOW it)
+  verdict               : NOT inside any KV pool
+  gap                   : 2,086,998,016 bytes = 1990.316 MiB = 1.9437 GiB
+```
+
+So the faulting read is **not** in the paged attention KV cache. It sits ~1.94 GiB
+below the lowest KV pool, a gap of a size that matches a **recurrent-state / small
+pool** rather than the paged KV: the launcher's own notes record ~0.098 GiB of
+recurrent-state reservation per `(k+2)` per resident request, i.e. ~0.88 GiB per
+request at k=7, so a small number of resident requests occupies a region of about
+this size.
+
+Combined with everything already excluded (driver/WPR2, graph capture, attention
+backend, KV dtype, split-KV verifier, async scheduling, prefix-cache option, draft
+depth, `max_num_batched_tokens`, and now the paged KV pool itself) this is the
+tightest localisation so far:
+
+```
+a fixed, recomputed-wrong address at 0x...39af000, ~1.94 GiB below the paged KV
+pools, read during the speculative accept path (SPEC=none never enters it), in a
+region the size of the recurrent-state reservation
+```
+
+### 38.8 The immediate next step
+
+The paged KV pools are now logged; the region that actually faults is not one of
+them, so the next action is to log the **remaining** allocations the same way --
+specifically the Mamba/GDN recurrent-state buffers and the spec-decode persistent
+tensors -- then repeat the same-generation capture and subtract. The `39af000` low
+bits give a target to match: whichever allocation's base, when subtracted from a
+fault VA, yields exactly `0x39af000` is the region being read out of range.
+
+Until that is done, no further configuration A/B should run; the address is
+already specific enough that instrumentation should aim at it directly.
