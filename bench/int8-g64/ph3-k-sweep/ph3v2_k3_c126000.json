@@ -1,0 +1,70 @@
+{
+  "summary": {
+    "context": 126000,
+    "rounds": 3,
+    "unprofiled_rounds": 3,
+    "ms_per_output_token_median": 11.1672,
+    "ms_per_spec_iteration_median": 30.294,
+    "accepted_tokens_per_pass_mean": 2.6673,
+    "passes_per_100_output_tokens_mean": 37.647,
+    "output_tok_s_median": 89.548,
+    "ttft_s_median": 102.986,
+    "preemptions_total": 0.0,
+    "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91",
+    "round_spread": 1.047,
+    "stable": true
+  },
+  "rows": [
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 100.87857875099871,
+      "decode_s": 2.8458596090022183,
+      "spec_iterations": 96.0,
+      "ms_per_output_token": 11.160233760793012,
+      "ms_per_spec_iteration": 29.64437092710644,
+      "accepted_tokens_per_pass": 2.666666666666667,
+      "passes_per_100_output_tokens": 37.64705882352941,
+      "output_tok_s": 89.60385789705384,
+      "preemptions": 0.0,
+      "round": 0,
+      "context": 126000,
+      "profiled": false,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    },
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 102.98568472199986,
+      "decode_s": 2.980146022000554,
+      "spec_iterations": 98.0,
+      "ms_per_output_token": 11.686847145100211,
+      "ms_per_spec_iteration": 30.409653285719937,
+      "accepted_tokens_per_pass": 2.6224489795918364,
+      "passes_per_100_output_tokens": 38.431372549019606,
+      "output_tok_s": 85.56627699364209,
+      "preemptions": 0.0,
+      "round": 1,
+      "context": 126000,
+      "profiled": false,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    },
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 103.29306058899965,
+      "decode_s": 2.8476388810013304,
+      "spec_iterations": 94.0,
+      "ms_per_output_token": 11.167211298044434,
+      "ms_per_spec_iteration": 30.294030648950322,
+      "accepted_tokens_per_pass": 2.7127659574468086,
+      "passes_per_100_output_tokens": 36.86274509803921,
+      "output_tok_s": 89.54787129129694,
+      "preemptions": 0.0,
+      "round": 2,
+      "context": 126000,
+      "profiled": false,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    }
+  ]
+}
