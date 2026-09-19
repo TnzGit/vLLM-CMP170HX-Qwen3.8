@@ -384,3 +384,22 @@ recur. What matters for acceptance is *n-gram* recurrence, in the table above.)
 Still not reproducible: `~/bench/labd_corpus.txt`, the frozen repo-docs head that
 `make_long_corpus.py` prepended. The replay corpus is therefore a reconstruction, and is
 labelled as such everywhere.
+
+## Deployment note: the M7 path and the int8 path are SEPARATE vLLM installs
+
+`mixed-fp8-test-site/` shadows the runtime via `PYTHONPATH`, and it carries its own copy of
+files it overrides — including `model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py`,
+which on 2026-09-19 was **byte-identical to the runtime's pre-fix copy**.
+
+Consequence: **a fix applied to `runtime-v0271` alone does not reach the M7 production
+path.** The #51812 gate-gather backport had to be applied to both, and the two installs were
+verified separately (`grep` for the marker in each). I caught this only because I checked
+which file M7 actually loads before claiming a verification — the failure mode would have
+been "verified a fix the production path never loaded".
+
+Every future fix must be applied and verified in **both** trees:
+
+| tree | used by | path |
+| --- | --- | --- |
+| `runtime-v0271/venv/.../vllm` | the int8 / `TRITON_ATTN` arm | direct launch |
+| `mixed-fp8-test-site/vllm` | the M7 mixed-FP8 production path | `PYTHONPATH` override |
