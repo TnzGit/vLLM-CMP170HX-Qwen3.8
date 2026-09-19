@@ -1,0 +1,393 @@
+=== path=A ctx=4096 round=1 clock=1350 MHz ===
+{
+  "label": "pathA-c4096-r1",
+  "context": 4096,
+  "salt": "b2r1",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.164105986999857,
+  "decode_s": 1.857676782999988,
+  "decode_tok_s": 137.2682278927968,
+  "spec_steps": 84.0,
+  "accepted_tokens": 176.0,
+  "tokens_per_step": 3.0952380952380953,
+  "ms_per_step": 22.115199797618907,
+  "preemptions": 0.0
+}
+=== path=A ctx=4096 round=2 clock=1350 MHz ===
+{
+  "label": "pathA-c4096-r2",
+  "context": 4096,
+  "salt": "b2r2",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.13303298000028,
+  "decode_s": 1.8960264679999455,
+  "decode_tok_s": 134.49179339199358,
+  "spec_steps": 85.0,
+  "accepted_tokens": 171.0,
+  "tokens_per_step": 3.011764705882353,
+  "ms_per_step": 22.30619374117583,
+  "preemptions": 0.0
+}
+=== path=A ctx=4096 round=3 clock=1350 MHz ===
+{
+  "label": "pathA-c4096-r3",
+  "context": 4096,
+  "salt": "b2r3",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.138380923999648,
+  "decode_s": 1.8358479279995663,
+  "decode_tok_s": 138.90039371499634,
+  "spec_steps": 82.0,
+  "accepted_tokens": 176.0,
+  "tokens_per_step": 3.1463414634146343,
+  "ms_per_step": 22.38838936584837,
+  "preemptions": 0.0
+}
+  path=A ctx=4096 xid_delta=0
+=== path=B ctx=4096 round=1 clock=1350 MHz ===
+{
+  "label": "pathB-c4096-r1",
+  "context": 4096,
+  "salt": "b2r1",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 3.82478029000049,
+  "decode_s": 1.9163787219995356,
+  "decode_tok_s": 133.06346865192432,
+  "spec_steps": 81.0,
+  "accepted_tokens": 175.0,
+  "tokens_per_step": 3.1604938271604937,
+  "ms_per_step": 23.658996567895503,
+  "preemptions": 0.0
+}
+=== path=B ctx=4096 round=2 clock=1350 MHz ===
+{
+  "label": "pathB-c4096-r2",
+  "context": 4096,
+  "salt": "b2r2",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.4254871379998804,
+  "decode_s": 2.021492920000128,
+  "decode_tok_s": 126.14439431229067,
+  "spec_steps": 84.0,
+  "accepted_tokens": 172.0,
+  "tokens_per_step": 3.0476190476190474,
+  "ms_per_step": 24.065391904763427,
+  "preemptions": 0.0
+}
+=== path=B ctx=4096 round=3 clock=1350 MHz ===
+{
+  "label": "pathB-c4096-r3",
+  "context": 4096,
+  "salt": "b2r3",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.429092565999781,
+  "decode_s": 2.0715406510007597,
+  "decode_tok_s": 123.09678783122585,
+  "spec_steps": 86.0,
+  "accepted_tokens": 174.0,
+  "tokens_per_step": 3.0232558139534884,
+  "ms_per_step": 24.087681988380925,
+  "preemptions": 0.0
+}
+  path=B ctx=4096 xid_delta=0
+=== path=A ctx=65536 round=1 clock=1350 MHz ===
+{
+  "label": "pathA-c65536-r1",
+  "context": 65536,
+  "salt": "b2r1",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 45.84053394700004,
+  "decode_s": 2.284569941999507,
+  "decode_tok_s": 111.61838178472148,
+  "spec_steps": 80.0,
+  "accepted_tokens": 178.0,
+  "tokens_per_step": 3.225,
+  "ms_per_step": 28.55712427499384,
+  "preemptions": 0.0
+}
+=== path=A ctx=65536 round=2 clock=1350 MHz ===
+{
+  "label": "pathA-c65536-r2",
+  "context": 65536,
+  "salt": "b2r2",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 46.53722314800052,
+  "decode_s": 2.92580333099977,
+  "decode_tok_s": 87.15555051093078,
+  "spec_steps": 100.0,
+  "accepted_tokens": 159.0,
+  "tokens_per_step": 2.59,
+  "ms_per_step": 29.2580333099977,
+  "preemptions": 0.0
+}
+=== path=A ctx=65536 round=3 clock=1350 MHz ===
+{
+  "label": "pathA-c65536-r3",
+  "context": 65536,
+  "salt": "b2r3",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 46.960023555999214,
+  "decode_s": 2.6173432120012876,
+  "decode_tok_s": 97.42703930869672,
+  "spec_steps": 89.0,
+  "accepted_tokens": 170.0,
+  "tokens_per_step": 2.9101123595505616,
+  "ms_per_step": 29.40835069664368,
+  "preemptions": 0.0
+}
+  path=A ctx=65536 xid_delta=0
+=== path=B ctx=65536 round=1 clock=1350 MHz ===
+{
+  "label": "pathB-c65536-r1",
+  "context": 65536,
+  "salt": "b2r1",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 124.63322371399954,
+  "decode_s": 3.9338559640000312,
+  "decode_tok_s": 64.82189544649988,
+  "spec_steps": 86.0,
+  "accepted_tokens": 170.0,
+  "tokens_per_step": 2.9767441860465116,
+  "ms_per_step": 45.74251120930269,
+  "preemptions": 0.0
+}
+=== path=B ctx=65536 round=2 clock=1350 MHz ===
+{
+  "label": "pathB-c65536-r2",
+  "context": 65536,
+  "salt": "b2r2",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 125.44172918099866,
+  "decode_s": 4.365127135000876,
+  "decode_tok_s": 58.4175425167654,
+  "spec_steps": 94.0,
+  "accepted_tokens": 165.0,
+  "tokens_per_step": 2.75531914893617,
+  "ms_per_step": 46.43752271277527,
+  "preemptions": 0.0
+}
+=== path=B ctx=65536 round=3 clock=1350 MHz ===
+{
+  "label": "pathB-c65536-r3",
+  "context": 65536,
+  "salt": "b2r3",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 125.7879200619991,
+  "decode_s": 4.1897180050000316,
+  "decode_tok_s": 60.863284759423344,
+  "spec_steps": 90.0,
+  "accepted_tokens": 167.0,
+  "tokens_per_step": 2.8555555555555556,
+  "ms_per_step": 46.55242227777813,
+  "preemptions": 0.0
+}
+  path=B ctx=65536 xid_delta=0
+=== path=A ctx=126000 round=1 clock=1350 MHz ===
+{
+  "label": "pathA-c126000-r1",
+  "context": 126000,
+  "salt": "b2r1",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 113.08571211100025,
+  "decode_s": 2.81965572000081,
+  "decode_tok_s": 90.4365728734878,
+  "spec_steps": 80.0,
+  "accepted_tokens": 177.0,
+  "tokens_per_step": 3.2125,
+  "ms_per_step": 35.245696500010126,
+  "preemptions": 0.0
+}
+=== path=A ctx=126000 round=2 clock=1350 MHz ===
+{
+  "label": "pathA-c126000-r2",
+  "context": 126000,
+  "salt": "b2r2",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 113.98983674600095,
+  "decode_s": 2.5693011929997738,
+  "decode_tok_s": 99.24877655245865,
+  "spec_steps": 72.0,
+  "accepted_tokens": 185.0,
+  "tokens_per_step": 3.5694444444444446,
+  "ms_per_step": 35.68473879166353,
+  "preemptions": 0.0
+}
+=== path=A ctx=126000 round=3 clock=1350 MHz ===
+{
+  "label": "pathA-c126000-r3",
+  "context": 126000,
+  "salt": "b2r3",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 113.92987038699903,
+  "decode_s": 2.7177379980003025,
+  "decode_tok_s": 93.82802911378053,
+  "spec_steps": 76.0,
+  "accepted_tokens": 180.0,
+  "tokens_per_step": 3.3684210526315788,
+  "ms_per_step": 35.75971050000398,
+  "preemptions": 0.0
+}
+  path=A ctx=126000 xid_delta=0
+=== path=B ctx=126000 round=1 clock=1350 MHz ===
+{
+  "label": "pathB-c126000-r1",
+  "context": 126000,
+  "salt": "b2r1",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 403.0907022499996,
+  "decode_s": 5.984020600999429,
+  "decode_tok_s": 42.61348965901134,
+  "spec_steps": 88.0,
+  "accepted_tokens": 168.0,
+  "tokens_per_step": 2.909090909090909,
+  "ms_per_step": 68.00023410226623,
+  "preemptions": 0.0
+}
+=== path=B ctx=126000 round=2 clock=1350 MHz ===
+{
+  "label": "pathB-c126000-r2",
+  "context": 126000,
+  "salt": "b2r2",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 404.63294224499987,
+  "decode_s": 5.643792107999616,
+  "decode_tok_s": 45.182387146854374,
+  "spec_steps": 82.0,
+  "accepted_tokens": 176.0,
+  "tokens_per_step": 3.1463414634146343,
+  "ms_per_step": 68.82673302438556,
+  "preemptions": 0.0
+}
+=== path=B ctx=126000 round=3 clock=1350 MHz ===
+{
+  "label": "pathB-c126000-r3",
+  "context": 126000,
+  "salt": "b2r3",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 404.62389298700145,
+  "decode_s": 5.584725917999094,
+  "decode_tok_s": 45.660253295180844,
+  "spec_steps": 81.0,
+  "accepted_tokens": 177.0,
+  "tokens_per_step": 3.185185185185185,
+  "ms_per_step": 68.94723355554437,
+  "preemptions": 0.0
+}
+  path=B ctx=126000 xid_delta=0
+=== path=A ctx=250000 round=1 clock=1350 MHz ===
+{
+  "label": "pathA-c250000-r1",
+  "context": 250000,
+  "salt": "b2r1",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 317.8478346259999,
+  "decode_s": 3.6763842910004314,
+  "decode_tok_s": 69.36162811494563,
+  "spec_steps": 77.0,
+  "accepted_tokens": 178.0,
+  "tokens_per_step": 3.311688311688312,
+  "ms_per_step": 47.745250532473136,
+  "preemptions": 0.0
+}
+=== path=A ctx=250000 round=2 clock=1350 MHz ===
+{
+  "label": "pathA-c250000-r2",
+  "context": 250000,
+  "salt": "b2r2",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 319.3530358150001,
+  "decode_s": 3.962635271000181,
+  "decode_tok_s": 64.35111549785333,
+  "spec_steps": 82.0,
+  "accepted_tokens": 177.0,
+  "tokens_per_step": 3.158536585365854,
+  "ms_per_step": 48.32482037805099,
+  "preemptions": 0.0
+}
+=== path=A ctx=250000 round=3 clock=1350 MHz ===
+{
+  "label": "pathA-c250000-r3",
+  "context": 250000,
+  "salt": "b2r3",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 319.2579110270017,
+  "decode_s": 3.670165672998337,
+  "decode_tok_s": 69.47915236526042,
+  "spec_steps": 76.0,
+  "accepted_tokens": 185.0,
+  "tokens_per_step": 3.4342105263157894,
+  "ms_per_step": 48.29165359208338,
+  "preemptions": 0.0
+}
+  path=A ctx=250000 xid_delta=0
+=== path=B ctx=250000 round=1 clock=1350 MHz ===
+{
+  "label": "pathB-c250000-r1",
+  "context": 250000,
+  "salt": "b2r1",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 1460.6728182269999,
+  "decode_s": 10.258586695999838,
+  "decode_tok_s": 24.85722522571583,
+  "spec_steps": 90.0,
+  "accepted_tokens": 165.0,
+  "tokens_per_step": 2.833333333333333,
+  "ms_per_step": 113.98429662222043,
+  "preemptions": 0.0
+}
+=== path=B ctx=250000 round=2 clock=1350 MHz ===
+{
+  "label": "pathB-c250000-r2",
+  "context": 250000,
+  "salt": "b2r2",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 1462.090307067001,
+  "decode_s": 12.117821153999103,
+  "decode_tok_s": 21.043386988414607,
+  "spec_steps": 105.0,
+  "accepted_tokens": 151.0,
+  "tokens_per_step": 2.4380952380952383,
+  "ms_per_step": 115.40782051427716,
+  "preemptions": 0.0
+}
+=== path=B ctx=250000 round=3 clock=1350 MHz ===
+{
+  "label": "pathB-c250000-r3",
+  "context": 250000,
+  "salt": "b2r3",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 1462.8085930119996,
+  "decode_s": 11.658593201998883,
+  "decode_tok_s": 21.87227872023872,
+  "spec_steps": 101.0,
+  "accepted_tokens": 155.0,
+  "tokens_per_step": 2.5346534653465347,
+  "ms_per_step": 115.43161586137508,
+  "preemptions": 0.0
+}
+  path=B ctx=250000 xid_delta=0
+B2_AB_DONE
