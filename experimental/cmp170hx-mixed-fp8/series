@@ -1,0 +1,6 @@
+# Experimental CMP 170HX mixed-FP8 extension layer.
+# Apply only after the repository's normal vLLM 0.27.1 patch stack.
+
+heterogeneous-attn-pages-sm80.patch
+spec-decode-fp8-kv-sm80.patch
+flashinfer-sm80-fp8-spec-verify.patch

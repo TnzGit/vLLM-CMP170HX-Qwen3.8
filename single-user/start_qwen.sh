@@ -57,6 +57,7 @@ if [ "${VLLM_OFFLOAD_KEEP_SHM:-0}" != 1 ]; then
 fi
 REPO="$(dirname "$DIR")"
 cd "$REPO"
+VENV=${VENV:-$REPO/venv}
 
 if [ -z "$MODEL" ] && [ -d "$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then
   MODEL=$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast
@@ -87,7 +88,13 @@ CTX=${CTX:-fast}
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
-if [ "$CTX" = "fast" ]; then
+if [ "$CTX" = "cmp-mixed-fp8" ]; then
+  MAX_LEN=${MAX_LEN:-65536}
+  DRAFT_TOKENS=${DFLASH_TOKENS:-7}
+  ATTN_ARGS="--attention-backend ${CMP_TARGET_ATTN_BACKEND:-FLASHINFER} --kv-cache-dtype ${CMP_TARGET_KV_DTYPE:-fp8}"
+  export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+  export VLLM_FP8_SPEC_VERIFY=${VLLM_FP8_SPEC_VERIFY:-1}
+elif [ "$CTX" = "fast" ]; then
   MAX_LEN=${MAX_LEN:-65536}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
   ATTN_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
@@ -120,17 +127,18 @@ elif [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ]; then
   # The split-KV verify attention is bf16-KV only -- the KVarN backend brings
   # its own dequant path, so the env stays off here.
   export VLLM_SPEC_DECODE_ATTN=0
-elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ]; then
-  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k) and CTX=huge (KVarN, 240k; kvarn/install.sh); CTX=$CTX keeps SPEC=mtp" >&2
+elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ] && [ "$CTX" != "cmp-mixed-fp8" ]; then
+  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k), CTX=huge (KVarN, 240k; kvarn/install.sh), and experimental CTX=cmp-mixed-fp8; CTX=$CTX keeps SPEC=mtp" >&2
   SPEC=mtp
 fi
+SPEC_ARGS=()
 if [ "$SPEC" = "dflash2" ]; then
   if [ -z "$DRAFT" ]; then
     for d in Qwen3.8-27B-DFlash2-W4A16 Qwen3.8-27B-DFlash2; do
       [ -f "$REPO/models/$d/model.safetensors" ] && DRAFT=$REPO/models/$d && break
     done
   fi
-  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
+  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: $VENV/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
   # Lookup-augmented drafting: when the model is reproducing something from its context,
   # draft from the context instead of from the drafter
   # (patches/dflash2-lookup-drafting.patch).
@@ -147,7 +155,14 @@ if [ "$SPEC" = "dflash2" ]; then
   # instead of 8 and 56k of context instead of 64k. Worth setting for a coding assistant
   # applying edits or a RAG front-end quoting sources; the default stays 7.
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
-  SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
+  SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS"
+  if [ -n "${DFLASH_ATTN_BACKEND:-}" ]; then
+    SPEC_CFG="$SPEC_CFG,\"attention_backend\":\"$DFLASH_ATTN_BACKEND\""
+  fi
+  if [ -n "${DFLASH_KV_CACHE_DTYPE:-}" ]; then
+    SPEC_CFG="$SPEC_CFG,\"kv_cache_dtype\":\"$DFLASH_KV_CACHE_DTYPE\""
+  fi
+  SPEC_CFG="$SPEC_CFG}"
   # The split-KV verify attention (patches/spec-decode-attn.patch) sizes its partial
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
   # their addresses, so they must not be grown later.
@@ -235,7 +250,14 @@ if [ "$SPEC" = "dflash2" ]; then
   # state page per speculative block. That second term is what scales -- NOT the slot
   # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
   # context. Single-user mode keeps 4 slots when the block is long for the graphs.
-  if [ "$CTX" = "huge" ]; then
+  if [ "$CTX" = "cmp-mixed-fp8" ]; then
+    MAX_SEQS=${MAX_SEQS:-1}
+    MAX_LEN=${DFLASH_MAX_LEN:-$MAX_LEN}
+    # Size from GPU_UTIL during bring-up. A pinned mixed target/draft pool is
+    # qualified only after heterogeneous page geometry is proven.
+    KV_MEM=${KV_MEM-}
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+  elif [ "$CTX" = "huge" ]; then
     # KVarN pool: ~20 KB/token effective. 4.90 GiB pinned -> 268,169 tokens of
     # KV at 245760 max-model-len with 2 slots (single-user long-context; the
     # graphs stay at the k=7 size).
@@ -354,10 +376,20 @@ if [ "$SPEC" = "dflash2" ]; then
          "5-10x slower. Ladder 4k/16k TTFT against known-good rates before trusting it." >&2
   fi
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
+elif [ "$SPEC" = "none" ]; then
+  # Correctness/performance control: run the target model without a proposer.
+  # Keep the selected CTX backend and KV dtype unchanged so this is a true A/B.
+  MAX_SEQS=${MAX_SEQS:-1}
+  CG=${CG:-32}
+  SPEC_CFG=
 else
   MAX_SEQS=${MAX_SEQS:-8}
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}
+fi
+
+if [ -n "$SPEC_CFG" ]; then
+  SPEC_ARGS=(--speculative-config "$SPEC_CFG")
 fi
 
 # PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
@@ -369,6 +401,11 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # KVarN runs --block-size 128; match the prefix hash unit to its tile so cache
   # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
   [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
+  # The CMP mixed-FP8 page-alignment patch promotes target attention and its
+  # aligned Mamba checkpoints to 896 tokens while the draft uses 448-token
+  # pages. Hash at their common boundary so all three groups can resume the
+  # same cached prefix.
+  [ "$CTX" = "cmp-mixed-fp8" ] && EXTRA_ARGS="--prefix-match-unit 448 ${EXTRA_ARGS}"
   # DFlash2 only: prefix caching and a CAPTURED (FULL) verify step do not mix on
   # that path. It is the capture, not the drafter: eager is clean, and so is
   # PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
@@ -538,7 +575,7 @@ case " ${EXTRA_ARGS:-} " in
     fi ;;
 esac
 
-export PATH="$REPO/venv/bin:$PATH"
+export PATH="$VENV/bin:$PATH"
 # expandable_segments needs CUDA VMM, which WSL2's paravirt driver rejects during
 # Marlin repack. It is the single most reported failure on Windows (#2, #26) and it
 # does not announce itself as an allocator problem -- the same VMM rejection surfaces
@@ -563,7 +600,7 @@ if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
   export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
 fi
 
-exec venv/bin/vllm serve "$MODEL" \
+exec "$VENV/bin/vllm" serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
   --gpu-memory-utilization $GPU_UTIL \
@@ -575,7 +612,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
-  --speculative-config "$SPEC_CFG" \
+  "${SPEC_ARGS[@]}" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   ${TOOL_ARGS} \
