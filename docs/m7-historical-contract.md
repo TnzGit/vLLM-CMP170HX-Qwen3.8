@@ -211,3 +211,61 @@ quantization pipelines, so an A/B across them would confound path with checkpoin
 
 The review's point about not calling different stacks the same "production control"
 applies directly here.
+
+## Replay plan (grounded in the checks above)
+
+### What installing M7 requires
+
+1. **Patch chain into the test-site**, in order (the nseg35 patch says "apply after
+   `spec-decode-segments-sm80.patch`"):
+   - `spec-decode-segments-sm80.patch` — makes the segment count explicit and adds it to
+     the workspace cache key; allows `8, 16, 32, 64`, default 16;
+   - `spec-decode-nseg35-sm80.patch` — adds **35** to the allowed set and pads the combine
+     reduction to `next_power_of_2(nseg)` via `SEG_TILE`.
+2. **Environment**: `VLLM_SPEC_DECODE_ATTN_SEGMENTS=35` (the deployed env example says
+   **32**, which is pre-M7), plus the FP8 flags the service already sets
+   (`VLLM_FP8_SPEC_VERIFY=1`, `VLLM_FP8_SPEC_FULL_CG=1`, `SPEC_ATTN=1`), `MAX_LEN=262144`,
+   `MAX_SEQS=4`, `DFLASH_TOKENS=7`, `LOOKUP=0`, `PREFIX_CACHE=1`.
+3. **FULL graph** (`VLLM_FP8_SPEC_FULL_CG=1`), because M7's number is a repeated
+   FULL-graph pass.
+4. **180 W** power limit (the freeze doc's operating point). Decide explicitly whether to
+   also pin 1350 MHz, and record which was used.
+5. **Corpus**: rebuild via `--corpus-root <tree>`, then **hash both the corpus and the
+   prompt token IDs** and publish those hashes, because the original corpus is gone.
+
+### The one decision that changes what "apples-to-apples" can mean
+
+The M7 service targets `Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4`; the repaired
+`int8_per_token_head` path in phase 1 targets `Qwen3.8-27B-W4A16-AutoRound-fast`. Both are
+present on the host (15 GB each), so there are two defensible scopes:
+
+- **A. Same-checkpoint Path A/B (clean A/B, loses M7-history comparability).** Run both
+  paths on `AutoRound-fast` (or both on `Uncensored`), so the only difference is the
+  path. The M7 *historical* numbers were taken on `Uncensored`, so a same-checkpoint A/B
+  on `AutoRound-fast` compares Path A vs Path B cleanly but cannot be placed next to the
+  frozen 22.315/35.230/46.941 without a checkpoint caveat.
+- **B. M7-faithful replay first, then a same-checkpoint A/B (more GPU time).** Install M7
+  on `Uncensored`, replay 4K/65K/126K/250K C1, and see whether 22.315/35.230/46.941
+  reproduce. Then run the repaired int8 path on the **same** `Uncensored` checkpoint for
+  the A/B, and separately note that phase 1's numbers were on `AutoRound-fast`.
+
+Both are honest; they answer different questions. B answers "has the baseline moved?" and
+"is the repaired path competitive with M7 on M7's own terms", which is what the review's
+question 2 asks. A answers "is path A or path B faster" without the history question.
+
+The review's question 2 ("is M7 mixed-FP8 still the fastest long-context production
+candidate?") requires **B**. Question 3 ("how much faster/slower is repaired int8 at
+4K/65K/126K/250K?") requires a **same-checkpoint** comparison, which B also provides on
+`Uncensored`.
+
+### Order of work, cheapest-first
+
+1. paired 4K int64-widening regression test (review item 6) — short context, ~30 min,
+   and it decides whether the widening cost anything;
+2. install the M7 patch chain + `SEGMENTS=35` into the test-site, verify the kernel
+   compiles and the service is healthy;
+3. rebuild + hash the corpus, then replay 4K C1 → 65K C1 → 126K C1 → 250K C1 with the
+   historical harness (`bench/context_ab.py`), 3 rounds each, recording `ms/step`,
+   `tokens_per_step`, TTFT, decode tok/s and Xid delta;
+4. run the repaired int8 path on the same corpus and checkpoint for the A/B;
+5. only then answer the phase-2 questions and pick the next optimisation target.
