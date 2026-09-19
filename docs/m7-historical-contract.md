@@ -153,3 +153,61 @@ numbers disagree with history, try the other before blaming the protocol.
 
 `docs/verifier-redesign-log.md` as introduced by `1231ccf`; `bench/context_ab.py`,
 `bench/make_long_corpus.py` as present at `1231ccf`; the M7 diff `7f15950`.
+
+## Corroboration of the `step` definition from the M7 patch itself
+
+The `ms/step` meaning is confirmed independently by the M7 patch's own prose
+(`experimental/cmp170hx-mixed-fp8/patches/spec-decode-nseg35-sm80.patch` at `7f15950`):
+
+> Align the CMP 170HX verifier grid to its 140 streaming multiprocessors. ... With four
+> KV heads, NSEG=32 launches only 128 CTAs and leaves twelve of the 140 SMs idle.
+> NSEG=35 launches exactly 140 CTAs, while NSEG=40/48/64 spill into a second, poorly
+> occupied wave. ...
+> **Repeated FULL-graph model passes fell from 36.3 to 34.7-35.4 ms at 126K and from
+> 50.0 to 47.5-48.1 ms at 250K; 4K stayed at 22.4 ms** with zero preemptions.
+
+Two things follow:
+
+1. `ms/step` is the **whole speculative model pass** under **FULL CUDA Graph** — the
+   patch describes exactly that quantity, and its post-M7 values (34.7-35.4 at 126K,
+   47.5-48.1 at 250K, 22.4 at 4K) bracket the frozen table's 35.230 / 46.941 / 22.315.
+   So the frozen numbers are M7's repeated-pass latencies, not isolated-kernel times and
+   not per-output-token times;
+2. the geometry is **NSEG 35 x 4 KV heads = 140 CTAs on 140 SMs**. Note this is the SM
+   count as the kernel sees it; earlier notes in this project described "70 SMs x two
+   resident CTAs", and `2e03605` ("docs: correct CMP170HX resident CTA geometry") is the
+   correction. The replay must use **NSEG=35**, not the deployed service's 32.
+
+## Replay feasibility blocker, found before spending GPU time
+
+**The deployed baseline service is not M7.** Checks on the lab host:
+
+| check | result |
+| --- | --- |
+| `cmp170hx-mixed-fp8-full-256k-8002.service` | `inactive`, `disabled` |
+| its launcher: `/…/mixed-fp8-repo/single-user/start_qwen.sh` | present |
+| that tree's `handover.md` header | **"Last updated: 2026-09-15"** |
+| does it contain the freeze table (`22.315`)? | **no** — no `verifier-redesign-log.md` at all |
+| does it carry `spec-decode-nseg35-sm80.patch`? | **no** — only `spec-decode-segments-sm80.patch` |
+| the deployed service's `VLLM_SPEC_DECODE_ATTN_SEGMENTS` | **32**, not 35 |
+
+M7 (`7f15950`) and the freeze doc (`1231ccf`) are both dated **2026-09-16**, i.e. after the
+deployed tree. So replaying M7 requires installing the M7-era code (at minimum:
+`spec-decode-segments-sm80.patch` then `spec-decode-nseg35-sm80.patch`, and
+`VLLM_SPEC_DECODE_ATTN_SEGMENTS=35`), not merely starting the existing service.
+
+This is worth stating plainly because "start the baseline service and re-measure" would
+have produced numbers labelled M7 that were actually a pre-M7 build with NSEG 32.
+
+## Checkpoint mismatch to carry into any Path A / Path B A/B
+
+The M7 service targets `Qwen3.8-27B-Uncensored-W4A16-RTX3090-MTP4`, while the repaired
+`int8_per_token_head` path measured in phase 1 targets
+`Qwen3.8-27B-W4A16-AutoRound-fast`. Those are **different checkpoints**, from different
+quantization pipelines, so an A/B across them would confound path with checkpoint. Either:
+
+- run both paths on the **same** checkpoint, or
+- report any cross-checkpoint comparison explicitly as confounded.
+
+The review's point about not calling different stacks the same "production control"
+applies directly here.
