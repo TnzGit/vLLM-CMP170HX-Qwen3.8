@@ -1,0 +1,12 @@
+diff --git a/vllm/v1/attention/ops/spec_decode_attn.py b/vllm/v1/attention/ops/spec_decode_attn.py
+--- a/vllm/v1/attention/ops/spec_decode_attn.py
++++ b/vllm/v1/attention/ops/spec_decode_attn.py
+@@ -377,7 +377,7 @@ class SpecDecodeAttention:
+         self.head_dim = head_dim
+         self.device = device
+         n = max_num_reqs * num_heads * qmax * self.nseg
+-        self.part_o = torch.empty(n, head_dim, dtype=torch.float32, device=device)
++        self.part_o = torch.empty(n, head_dim, dtype=torch.float16, device=device)
+         self.part_m = torch.empty(n, dtype=torch.float32, device=device)
+         self.part_l = torch.empty(n, dtype=torch.float32, device=device)
+         self.fp8_lut = torch.tensor(

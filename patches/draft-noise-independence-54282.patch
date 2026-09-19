@@ -1,0 +1,114 @@
+Backport upstream vLLM #54282 -- invariant only: draft proposal noise must not come from
+the process-global unseeded generator.
+
+THE INVARIANT
+-------------
+Draft proposal must not consume a process-global random stream. v0.27.1 did:
+
+    q = empty_exponential_noise_like(probs, use_fp64_gumbel)
+    q.exponential_()          # global default generator, unseeded
+    # upstream comment: "# TODO(woosuk): Consider seeds."
+
+Two concrete consequences:
+
+  * the draft stream is shared process-wide, so how many draws other concurrent requests
+    make changes this request's draft tokens;
+  * an unseeded request's drafts are not reproducible from its seed.
+
+The fix draws draft noise from a dedicated generator seeded at DRAFT_NOISE_SALT = 1 << 30,
+far above the range request seeds occupy, so draft noise is dedicated and reproducible.
+
+SCOPE, MEASURED NOT ASSUMED
+---------------------------
+This does **not** fix a distributional bias in the accepted tokens, and the patch comment
+says so. The target and residual paths already draw from per-request SEEDED generators:
+
+    rejection_sampler.generate_uniform_probs  -> uniform_probs[..].uniform_(generator=...)
+    rejection_sampler.sample_recovered_tokens -> q[i].exponential_(generator=generator)
+
+so they were never sharing a stream with the draft. A 200k-trial chi-square check over
+vocab 16 found no bias before or after this change
+(`bench/int8-g64/test_draft_noise_independence.py`). An earlier revision of that test
+printed a success message on a `0.00 > 0.00` comparison; that false positive was removed,
+and the script now reports "NO BIAS DETECTED" and explains why.
+
+WHY STILL WORTH BACKPORTING
+---------------------------
+Independence is the invariant upstream establishes, and the reproducibility/global-stream
+defect is real: concurrent requests currently perturb each other's draft tokens. It is a
+probabilistic-correctness and reproducibility fix, not a performance fix.
+
+WHAT IS VERIFIED
+----------------
+  * greedy unaffected: two greedy requests identical, and greedy seeded == greedy unseeded
+    (the greedy path never draws noise, so the patch must be a no-op -- it is);
+  * temperature > 0: produces output, seeded repeats identical, differs from greedy;
+  * the draft draw is independent of global-stream traffic, with a control showing the
+    global stream IS order-dependent (so the check is not trivially true);
+  * both vLLM installs patched (the M7 test-site shadows this file, see
+    docs/m7-historical-contract.md);
+  * Xid delta 0.
+
+Coverage: the generic draft path and the DFlash2 selector both reach
+compute_probs_and_sample_next_token (DFlashProposer subclasses SpecDecodeBaseProposer and
+does not override it), so one edit covers both. The target/residual path is untouched.
+
+This is the invariant only -- no attempt to reproduce upstream's exact API, since this tree
+is v0.27.1 plus a backported DFlash2 with its own selector truncation, logits-cache and
+temperature handling.
+
+Written against vLLM 0.27.1.
+--- a/v1/spec_decode/llm_base_proposer.py
++++ b/v1/spec_decode/llm_base_proposer.py
+@@ -1849,6 +1849,24 @@
+ _DRAFT_TEMP_SCALE = float(__import__("os").environ.get("VLLM_DRAFT_TEMP_SCALE", "1.0"))
+ 
+ 
++# Draft-proposal noise must not share a stream with target verification (#54282).
++# The offset sits far above the range request seeds occupy, so a draft draw can never
++# collide with a target draw for the same (seed, position).
++DRAFT_NOISE_SALT = 1 << 30
++_DRAFT_NOISE_GENERATORS: dict = {}
++
++
++def _draft_noise_generator(device):
++    """A process-wide generator, disjoint from the target's per-request streams."""
++    key = str(device)
++    gen = _DRAFT_NOISE_GENERATORS.get(key)
++    if gen is None:
++        gen = torch.Generator(device=device)
++        gen.manual_seed(DRAFT_NOISE_SALT)
++        _DRAFT_NOISE_GENERATORS[key] = gen
++    return gen
++
++
+ def compute_probs_and_sample_next_token(
+     logits: torch.Tensor,
+     sampling_metadata: SamplingMetadata,
+@@ -1900,9 +1918,24 @@
+     # could degrade the acceptance rate, it does not affect the distribution
+     # of the generated tokens after rejection sampling.
+ 
+-    # TODO(woosuk): Consider seeds.
++    # Draft noise must not come from the process-global unseeded generator (upstream
++    # #54282). Two concrete consequences of the old `q.exponential_()`:
++    #   * the draft stream is shared process-wide, so how many draws other concurrent
++    #     requests make changes this request's draft tokens;
++    #   * an unseeded request's drafts are not reproducible from its seed.
++    #
++    # DRAFT_NOISE_SALT puts the draft generator in a region of the seed space far above
++    # any request seed, so draft noise is dedicated and reproducible.
++    #
++    # Scope note, measured rather than assumed: this does NOT fix a distributional bias
++    # in the accepted tokens. The target and residual paths already draw from per-request
++    # seeded generators (rejection_sampler.generate_uniform_probs /
++    # sample_recovered_tokens), so they were never sharing a stream with the draft; a
++    # 200k-trial chi-square check over vocab 16 found no bias before or after this change
++    # (bench/int8-g64/test_draft_noise_independence.py). The target path is left untouched
++    # on purpose.
+     q = empty_exponential_noise_like(probs, use_fp64_gumbel)
+-    q.exponential_()
++    q.exponential_(generator=_draft_noise_generator(q.device))
+     # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
+     # will be used later for rejection sampling.
+     next_token_ids = sample_with_exponential_noise(probs.clone(), q)

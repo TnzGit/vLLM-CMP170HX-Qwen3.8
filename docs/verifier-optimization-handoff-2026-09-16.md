@@ -1,0 +1,952 @@
+# CMP170HX verifier optimization handoff (2026-09-16)
+
+## Objective and hard boundaries
+
+The goal is to improve long-context speculative-verification attention on a
+single CMP 170HX (SM80) without sacrificing correctness, CUDA-graph safety,
+or the currently qualified production path. The active production service is
+not part of this experiment. No production vLLM process, port 8000, Guardian,
+model file, or production configuration has been changed.
+
+All measurements below were run in an isolated directory on 206:
+
+- Test site: `/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-test-site`
+- Benchmark repo: `/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-repo`
+- E21 CUDA prototype: `/home/base-node/.codex_tasks/pixelml-cmp170hx/v7-cuda-prototype/experimental/cmp170hx-mixed-fp8/cuda_prototype/v7_verifier.cu`
+- E21 Python adapter: `/home/base-node/.codex_tasks/pixelml-cmp170hx/v7-cuda-prototype/experimental/cmp170hx-mixed-fp8/cuda_prototype/spec_decode_attn_v7.py`
+- Runtime: `/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/bin/python`
+- CUDA toolkit: `.../site-packages/nvidia/cu13`
+- Extension cache: `/home/base-node/.codex_tasks/pixelml-cmp170hx/v7-cuda-prototype/build`
+
+The GitHub documentation branch is `work/cmp170hx-mixed-fp8` in
+`https://github.com/TnzGit/vLLM-CMP170HX-Qwen3.8.git`. The qualified source
+remains E21; rejected experiments were only temporary copies or restored
+source.
+
+## Real call path and target shape
+
+The actual vLLM route is:
+
+`flashinfer.py → _spec_attn_run → SpecDecodeAttention`
+
+The production q8 specialization is `_spec_attn_partial_q8_g6_fp8`:
+
+- static FP8 E4M3 K/V cache, represented as raw uint8 in Triton;
+- Hq/Hkv/D = 24/4/256, therefore G = 6;
+- q length normally 8 for the current MTP configuration;
+- physical block size 896 tokens;
+- `TILE=32`, `NSEG=35`, four warps, one stage;
+- page-boundary block-table reload;
+- global FP8 loads plus `ld.global.nc.u16` LUT decode;
+- a small combine kernel follows the partial kernel.
+
+The E21 prototype is a separate CUDA kernel with the same logical shape. It
+stages raw FP8 K/V into shared memory, decodes through a shared LUT, uses a
+warp-3 next-K prefetch, and maintains an FP16 accumulator with `kAccLd=258`.
+E21 resources are 133 registers/thread, 81,856 B dynamic shared memory, 128
+threads, and two CTAs/SM.
+
+## Baseline measurements
+
+The isolated benchmark is
+`bench/spec_attn_fp8_ctx_scan.py`, with identical cache/query/block-table
+inputs, `q=8`, `NSEG=35`, 30 warmups and 100 timed iterations for the locked
+clock scans. Values are microseconds per attention layer.
+
+The existing Triton q8 path is currently qualified:
+
+| context | Triton q8 us/layer |
+|---:|---:|
+| 4K | 53.6-57.1 |
+| 126K | 772-776 |
+| 250K | 1,529-1,533 |
+
+The earlier real-API wrapper A/B (same inputs, unlocked clock) measured E21 at
+2.52x/2.83x/2.75x Triton latency at 4K/126K/250K (180.8/2,109.1/4,111.0 us
+versus 71.8/746.7/1,495.6). Therefore the attractive standalone E21 scans
+were not an apples-to-apples vLLM baseline and must not be used to justify
+dispatch integration.
+
+## NCU evidence (same 126K, q=8, NSEG=35 partial launch)
+
+Performance counters were collected with NCU `default`/`detailed` sections
+using root-only counter access. Both kernels launch 128 threads with grid 140
+and have 12.5% theoretical occupancy.
+
+| metric | Triton q8 | E21 |
+|---|---:|---:|
+| profiled duration | 895 us | 2.52 ms |
+| memory throughput | 73.53% | 54.65% |
+| DRAM throughput | 16.30% | 5.79% |
+| L1/TEX throughput | 74.84% | 55.16% |
+| L1 hit rate | 87.59% | 0.16% |
+| L2 hit rate | 26.32% | 26.06% |
+| compute throughput | 44.08% | 30.75% |
+| registers/thread | 252 | 133 |
+| dynamic shared | 57.34 KiB | 81.86 KiB |
+| achieved occupancy | 12.21% | 12.44% |
+
+The key inference is that E21 is not losing because it has fewer active
+warps. The existing Triton path gets substantial L1 reuse from repeated K/V
+loads across the six query heads. E21 adds shared K/V staging and LUT decode,
+but its global reads have almost no L1 hit and its total instruction/traffic
+pattern is less efficient. Any new candidate must beat the q8 specialization,
+not merely beat an older generic Triton path.
+
+## Experiments already completed
+
+### E21 accepted prototype baseline
+
+Correctness passed exhaustive E4M3 decoding, mixed request lengths, int64/high
+physical block IDs, and a two-request CUDA-graph capture/replay. Locked 1350MHz
+standalone medians (us/layer) were 186.1/479.0/1,136.3/2,205.6/3,403.6/4,218.6
+at 4K/20K/60K/126K/200K/250K. This is accepted as a correctness prototype,
+not as a production dispatch candidate.
+
+### E23 aligned LUT container — rejected
+
+Preserved 81,856 B and two CTAs/SM; long-context change was under 1% while 4K
+regressed 3.3%. Source restored to E21.
+
+### E24 warp-3 V prefetch — rejected
+
+Correctness passed but one warp copied V at one quarter of the original copy
+parallelism. Long-context latency regressed about 25% (250K 5.29 ms versus
+4.22 ms). Source restored to E21.
+
+### E25 cp.async K prefetch — rejected
+
+Correctness passed, but registers rose from 133 to 134 and locked-clock scans
+regressed 1.2-1.3% at 20K-250K and 4.6% at 4K. Immediate commit/wait overhead
+outweighed overlap. Source restored to E21.
+
+### E26 direct vLLM API wrapper — rejected
+
+A disposable wrapper routed only the exact static-FP8 shape to E21 and used
+Triton fallback elsewhere. Numerical max_abs was 0.000008-0.000015. Actual
+API A/B rejected direct integration because E21 was 1.52-1.83x slower. This
+also explains why a standalone prototype timing is misleading.
+
+### E27 q8 `.cg` K/V cache modifier — rejected
+
+Only the q8 raw K/V loads changed to `cache_modifier=".cg"`. Locked 1350MHz
+results (Triton current versus `.cg`) were 53.7/53.6, 774.6/765.2 and
+1,529.6/1,537.2 us/layer at 4K/126K/250K. Outputs were identical; the mixed
+±1.2% effect is below the gate and not directionally consistent.
+
+### E28 q8 warp count 4→8 — rejected
+
+Only the launch warp count changed. Locked results were 54.6/66.4,
+776.1/1,379.2 and 1,548.1/2,708.1 us/layer at 4K/126K/250K. Eight warps
+regressed 22-78% with identical output.
+
+### E29 q8 TILE 32→64 — rejected
+
+Only the q8 K/V tile width changed. Locked results were 53.6/59.5,
+775.7/1,278.5 and 1,533.3/2,502.7 us/layer at 4K/126K/250K. The wider tile
+regressed 11% at 4K and 63-65% long-context, with identical output.
+
+### E30 arithmetic E4M3 decode — rejected
+
+Only LUT decode changed to integer sign/exponent/mantissa extraction plus
+`exp2`. Locked results were 57.1/64.2, 772.2/1,349.6 and 1,532.7/2,658.2
+us/layer at 4K/126K/250K. Extra instructions overwhelmed any LUT-load saving.
+
+### NSEG scan
+
+The service profile uses NSEG=35. An isolated scan found (us/layer):
+
+| context | NSEG=16 | NSEG=32 | NSEG=35 | NSEG=64 |
+|---:|---:|---:|---:|---:|
+| 4K | 57.0 | 54.5 | 56.7 | 57.7 |
+| 126K | 1,347 | 913 | **769** | 858 |
+| 250K | 2,346 | 1,586 | **1,533** | 1,663 |
+
+NSEG=35 is already the best tested long-context setting; increasing segment
+count is not a free scaling knob.
+
+## What is still unresolved
+
+1. Why the current Triton q8 kernel has such high L1 reuse while E21's shared
+   staging lowers effective traffic. The likely explanation is that six query
+   heads repeatedly reuse identical K/V tiles inside the q8 CTA; E21 pays
+   staging/decode/barrier cost without eliminating the dominant cache-resident
+   work.
+2. Whether a new kernel can preserve the q8 specialization's global FP8 loads
+   and hard-coded 48 query rows while borrowing only one E21 idea (for example
+   a cheaper page-base/prefetch mechanism). This must be implemented as a
+   q8-specific kernel, not by dispatching the generic E21 path.
+3. Whether the long-context decay is predominantly verifier attention or
+   another engine component (MTP acceptance, GDN, or scheduling). The
+   attention microbench only isolates one layer; end-to-end conclusions need
+   prefill/decode telemetry with the same model and MTP setting.
+
+## Recommended next experiments (one factor at a time)
+
+The next implementation should keep the qualified q8 kernel as the default
+and add an opt-in candidate selected by an environment variable. Recommended
+order:
+
+1. **q8-specific page-base/prefetch micro-change:** preserve direct global
+   K/V/LUT loads and hard-coded q8 row layout; change only block-table/page
+   address handling. Compare NSEG=35 at 4K/126K/250K, then inspect NCU L1
+   hit, instruction count and duration.
+2. **Fuse or vectorize the existing LUT path without changing cache policy:**
+   arithmetic decode and shared-LUT staging are already negative controls;
+   only a true vectorized table access that lowers instruction count is worth
+   trying.
+3. **MTP-shape specialization:** q=6 or q=8 should use separate static
+   layouts; do not pay generic padding for q=8. Validate q=4/6/8, two-request
+   batching and graph capture before timing.
+4. **End-to-end telemetry:** instrument proposal/verify acceptance, q8 kernel
+   time, GDN time and scheduler gaps at 4K/70K/120K/200K. This distinguishes
+   verifier attention from non-attention long-context decay.
+
+Reject any candidate that fails correctness, introduces spills/local memory,
+reduces graph safety, or improves only one noisy length by less than 2%.
+
+## Reproduction snippets
+
+Qualified Triton q8:
+
+```bash
+cd /home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-repo
+PYTHONPATH=/home/base-node/.codex_tasks/pixelml-cmp170hx/mixed-fp8-test-site \
+CUDA_HOME=/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/lib/python3.12/site-packages/nvidia/cu13 \
+TORCH_EXTENSIONS_DIR=/home/base-node/.codex_tasks/pixelml-cmp170hx/v7-cuda-prototype/build \
+/home/base-node/.codex_tasks/pixelml-cmp170hx/runtime-v0271/venv/bin/python \
+bench/spec_attn_fp8_ctx_scan.py --contexts 4096,126000,250000 \
+--queries 8 --segments 35 --warmup 30 --iters 100
+```
+
+The E21 adapter is selected by adding:
+
+```bash
+--module /home/base-node/.codex_tasks/pixelml-cmp170hx/v7-cuda-prototype/experimental/cmp170hx-mixed-fp8/cuda_prototype/spec_decode_attn_v7.py
+```
+
+For NCU, run as root on the isolated host and use launch skip 20 to select
+the partial attention kernel; the first 20 launches are cache construction.
+
+## Current decision
+
+Do not merge E21 into vLLM dispatch. The qualified production q8 Triton
+specialization is faster and numerically correct. Continue only with a
+q8-specific design that preserves its global-load/reuse behavior, and use
+this document as the handoff boundary for independent review.
+
+## Post-handoff milestones
+
+### E31 — q8 block-ID int32 fast path (rejected)
+
+Removing the two explicit q8 block-ID `int64` conversions produced no
+repeatable long-context gain (under 0.5%); interleaved 500-iteration 4K
+repeats ranged from -0.9% to +4.6% to +2.0%. The qualified path was restored.
+
+### E32 — q8 next-page block-table prefetch (rejected)
+
+Prefetching the next page block ID one tile early gave 55.9/55.3 us at 4K,
+775.8/770.4 us at 126K and 1533.7/1543.2 us at 250K (baseline/candidate,
+locked 1350MHz, q=8, NSEG=35). Output was identical, but the deltas (-0.8%,
+-0.7%, +0.6%) are below the 2% gate. No source change was kept.
+
+### Current handoff decision
+
+E27–E32 found no durable one-knob improvement. NCU attributes the gap to
+execution/resource behavior rather than an obvious cache-policy or address
+conversion issue: the qualified Triton q8 path has high L1 reuse and better
+effective memory behavior than the E21 shared-staging candidate, while both
+have similarly low achieved occupancy. The next justified work is either a
+q8-specific structural kernel design that preserves global FP8/LUT reuse, or
+end-to-end telemetry to prove that verifier attention is the dominant wall
+time before changing it. Production dispatch remains untouched.
+
+### E33 — full register-resident persistent accumulator (rejected)
+
+The isolated full-register candidate was numerically exact and reduced
+locked-clock verifier latency by about 3.7%/4.2%/4.5% at 4K/126K/250K.
+However, ptxas used 255 registers/thread and emitted 124--172B spill
+stores/loads. This fails the zero-spill gate; the source was discarded.
+
+### Updated next step
+
+E33 confirms that shared accumulator traffic is measurable but that all-at-once
+registerization exceeds the compiler's safe register budget. Any follow-up
+must keep the live register set bounded (for example, a small tile-group
+register cache with explicit shared checkpoints) and must pass ptxas before
+timing. In parallel, end-to-end telemetry should establish whether this
+partial-kernel gain can matter to whole-model latency.
+
+### E34 — partial register-resident accumulator (rejected)
+
+Registerizing four of sixteen D16 tiles passed ptxas (168 registers/thread,
+zero spills) but reduced locked-clock latency only 1.8%/1.1%/1.2% at
+4K/126K/250K, below the 2% gate. The qualified source was restored.
+
+### Next candidate: cooperative two-lane softmax
+
+The remaining WMMA path has owner-local softmax where only lanes 0--15 each
+scan 32 score columns serially. A two-lane-per-row candidate will split each
+row into two 16-column halves and combine max/sum with warp shuffles. It must
+preserve BF16 P writes, causal masking and FP16-per-tile rounding, then pass
+the same numerical, ptxas and locked-clock gates.
+
+### E35 — cooperative half-warp softmax (accepted isolated candidate)
+
+The candidate uses the WMMA-compatible mapping `local_row = lane & 15`,
+`half = lane >> 4`, and exchanges the peer half with
+`__shfl_xor_sync(..., 16)`. Each row's 32 score columns are processed as two
+16-column halves; the lower half owns the final alpha/m/l publication. This
+avoids the incorrect adjacent-lane mapping (`lane >> 1`, `lane & 1`) and
+leaves cache, block table, QK/PV, BF16 P writes and the workspace ABI intact.
+
+Reference-based correctness passed for single, mixed, int32/int64 and high
+block-ID cases: max absolute error was 0.000977 for standard cases and
+0.062500 for the high-ID case. ptxas reported 164 registers/thread, zero
+spills and unchanged shared-memory/two-CTA geometry.
+
+Interleaved locked-1350MHz q=8/NSEG=35 medians (E21/E35, us/layer) were
+185.8/179.8 at 4K (3.2% faster), 2,209.5/2,064.0 at 126K (6.6% faster),
+and 4,220.9/3,952.6 at 250K (6.4% faster). E35 clears the 2% isolated gate
+and is retained as a candidate, but is not yet vLLM dispatch-ready: matched
+API, two-request and CUDA-Graph A/B checks remain required. Reduction-order
+differences are why acceptance is reference-based rather than bit-identical
+to E21.
+
+Current next gate: obtain matched NCU attribution if the installed legacy
+Nsight Compute accepts an unambiguous option form, then measure E35 through
+the real SpecDecodeAttention API. Do not merge it into production from
+standalone timing alone.
+
+### E35-A1 NCU attribution (matched 4K/q=8 partial launch)
+
+The old Nsight Compute 2022.4 CLI works when the application name precedes
+its arguments; the earlier failures were option-parser misuse. Matched
+sampling of the same 128-thread/grid-140 partial kernel at locked clocks
+reported E21/E35 duration 202.912/195.136 us (3.8% lower for E35),
+compute-memory throughput 23.98%/24.85%, DRAM throughput 2.38%/2.47%,
+L1/TEX throughput 24.62%/25.50%, L1 hit 87.86%/87.93%, and L2 hit
+55.19%/54.96%. Both had the same 200-block, 2-CTA launch limit and
+81.856 KiB dynamic shared; E21/E35 used 133/164 registers per thread.
+Thus E35's isolated gain is not an occupancy change or a cache-policy
+change; it is consistent with doing less serial softmax work while retaining
+the same memory geometry. This is still not an end-to-end vLLM result.
+
+### E35-Q1 — two-request API-shaped qualification (accepted)
+
+Using the same standalone `SpecDecodeAttention` ABI with two requests
+(`q=5+8`) and request-private block-table rows, E35 remained faster than
+the E21 standalone adapter: 377.5/352.6 us at 4K (6.60%), 4,349.5/4,059.5
+us at 126K (6.67%) and 8,357.2/7,793.0 us at 250K (6.75%). Reference
+max-error was 0.000000, 0.000015 and 0.000000 respectively. This confirms
+the half-warp mapping is request-safe in the fixed ABI; it does not yet
+prove scheduler or vLLM integration safety.
+
+### E35-Q2 — two-request CUDA Graph capture/replay qualification (accepted)
+
+With fixed cache, query, block-table and workspace addresses, both E21 and
+E35 captured and replayed the two-request (`q=5+8`, 4K) sequence. Each
+replay matched its eager output with max absolute difference 0.000000.
+This is a capture-safety result for the standalone adapter only; arbitrary
+scheduler shapes still require a graph pool or eager fallback.
+
+### E35-A2 long-context NCU attribution (126K)
+
+Matched legacy Nsight Compute sampling of the same partial launch measured
+2.5264 ms for E21 and 2.3367 ms for E35 (7.5% lower). Compute-memory
+throughput was 54.66%/59.11%, DRAM throughput 5.79%/6.25%, L1/TEX
+throughput 55.17%/59.84%, L1 hit 16.40%/16.38% and L2 hit 26.05%/26.06%
+(E21/E35). Launch geometry/shared memory stayed identical and registers
+were 133/164. The long-context delta therefore remains consistent with
+reduced softmax serialization rather than changed cache residency.
+
+## E35 disposition and E36 design gate
+
+E35 is now a **qualified research baseline**, not a production dispatch
+candidate. The qualification and attribution records are intentionally named
+`E35-Q1` (two-request eager/API-shaped), `E35-Q2` (two-request CUDA Graph
+capture/replay), `E35-A1` (matched 4K NCU) and `E35-A2` (matched 126K NCU).
+This keeps `E36` available for a real data-flow change rather than another
+qualification pass. No production vLLM service or port is changed by this
+status update.
+
+The next candidate is **E36: direct register-fed K for QK**. It must retain
+E35's cooperative half-warp softmax, `TILE=32`, `NSEG=35`, accumulator,
+V/PV path, output/workspace ABI and request mapping. The intended data flow
+is:
+
+```text
+global FP8 K load -> per-lane LUT decode -> BF16 register operands
+                                          -> SM80 mma.sync QK
+```
+
+The current code cannot safely substitute a register value for the
+`wmma::fragment<matrix_b>` argument: WMMA fragment register layout is
+implementation-defined. Therefore E36 must introduce an explicit operand
+mapping (and, if required by the PTX instruction shape, a matching Q-register
+mapping) before emitting `mma.sync.aligned.m16n8k16`. V/PV remains on the
+existing WMMA/shared path for this experiment. Keeping the existing shared
+allocation during the first prototype is preferred so any gain is attributable
+to the K feed rather than an occupancy/layout change; reclaiming shared bytes
+is a separate follow-up.
+
+### E36 hard gates
+
+1. Compare against E35 with identical inputs, q=8, `NSEG=35`, and locked
+   clocks at 4K, 126K and 250K. The 126K median must improve by at least 10%
+   to justify extending the idea to V/PV; a 2--5% gain is a rejection.
+2. Exhaustive FP8 decode, mixed query lengths, int32/int64 and high block IDs
+   must match the reference within the existing tolerance; no illegal access,
+   NaN/Inf divergence or stale request state is allowed.
+3. `ptxas` must report zero spills/local bytes, no worse than two CTAs/SM,
+   and no hidden workspace/ABI change. Record registers, shared bytes and
+   launch geometry before timing.
+4. Run the same two-request eager and fixed-address CUDA Graph checks used by
+   E35-Q1/Q2 before any end-to-end integration. Use a fresh user-owned build
+   cache for every candidate; do not reuse root-owned NCU/Ninja directories.
+
+If the explicit SM80 operand mapping cannot be implemented without increasing
+registers enough to lose two-CTA residency, E36 should be marked blocked and
+the next work should return to the production Triton q8 path rather than
+force a WMMA/inline-PTX hybrid.
+
+### E36-A0 result — explicit `mma.sync` score path (rejected)
+
+**Date:** 2026-09-17
+
+The SM80 BF16 fragment ABI was first verified in isolation: WMMA-loaded
+operands fed to explicit `mma.sync.aligned.m16n8k16` produced identical
+accumulator values and the documented four-register output mapping. E36-A0
+then replaced each E35 m16n16 QK operation with two explicit m16n8 operations,
+while retaining E35's shared FP8 decode, cooperative softmax, PV path, shared
+geometry, `TILE=32`, `NSEG=35` and workspace ABI. The first implementation
+performed a shared read-modify-write for each K sub-fragment and was rejected
+after it regressed long-context latency. It was corrected to keep both 8-column
+accumulators in registers across all 16 K sub-fragments and write scores once.
+
+With clocks locked at 1350 MHz and identical `q=8`, `NSEG=35` inputs, the
+corrected E36-A0 measured E35/E36 latency (us/layer) of 180.5/182.7 at 4K,
+2064.7/2077.6 at 126K and 3947.1/3976.4 at 250K. The deltas are -1.2%,
+-0.6% and -0.7% for E36, respectively; all runs had `maxdiff=0.000000`.
+`ptxas` reported 165 registers/thread, zero spill stores/loads, 81,856 B
+dynamic shared and the same two-CTA residency target. Thus the explicit MMA
+ABI is correct but this decomposition has no performance value and is
+rejected. No production or qualified E35 source changed.
+
+The remaining E36 data-flow target is the actual NInfer-style change: remove
+decoded-K shared staging and feed BF16 K operands from a per-lane FP8 decode
+into registers, with an explicit operand mapping. That is a new candidate and
+must be benchmarked independently; E36-A0 must not be presented as evidence
+for or against that register-fed K design.
+
+### E36-A1 result — direct global FP8 K feed (rejected)
+
+**Date:** 2026-09-17
+
+E36-A1 replaced E35's decoded-K shared read with per-owner-lane global FP8
+loads, LUT decode and explicit `mma.sync` BF16 operands. V/PV and E35's
+cooperative softmax were unchanged. Same-input correctness was exact at 4K,
+126K and 250K (`maxdiff=0.000000`, `meandiff=0.000000`). However, the three
+owner warps independently reloaded the same K tile, tripling global traffic
+and adding uncoalesced 64-bit address arithmetic.
+
+At locked 1350 MHz with q=8/NSEG=35, E35/E36-A1 medians (us/layer) were
+181.6/215.1 at 4K, 2065.6/3124.3 at 126K and 3949.2/6063.5 at 250K.
+E36-A1 was therefore 18.5%, 51.2% and 53.5% slower and is rejected. No
+qualified or production source changed. The next candidate must stage raw K
+once cooperatively (without a decoded-K matrix) before owner-local register
+decode; this is E36-A2.
+
+### E36-A2 result — cooperative raw-K shared staging (rejected)
+
+**Date:** 2026-09-17
+
+E36-A2 staged each raw FP8 K tile once across the CTA, decoded raw shared
+bytes through the LUT directly into owner-local BF16 MMA operands, then
+reused the alias for V staging/decoding after QK. This removed A1's repeated
+global reads while leaving E35's softmax, V/PV, workspace ABI and
+`TILE=32`/`NSEG=35` geometry intact. Same-input correctness was exact at 4K,
+126K and 250K (`maxdiff=0.000000`, `meandiff=0.000000`).
+
+At locked 1350 MHz with q=8/NSEG=35, E35/E36-A2 medians (us/layer) were
+181.5/214.3 at 4K, 2063.2/3221.4 at 126K and 3951.4/6291.6 at 250K.
+E36-A2 was 18.1%, 56.1% and 59.2% slower. The cooperative raw stage avoids
+the 3x global traffic but still makes each owner warp reread raw shared bytes
+and adds a serial K-stage/V-stage barrier; that cost dominates on this SM80
+path. E36-A2 is rejected and no source is promoted. The E36 register-fed-K
+direction is therefore closed for now; future work should target a genuinely
+cooperative producer/consumer schedule (or return to the production Triton q8
+path) rather than further tuning this owner-local raw-reader variant.
+
+### E36-B0 result — explicit MMA with register score but shared PV (rejected)
+
+**Date:** 2026-09-17
+
+E36-B0 kept E35's FP8/LUT staging and shared PV path, but replaced the QK
+WMMA call with explicit `mma.sync` and register-resident score fragments. The
+output mapping was not numerically equivalent: same-input max absolute error
+was 0.05104351 at 4K, 0.00831604 at 126K and 0.00558472 at 250K. This was
+traced to an incomplete score/fragment mapping, so B0 is rejected and no
+source was retained.
+
+### E36-N0 result — NInfer K ldmatrix hybrid (rejected)
+
+**Date:** 2026-09-17
+
+N0 used explicit ldmatrix K operands and register score fragments while
+retaining the proven WMMA Q and shared PV path. After fixing the full-mask
+publication and four-lane reductions, same-input error was at or below
+0.00012207 at 4K/126K/250K. Locked-1350 medians (E35/N0, us/layer) were
+181.52/183.74, 2061.89/2161.19 and 3944.69/4136.65, or -1.2%/-4.6%/-4.6%.
+The explicit K fragment is correct but slower; it is not promoted.
+
+### E36-N1/N1b result — persistent register PV (rejected)
+
+**Date:** 2026-09-17
+
+N1 followed NInfer's `float[D/8][4]` persistent PV accumulator and explicit
+`mma.sync` PV path. N1b additionally used ldmatrix Q operands. Both required
+255 registers/thread with no local-memory report, versus E35's 164; this
+leaves no safe two-CTA register budget on SM80. After correcting the P
+`swz32` address and the V transpose-ldmatrix operand, both candidates were
+finite and matched E35 closely: N1b max error was 0.00024414/0.00006104/
+0.00003052 at 4K/126K/250K, with means below 4.1e-6. Dynamic-clock A/B
+timing (not used as a locked acceptance result) was E35/N1b 170.73/211.63,
+1978.57/2301.10 and 3735.55/4250.66 us/layer, i.e. 12.1–23.9% slower.
+The N1 register-PV dataflow is therefore rejected for this four-warp
+ownership; a future attempt must split D ownership across producer/consumer
+warps before revisiting register PV.
+
+### E36 disposition
+
+All direct register-fed-K and single-owner register-PV variants are closed:
+they are either slower, numerically invalid, or exceed the register budget.
+No E36 source is wired into vLLM or production. NInfer's producer/consumer
+warp topology is the next independent experiment (E37), retaining E35 as the
+qualified reference and changing ownership rather than cache/page ABI.
+
+### E37 result — producer/consumer split-D register PV (rejected)
+
+**Date:** 2026-09-17
+
+E37 implemented the first NInfer-inspired producer/consumer topology for the
+q8/G6 shape: six warps per CTA, with warps 0--2 producing the three 16-row
+QK/softmax groups and warps 3--5 consuming the matching groups' second D=128
+half. Each warp kept a 64-float register PV accumulator, so this was a real
+ownership split rather than the earlier E28 warp-count-only experiment. FP8
+cache staging, shared LUT decode, TILE=32, NSEG=35, page mapping and the
+partial/combine ABI were otherwise unchanged.
+
+The first implementation exposed two correctness bugs. Publication used a
+16-wide D offset for an 8-wide register tile, producing huge values; this was
+fixed to the correct 8-wide offset. The consumer then observed NaNs in the
+upper D half because producer alpha values were written to shared memory but
+not published across warps. A CTA barrier was added after the 48-row alpha
+table write. The repaired candidate is finite and matches E35 closely under
+the same deterministic inputs: maximum absolute error was 0.00024414,
+0.00006104 and 0.00003052 at 4K/126K/250K, with no NaN or Inf output.
+
+The correctness repair does not make this topology competitive on the current
+SM80 path. Interleaved dynamic-clock timing (the host did not permit a user
+`nvidia-smi -lgc` lock during this run) measured E35/E37 latency (us/layer) of
+184.25/274.23 at 4K, 2,101.42/3,210.00 at 126K and 3,721.11/5,670.98 at
+250K. E37 is therefore 32.8%, 34.5% and 34.4% slower. The likely costs are
+the six-warp cooperative load/barrier schedule and the explicit ldmatrix/MMA
+PV path; splitting ownership alone is not enough to offset those costs. E37
+is rejected and is not wired into vLLM or production. The alpha publication
+barrier is retained as a correctness lesson, not as a promoted kernel.
+
+### E36/E37 disposition and next NInfer-derived work
+
+The E36 register-fed-K and single-owner register-PV variants, plus the first
+producer/consumer split-D prototype, are now closed by measured gates:
+correctness is achievable, but none provides a speedup over the qualified E35
+q8 kernel without either excessive register pressure or substantial schedule
+overhead. This is useful negative evidence: the remaining gap is not fixed by
+moving one operand or one accumulator into registers in isolation.
+
+The next independent candidate is **E38-INT8-G64**, not another FP8 decode
+micro-variant. It will keep E35's request/page/workspace and graph contracts,
+but use the fork's existing INT8-G64 numerical contract for K/Q and native
+SM80 `mma.sync ... s8.s8.s32` QK, with V/PV held constant initially. Before
+any integration it must pass the same deterministic oracle, mixed query and
+two-request checks, zero-spill/two-CTA resource gate, and a >=10% 126K gain
+over E35. If the INT8 path fails its quality or resource gate, work should
+move to graph-stable adaptive NSEG and then representative Q4
+Linear+SwiGLU-vs-Marlin measurements; no candidate should be promoted merely
+because it is architecturally interesting.
+
+### E38-INT8-G64 initial result — promising standalone candidate
+
+**Date:** 2026-09-17
+
+The first E38 probe reused NInfer-CMP170HX's SM80 INT8-G64 decode kernel in a
+separate adapter. For the q8/G6 shape it stores K/V as signed INT8 with one
+FP16 scale per token and 64-dimension group, quantizes Q on chip with the
+same group contract, and uses native `mma.sync.aligned.m16n8k32.s8.s8.s32`
+for QK. V/PV remains the NInfer BF16 path. This is a standalone kernel
+experiment; it does not change E35, vLLM, or the production service.
+
+With identical q=8 shapes and random cache/query inputs, the E35 FP8 and E38
+INT8-G64 partial latencies (us/layer) were 213.50/192.38 at 4K,
+2391.21/1212.31 at 126K and 3757.29/1731.04 at 250K. E38 is therefore
+11.0%, 49.3% and 54.0% faster in this isolated comparison. The 4K and long
+context points pass the >=10%/126K exploration gate, though the cache dtype
+and quantization work are not yet an end-to-end model A/B.
+
+An FP32 oracle using the kernel's own Q8-G64 quantization and the dequantized
+INT8-G64 cache measured max/mean absolute error of 0.000169/3.01e-5,
+2.77e-5/5.57e-6 and 2.55e-5/3.98e-6 at 4K/126K/250K; all outputs were
+finite. A direct ptxas compile with the two-CTA launch bound and explicit
+`-maxrregcount=170` reported 168 registers/thread, 0 spill stores/loads and
+49,088 B shared memory (the initial JIT compile without the explicit cap had
+a 16-B spill). The explicit cap is therefore part of the candidate build,
+not an optional tuning detail.
+
+The candidate still needs mixed query lengths, two-request/batched launch,
+fixed-address graph capture/replay and a vLLM-compatible cache writer before
+it can be considered for integration. Cross-dtype differences against E35
+are expected quantization error and are not a quality oracle; the INT8-G64
+oracle and the model's task-level A/B must remain separate gates.
+
+### E38-Q1/Q2 — batch and graph safety (standalone pass)
+
+The E38 adapter was extended to NInfer's `MultiBatch=true` specialization and
+tested with two request-private block-table rows at 4K and 126K. The mixed
+batch output remained finite (`nan=0`) with a representative 1.30 ms
+partial+reduce round on the CMP170HX. Fixed-address CUDA Graph capture and
+replay of the same two-request shape completed without warnings and matched
+the eager output exactly (`maxdiff=0`).
+
+The first graph attempt used the default CUDA stream and produced an empty
+graph warning; this was corrected to `c10::cuda::getCurrentCUDAStream()` before
+accepting the result. This stream-selection detail is required for any future
+vLLM integration and is now part of the E38 handoff. E38 remains a standalone
+candidate until the cache writer, mixed query-length dispatch and task-level
+model quality are integrated and requalified.
+
+### E38-Bc64 and E38-W12 follow-up — resource and long-context gates
+
+**Date:** 2026-09-17
+
+Two NInfer-shaped parameter probes were run without changing the E38 cache,
+quantization or partial/reduce ABI. First, `KeyBlock=64` was compiled with the
+same six-warps/one-CTA geometry. `ptxas` rejected both single-request and
+multi-batch entry points because the static shared footprint was 85,440B,
+above this SM80 launch's 49,152B maximum (`uses too much shared data ...
+0xc000 max`). This is a hard resource failure, not a timing regression; Bc64
+would require a different dynamic-arena/layout design and is not a drop-in
+optimization.
+
+Second, the Bc32 kernel was compiled with twelve warps and
+`MinBlocksPerSm=1`, which is the only larger warp count satisfying the
+`PVNtPerWarp` geometry for the 48-row q8 shape. The run was finite at all
+three contexts. Under the same dynamic-clock (not locked) conditions, the
+12-warp variant measured 170.65/192.61 us at 4K, 1,350.25/1,211.29 us at
+126K and 2,427.14/2,158.03 us at 250K for W12/W6. It is about 11.4% faster
+at 4K, but 11.5% and 12.5% slower at 126K and 250K. The extra consumer warps
+do not amortize their one-CTA occupancy cost over the long split envelope,
+so W12 is rejected as the default and retained only as a possible short-
+context specialization. Neither probe changed E35, E38-W6, vLLM or
+production.
+
+### E39 — graph-stable active-split cap scan (E38 INT8-G64)
+
+**Date:** 2026-09-17
+
+E38's kernel already supports a fixed launch capacity with a smaller
+`active_split_count`; this experiment scanned only that capacity, leaving the
+INT8-G64 math, Bc32/W6 geometry, cache writer contract, and reduction ABI
+unchanged. A single-process interleaved scan over cap values 16/24/32/48/64/85
+was run twice with opposite execution order. `cap=32` was the winner at both
+126K and 250K in both orders. Representative medians (us/layer) in the
+second order were:
+
+| context | cap16 | cap24 | cap32 | cap48 | cap64 | cap85 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 126K | 1,269.8 | 1,177.6 | **917.5** | 1,048.6 | 961.5 | 1,000.4 |
+| 250K | 2,369.5 | 2,181.1 | **1,672.2** | 1,884.2 | 1,717.2 | 1,739.8 |
+
+The first order showed the same winner (900.1/1,674.2 us for cap32). A
+two-request mixed 4K+126K run with cap32 remained finite (nan=0), and
+fixed-address CUDA Graph capture/replay passed at both 4K+126K and 4K+250K
+with `maxdiff=0`. Therefore cap32 is a qualified E39 scheduling candidate,
+not merely a single-request timing result. It is still standalone: the
+vLLM cache writer, mixed query-length dispatch and task-level model A/B are
+not yet integrated, so no production dispatch changed.
+
+### E39-Q3 — fused INT8-G64 cache-writer boundary
+
+The NInfer E38 kernel's `GqaAppendInput` path was exercised with eight new
+BF16 K/V tokens and an empty INT8-G64 cache. K/V scales written by the GPU
+matched the CPU FP16-rounded per-token/per-64-dimension-group scales exactly.
+The code comparison had 61 K and 58 V boundary differences out of 8,192
+values, all attributable to the device's reciprocal-then-`__float2int_rn`
+rounding order; dequantized maximum errors were 0.00298 (K) and 0.00304 (V),
+below the corresponding per-group scales, with no NaN or out-of-bounds error.
+This validates the fused writer's numerical contract. The remaining E38
+integration work is to expose these G64 code/scale page views through vLLM's
+allocator and writer; the existing `int8_per_token_head` patch is a different
+layout and must not be substituted silently. Production remains unchanged.
+
+### NInfer handoff review and E40 gate
+
+**Date:** 2026-09-17
+
+The external NInfer handoff was reviewed after E36 had already completed. Its
+referenced `e2be18d` state is stale: this branch has since completed E36, the
+producer/consumer E37 probe, E38 INT8-G64, E39 active-split scheduling, and the
+E39-Q3 cache-writer boundary. The conclusions below therefore use measured
+results rather than reopening already rejected E36 variants.
+
+The NInfer Q4 fused Linear+SwiGLU kernel is a real SM80 implementation, but it
+is not byte-compatible with the current W4A16 target. NInfer admits the exact
+`[gate_up=34816, input=5120, output=17408]` problem in `Q4G64_F16S` with signed
+symmetric 4-bit codes, one FP16 scale per 64 K elements, and
+`row-split-k128-v1` planes. The current target uses GPTQ/AutoRound
+group-128 compressed-tensors/Marlin packing. A direct loader substitution
+would therefore be incorrect; it would require a full gate/up repack, a new
+weight-page contract, loader changes, and task-level quality validation. For
+the same gate/up shape, group-64 also adds roughly 6.25% scale bytes versus
+group-128 before any alignment, so the fusion must repay that cost.
+
+E40 is consequently defined as a bounded microbenchmark gate, not an
+integration promise. The isolated NInfer build was run on the CMP170HX and
+measured the fused Q4 path at `T=1,2,4,8,16,32` against a non-fused Q4
+projection plus SiLU multiply using identical represented inputs. Repacking
+would only be considered if the measured layer-level benefit were at least
+10% at the actual decode/small-T points, finite and numerically within the Q4
+oracle, and free of any larger persistent workspace requirement. The completed
+measurements do not clear that default-integration gate, so Q4 fusion is
+rejected for the current target without touching vLLM or production.
+
+The other NInfer recommendations are now classified as follows:
+producer/consumer ownership was already tested as E37 and was 33--35% slower;
+graph-stable active-split selection is E39 and `cap=32` is qualified;
+INT8-G64 is E38's promising standalone route and remains the highest-value
+integration candidate; Blackwell-only NVFP4 TMA code and `rk8v4` remain out of
+scope for this SM80 card. Typed KV pools/ReplaySSM are system-level capacity
+work, not a verifier-kernel speed fix, and should only follow an end-to-end
+integration decision.
+
+No E40 code is wired into vLLM or production. The current production and
+8000/Guardian state remain unchanged.
+
+### E40 — NInfer Q4 fused Linear+SwiGLU gate (standalone complete)
+
+**Date:** 2026-09-17
+
+The isolated NInfer build was completed with CUDA 13.0 on the CMP170HX
+(SM80). The fused `Q4 Linear+SiLU/mul` benchmark and the separate Q4
+projection plus SiLU/mul baselines used the same represented dimensions
+(`N=34816`, `K=5120`) and were measured at `T=1,2,4,8,16,32`. These are
+layer microbenchmarks, not vLLM end-to-end model numbers; clocks were dynamic
+and the fused and unfused executables ran in separate processes.
+
+| T | fused us | Q4 linear us | SiLU/mul us | unfused total us | fused speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 166.912 | 300.032 | 3.51 | 303.54 | **1.82x / 45.0%** |
+| 2 | 279.552 | 292.864 | 3.53 | 296.39 | 1.06x / 6.0% |
+| 4 | 282.624 | 297.984 | 3.70 | 301.68 | 1.07x / 6.3% |
+| 8 | 374.784 | 541.696 | 4.02 | 545.72 | **1.46x / 31.3%** |
+| 16 | 415.744 | 977.920 | 5.24 | 983.16 | **2.37x / 57.7%** |
+| 32 | 566.272 | 701.440 | 6.90 | 708.34 | **1.25x / 20.1%** |
+
+The earlier sweep and these exact-T reruns agree on the qualitative result:
+fusion has a large benefit for T=1 and for several larger batch routes, but
+only a 6--7% benefit at T=2/4. Since the real decode path spends most of its
+time at the small-T end, and the current GPTQ/AutoRound group-128 weight
+packing is not compatible with NInfer's signed Q4G64 layout, the >=10%
+actual-decode gate is **not cleared for a default integration**. The result
+does justify retaining Q4 fusion as a future, format-specific experiment if
+the weights can be repacked and an end-to-end correctness oracle is added;
+it does not justify changing vLLM, the current production model, or the
+Marlin path.
+
+E40 is therefore closed as a standalone evidence milestone. Combined with
+E36 (low-level QK/register-feed variants rejected), E37 (producer/consumer
+rejected), E38 (INT8-G64 promising standalone candidate), and E39 (cap32
+qualified scheduling candidate), the next highest-value work remains an
+end-to-end E38 cache/allocator integration—not more E35/E40 micro-tuning.
+All E40 scratch sources and benchmark outputs remain outside the production
+tree; production vLLM, Guardian, and port 8000 were not changed or started.
+
+## E41 — end-to-end INT8-G64 allocator integration (2026-09-17)
+
+E38/E39 were closed standalone, and this handoff named the whole-model
+cache/allocator integration as the highest-value next step. E41 is that
+integration. It reached a running, graph-mode engine with the E38 verify path
+live, and it closed four defects; two further defects are recorded below and
+are what keep this mode experimental.
+
+### E41-A — the page ABI: the allocator pads pages, it does not lay out planes
+
+The bridge assumed the four INT8-G64 planes were contiguous across the whole
+cache with a 65,536-byte page stride, and rejected the allocator's actual
+tensor. Byte-sentinel probes show the assumption is not recoverable by
+reinterpretation: read as contiguous, the padded storage returns page padding
+instead of the next page's codes. The allocator's layout is page-local
+(`[page][K 65,536][V 65,536][Kscales 2,048][Vscales 2,048][padding]`), so
+`g64_views()` now returns four views sharing the page stride and differing only
+by in-page offset, and the E38 decode adapter became stride-aware. The stride
+check was **not** removed: overlapping and misaligned pages are still rejected.
+Cost of the runtime `int64` page stride against the old compile-time constant,
+on identical data: 0.87x-1.01x (batch 1/4, split 4/16/32). Detail lives in
+`docs/int8-g64-vllm-integration.md`.
+
+### E41-B — prefill never worked, and the reason was a zero divide
+
+`KVQuantMode.INT8_G64` reports `is_per_token_head=True`, so the stock
+`unified_attention` computes `BLOCK_Q = BLOCK_M // num_queries_per_kv = 16 // 0`
+and raises `ZeroDivisionError` on every prefill and warmup call; the stock
+kernel also cannot express per-group G=64 scales. With the prefill route
+disabled the engine dies with exactly that `ZeroDivisionError`; with a dedicated
+G64 prefill route it proceeds. The route implements the causal contract read
+out of `triton_unified_attention.py` (`context_len = seqused_k - q_len`, a new
+query at row `i` sitting at absolute position `context_len + i`).
+
+That route was first written with a QK step of
+`tl.sum(q[:, None, :] * kq[None, :, :], axis=2)`, which materialises a
+`[Q_TILE, BLOCK_N, DIM]` fp32 temporary and never touches tensor cores. It was
+correct and catastrophically slow: prefill of 3,756 tokens took 39.37 s against
+the bf16 baseline's 1.78 s. Baseline prefill scales 26x for 29x more tokens
+(linear, GEMM-bound); this kernel scaled **503x** — the O(N^2) signature. With
+`tl.dot(q.to(tl.bfloat16), tl.trans(kq.to(tl.bfloat16)))` prefill is 1.92 s
+(1,796 tok/s), within 8% of baseline, and decode is unchanged because decode
+does not use this kernel.
+
+This corrects an intermediate conclusion: the apparent 17.6x whole-model
+slowdown was **prefill, not decode**. Isolated decode is 78.6 tok/s against the
+baseline's 127.4 (0.62x), and the E38 attention call itself measures 0.07-0.25 ms.
+
+### E41-C — E38 dropped every request with batch index >= 2
+
+The adapter passed a **literal `2`** for the reduce kernel's `batch_size`
+parameter. The ninfer kernel is generic; only the argument was wrong, and its
+`if (batch >= batch_size) return;` left `out` unwritten for requests 2 and
+beyond, which is why batch 3 lost a request to `Register Register Register...`
+and batch 4 returned that same string for its last two requests. The vestigial
+`"pos must be int32 [2,8]"` checks in the same function are the fingerprint of
+the original two-request design. Both the strided port and the untouched
+`v7_verifier_e38_int8.cu` carried the literal. Passing `Batch` turns
+`test_e38_decode_sweep.py` from
+`FAIL batch3 errs=[..., 1.688e+38]` into `PASS` across batch 1..4 and split_count
+1/4/8/16. Every earlier E38 decode test used batch 2, which is why this survived
+E38-Q1/Q2.
+
+### E41-D — the E38 branch was never reachable
+
+Two gates kept `run_e38_attention` dead in this configuration. The branch tested
+`self.sliding_window == (-1, -1)`, but full-attention layers report `None`, so
+the strict test dropped every layer to the fallback; and the branch is gated on
+`_spec_attn_enabled()`, which is
+`os.environ.get("VLLM_SPEC_DECODE_ATTN", "0") == "1"` — a variable this launcher
+never set. With both corrected the bridge debug line prints and E38 owns verify.
+Separately, the E38 partial workspace was allocated lazily, keyed on
+`(batch, split_count)`, while warmup captures graphs for
+`[1,2,4,8,16,24,32]`; tensors allocated inside one capture region were reused for
+another and replay followed stale pointers (`illegal memory access` at
+`run_fullgraph -> graphs[desc].replay()`). Pre-allocating one buffer per
+split_count in `__init__` keeps every allocation out of the capture region and
+graph-mode startup completes in 42 s.
+
+### E41 A/B and quality at 4k
+
+Both arms: W4A16 target, DFlash2 k=7, `MAX_SEQS=4`, `VLLM_SPEC_DECODE_ATTN=1`,
+graph mode, pinned clocks, identical prompts, greedy, warmup discarded, one
+process per concurrency so a crash in one row does not lose the others.
+
+| row | bf16 / FLASH_ATTN | INT8-G64 | ratio |
+| --- | --- | --- | --- |
+| 4k C1 | 49.36 tok/s | 43.46 tok/s | 0.88x |
+| 4k C2 | 51.70 tok/s | 43.02 tok/s | 0.83x |
+| 4k C4 | **crash** | 41.51 tok/s | n/a |
+| 32k C1 | **crash** | 2.52 tok/s | n/a |
+| 32k C2 | **crash** | 2.00 tok/s | n/a |
+
+Isolated components: prefill 1,796 vs 1,938 tok/s (0.93x); decode 78.6 vs 127.4
+tok/s (0.62x).
+
+Quality, 12 fixed prompts greedily decoded with `logprobs=1` on both arms
+(1,495 tokens each): **9/12 byte-identical**, 1,177/1,495 (78.73%) shared token
+prefix, mean absolute logprob delta **0.00385** on agreeing tokens, mean logprob
+-0.1279 (G64) vs -0.1344 (bf16). The three divergences are all 192-token
+open-ended generations that flipped their greedy argmax at tokens 10, 123 and
+125 — the expected behaviour of a lossy int8 cache, not an addressing error.
+
+### E41 open defects
+
+**Baseline instability (pre-existing, not caused by this work).** The bf16 /
+FLASH_ATTN arm dies with `illegal memory access` at C4 4k and at 32k,
+reproducibly. After restoring the pre-session `triton_attn.py` and `int8_g64.py`
+from the `.orig-g64layout` backups, the baseline still crashes identically, and
+the FLASH_ATTN backend never enters `triton_attn.py` at all; it also reproduces
+with `VLLM_SPEC_DECODE_ATTN=0`. This caps the A/B at C1/C2 for the baseline and
+deserves its own investigation.
+
+**KV allocation (blocks long context).** The G64 pool is 65,362 tokens against
+529,060 for bf16. `max_page_size` is set by the 48 MambaSpec layers at
+1,777,664 B; the bf16 attention page (2^17) divides it and takes the zero-waste
+block-scaling path, while the G64 page (135,168 = 2^12·33) does not divide
+1,777,664 (2^13·217) and is padded 13.15x. At `G64_MAX_LEN=262144` the engine
+refuses: `114.23 GiB KV cache is needed ... (37.85 GiB available)`. Scaling the
+G64 block to 448 would break the 64-token page contract, so the fix is to give
+the linear-attention layers their own KV cache group rather than unifying every
+layer onto the Mamba page. Until that lands, INT8-G64 has no memory advantage
+over bf16 and 126K/250K cannot be served.
+
+E41 scratch sources, test harnesses and benchmark outputs remain outside the
+tree (`int8g64-layout-audit/`, and the remote test directory); production vLLM,
+Guardian, and port 8000 were not started, stopped or modified at any point.
+
+## E42 — kill gate measured and NOT met; E38/E41 frozen (2026-09-17)
+
+The review proposed a cheaper intermediate than the allocator rewrite of E41:
+round the common page up instead of padding every attention page, i.e.
+
+```text
+ceil(1,777,664 / 135,168) = 14   ->   common page = 14 x 135,168 = 1,892,352 B
+```
+
+which pads the Mamba page by only 6.45% and gives the target a natural
+**896-token** physical block (64 x 14), with the draft's 33,792-byte page
+dividing it exactly 56 times. That also decouples the two meanings of "64" that
+E38 had fused: the quantization group (64 dimensions, fixed) and the token page
+size. The review attached a gate to it: measure INT8-G64 against the
+**production** control first, and require decode/step >= +10% at 32K or 65K,
+because G64's KV bytes (2,112 B/token/layer) are 3.1% *larger* than the
+production int8/FP8 control's, so its only possible win is the compute path.
+
+That measurement is done, and the gate fails.
+
+Control arm: `triton-int8-control-8002.service` (`CTX=long` ->
+`TRITON_ATTN` + `int8_per_token_head`, `VLLM_SPEC_DECODE_ATTN=1`), i.e. the
+production long-context verify path, on the same W4A16 target and DFlash2
+drafter. Matched settings, pinned clocks, graph mode, greedy, 191 decode steps,
+fresh engine per context:
+
+| ctx | control decode | INT8-G64 | G64 vs control | control prefill | G64 prefill |
+| --- | --- | --- | --- | --- | --- |
+| 4,096 | **6.120 ms** | 7.339 ms | **-19.9%** | 1,709.6 tok/s | 1,626.5 tok/s |
+| 16,384 | **8.161 ms** | 9.450 ms | **-15.8%** | 1,219.5 | 1,180.8 |
+| 32,768 | **10.200 ms** | 11.292 ms | **-10.7%** | 876.1 | 859.7 |
+| 65,000 | **12.673 ms** | 13.932 ms | **-9.9%** | 560.3 | **564.0** |
+
+The gap narrows with context but never crosses, so the compute-path bet does not
+pay off at any context this allocator can serve. E42 is therefore **not
+justified** and E38/E41 are frozen as a research result; no allocator change was
+made.
+
+Two shared-engine bugs surfaced while measuring, both reproducing on the control
+arm and therefore unrelated to INT8-G64:
+
+1. changing context length within one engine lifetime (a 32K request after other
+   lengths) trips `illegal memory access`; a single 32K request on a fresh engine
+   is fine, so measurement must use one context per engine lifetime;
+2. repeating the same long prefix three times in one process trips the same
+   fault, which is what made early `--reps 3` sweeps non-monotonic.
+
+Both need their own issue. Their consequence here is that the trustworthy
+comparison is the fresh-engine one above, not the earlier in-process sweeps.
+
+Production vLLM, Guardian and port 8000 were not started, stopped or modified.

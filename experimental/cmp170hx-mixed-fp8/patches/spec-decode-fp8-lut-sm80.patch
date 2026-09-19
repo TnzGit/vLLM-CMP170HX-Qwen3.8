@@ -1,0 +1,99 @@
+Use a 256-entry device lookup table for E4M3FN decoding in the SM80 split-KV
+speculative verifier.
+
+SM80 cannot lower Triton's native fp8e4nv load.  The original compatibility
+path therefore rebuilt every FP8 value with integer masks and tl.exp2 inside
+the hottest long-context loop.  Every finite E4M3FN value is exactly
+representable in BF16, so a 512-byte BF16 table has identical semantics, stays
+hot in cache, and also avoids an FP32-to-BF16 conversion per lane.  The table is
+allocated once with the verifier workspace, so its address is stable across
+CUDA Graph capture and replay.
+
+The exhaustive 256-code check maps the two E4M3FN NaN encodings to zero, just
+like the previous fail-closed decoder.  On a CMP 170HX, q=8 and 32 segments,
+the isolated partial+combine path improved by roughly 1.4x at 4K and 1.5x at
+126K/250K, with bit-identical BF16 outputs.
+
+Apply after spec-decode-fp8-kv-sm80.patch.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -53,21 +53,25 @@
+ 
+ 
+ @triton.jit
+-def _e4m3fn_to_fp32(raw):
+-    """Decode NVIDIA E4M3FN bytes on SM80, where Triton cannot load fp8e4nv."""
+-    bits = raw.to(tl.uint32)
+-    sign = 1.0 - 2.0 * ((bits >> 7) & 1).to(tl.float32)
+-    exponent = (bits >> 3) & 0xF
+-    mantissa = bits & 0x7
+-    normal = (1.0 + mantissa.to(tl.float32) * 0.125) * tl.exp2(
+-        exponent.to(tl.float32) - 7.0
+-    )
+-    subnormal = mantissa.to(tl.float32) * (2.0**-9)
+-    value = tl.where(exponent == 0, subnormal, normal) * sign
+-    # E4M3FN reserves only exp=15,mantissa=7 for NaN. Cached K/V should be
+-    # finite; map any unexpected NaN encoding to zero instead of poisoning a
+-    # full attention row.
+-    return tl.where((exponent == 0xF) & (mantissa == 0x7), 0.0, value)
++def _e4m3fn_to_bf16(raw, lut_ptr):
++    """Decode E4M3FN through an exact BF16 LUT that remains hot in L1/L2."""
++    return tl.load(lut_ptr + raw.to(tl.int32))
++
++
++def _build_e4m3fn_lut() -> list[float]:
++    values: list[float] = []
++    for byte in range(256):
++        sign = -1.0 if byte & 0x80 else 1.0
++        exponent = (byte >> 3) & 0xF
++        mantissa = byte & 0x7
++        if exponent == 0xF and mantissa == 0x7:
++            value = 0.0
++        elif exponent == 0:
++            value = mantissa * (2.0**-9)
++        else:
++            value = (1.0 + mantissa * 0.125) * (2.0 ** (exponent - 7))
++        values.append(sign * value)
++    return values
+ 
+ 
+ @triton.jit
+@@ -75,7 +79,7 @@
+     q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
+     part_o_ptr, part_m_ptr, part_l_ptr,
+     ks_ptr, vs_ptr,
+-    static_k_scale, static_v_scale,
++    static_k_scale, static_v_scale, fp8_lut_ptr,
+     scale,
+     stride_qt, stride_qh,
+     stride_kb, stride_ks, stride_kh,
+@@ -141,8 +145,8 @@
+             # E4M3FN bytes explicitly on SM80 because Triton cannot lower its
+             # native fp8e4nv load for this architecture. vLLM's cache writer
+             # stored value/scale, so restore the K scale here.
+-            k = _e4m3fn_to_fp32(k).to(tl.bfloat16)
+-            v = _e4m3fn_to_fp32(v).to(tl.bfloat16)
++            k = _e4m3fn_to_bf16(k, fp8_lut_ptr)
++            v = _e4m3fn_to_bf16(v, fp8_lut_ptr)
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32) * static_k_scale
+         else:
+             s = tl.dot(qs, tl.trans(k)).to(tl.float32)            # [BLOCK_M, TILE]
+@@ -215,6 +219,9 @@
+         self.part_o = torch.empty(n, head_dim, dtype=torch.float32, device=device)
+         self.part_m = torch.empty(n, dtype=torch.float32, device=device)
+         self.part_l = torch.empty(n, dtype=torch.float32, device=device)
++        self.fp8_lut = torch.tensor(
++            _build_e4m3fn_lut(), dtype=torch.bfloat16, device=device
++        )
+ 
+     def _plan(self, q_len, G, D):
+         """(BLOCK_M, tokens per tile, tile count, warps). One tile is preferred: every
+@@ -270,6 +277,7 @@
+             k_scale_cache, v_scale_cache,
+             static_k_scale if static_quant else 1.0,
+             static_v_scale if static_quant else 1.0,
++            self.fp8_lut,
+             scale,
+             q.stride(0), q.stride(1),
+             kernel_key_cache.stride(0), kernel_key_cache.stride(1), kernel_key_cache.stride(2),

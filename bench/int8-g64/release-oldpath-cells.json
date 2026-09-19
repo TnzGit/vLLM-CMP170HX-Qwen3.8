@@ -1,0 +1,85 @@
+[
+  {
+    "tag": "old_same_path",
+    "ctx": 4096,
+    "concurrency": 1,
+    "ok": 2,
+    "faults": 0,
+    "rounds": [
+      {
+        "wall_full_s": 3.129,
+        "wall_prefill_s": 2.455,
+        "wall_decode_s": 0.674,
+        "prompt_tokens": 4096,
+        "out_tokens_total": 127,
+        "decode_aggregate_tok_s": 188.413,
+        "prefill_tok_s_per_req": 1668.5,
+        "per_req_out_tokens": [
+          128
+        ],
+        "acceptance": null
+      },
+      {
+        "wall_full_s": 3.169,
+        "wall_prefill_s": 2.426,
+        "wall_decode_s": 0.743,
+        "prompt_tokens": 4096,
+        "out_tokens_total": 127,
+        "decode_aggregate_tok_s": 170.887,
+        "prefill_tok_s_per_req": 1688.5,
+        "per_req_out_tokens": [
+          128
+        ],
+        "acceptance": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "tag": "old_same_path",
+    "ctx": 4096,
+    "concurrency": 2,
+    "ok": 4,
+    "faults": 0,
+    "rounds": [
+      {
+        "wall_full_s": 5.612,
+        "wall_prefill_s": 4.855,
+        "wall_decode_s": 0.757,
+        "prompt_tokens": 4096,
+        "out_tokens_total": 254,
+        "decode_aggregate_tok_s": 335.479,
+        "prefill_tok_s_per_req": 1687.4,
+        "per_req_out_tokens": [
+          128,
+          128
+        ],
+        "acceptance": null
+      },
+      {
+        "wall_full_s": 5.631,
+        "wall_prefill_s": 4.871,
+        "wall_decode_s": 0.76,
+        "prompt_tokens": 4096,
+        "out_tokens_total": 254,
+        "decode_aggregate_tok_s": 334.134,
+        "prefill_tok_s_per_req": 1681.9,
+        "per_req_out_tokens": [
+          128,
+          128
+        ],
+        "acceptance": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "tag": "old_same_path",
+    "ctx": 4096,
+    "concurrency": 4,
+    "ok": 0,
+    "faults": 1,
+    "rounds": [],
+    "error": "HTTPError: HTTP Error 500: Internal Server Error"
+  }
+]

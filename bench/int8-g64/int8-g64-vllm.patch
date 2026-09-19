@@ -1,0 +1,82 @@
+INT8-G64 KV cache compatibility path for vLLM 0.27.1 / SM80
+===============================================================
+
+This patch is intentionally opt-in.  It adds ``int8_g64`` as a cache dtype,
+keeps vLLM's block table and scheduler contracts, and routes only the target
+full-attention verify path through the E38 INT8-G64 extension.
+
+Page layout (corrected -- an earlier revision of this patch claimed contiguous
+global planes and was wrong; see docs/int8-g64-vllm-integration.md):
+
+  The allocator pads every physical page to its own stride, so the layout is
+  page-local, with the four planes inside each page:
+
+    [page][K codes 65,536][V codes 65,536][K scales 2,048][V scales 2,048][pad]
+
+  The four views returned by ``g64_views`` share the allocator's page stride and
+  differ only by in-page offset (K +0, V +65,536, K scales +131,072, V scales
+  +133,120).  Byte-sentinel probes show the padded storage cannot be read as if
+  the planes were contiguous.  Overlapping or misaligned pages are rejected.
+
+The backend exposes a key-only view to the stock cache manager and reconstructs
+the four page-local views from the same backing storage.  The mode requires HND
+layout and a 64-token block, matching the E38 page address arithmetic.
+
+This patch alone is not sufficient: the E38 verify path is additionally gated on
+``VLLM_SPEC_DECODE_ATTN=1``, needs the dedicated G64 prefill route (the stock
+unified_attention divides by a zero queries-per-kv for this mode), and needs the
+reduce kernel's ``batch_size`` passed as the real batch rather than a literal 2.
+Those live in ``int8-g64-triton.patch``, ``int8_g64.py`` and
+``page_stride_adapter.cu`` in this directory.
+
+Apply from the vLLM site-package root after the repository's existing patches:
+
+  patch -p1 < patches/int8-g64-vllm.patch
+
+The optional E38 extension source and NInfer include tree are supplied by the
+test launcher through ``VLLM_INT8_G64_SRC`` and ``VLLM_INT8_G64_NINFER_ROOT``.
+
+--- a/utils/torch_utils.py
++++ b/utils/torch_utils.py
+@@
+     "int8_per_token_head": torch.int8,
++    "int8_g64": torch.int8,
+     "fp8_per_token_head": torch.uint8,
+--- a/v1/kv_cache_interface.py
++++ b/v1/kv_cache_interface.py
+@@
+     KVARN = 7  # KVarN Hadamard+Sinkhorn tile quant, packed K+V per (block, head) tile
++    # E38/E39: signed INT8 codes with four FP16 scales per token/head (G=64).
++    INT8_G64 = 8
+@@
+         return self in (
+             KVQuantMode.INT8_PER_TOKEN_HEAD,
+            KVQuantMode.INT8_G64,
+             KVQuantMode.FP8_PER_TOKEN_HEAD,
+             KVQuantMode.INT4_PER_TOKEN_HEAD,
+         )
++
++    @property
++    def is_int8_g64(self) -> bool:
++        return self == KVQuantMode.INT8_G64
+@@
+     if kv_cache_dtype == "int8_per_token_head":
+         return KVQuantMode.INT8_PER_TOKEN_HEAD
++    if kv_cache_dtype == "int8_g64":
++        return KVQuantMode.INT8_G64
+@@
+         if self.kv_quant_mode.is_per_token_head:
++            if self.kv_quant_mode.is_int8_g64:
++                # Four FP16 scales per token/head for K and V (G=64 on D=256).
++                groups = (self.head_size + 63) // 64
++                unpadded += (
++                    2
++                    * self.block_size
++                    * self.num_kv_heads
++                    * groups
++                    * get_dtype_size(torch.float16)
++                )
++                return unpadded
+             unpadded += (
+                 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
+             )

@@ -1,0 +1,12 @@
+diff --git a/vllm/v1/attention/ops/spec_decode_attn.py b/vllm/v1/attention/ops/spec_decode_attn.py
+--- a/vllm/v1/attention/ops/spec_decode_attn.py
++++ b/vllm/v1/attention/ops/spec_decode_attn.py
+@@ -445,7 +445,7 @@ class SpecDecodeAttention:
+                 block_table.stride(0),
+                 Hq=Hq, QMAX=self.qmax, D=D,
+                 BLOCK_SIZE=key_cache.shape[1], TILE=32, NSEG=self.nseg,
+-                num_warps=4, num_stages=1,
++                num_warps=4, num_stages=3,
+             )
+         else:
+             grid = (num_reqs * ntile, Hkv, self.nseg)

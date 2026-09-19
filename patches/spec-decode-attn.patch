@@ -103,7 +103,15 @@ Apply from the repo root:
 +        n = 0
 +        try:
 +            spec = get_current_vllm_config().speculative_config
-+            n = 1 + (spec.num_speculative_tokens if spec is not None else 0)
++            # Keep this capacity in lockstep with
++            # AttentionMetadataBuilder._init_reorder_batch_threshold().
++            # Parallel drafting may produce an uneven path whose verifier
++            # query is as large as 1 + 2 * num_speculative_tokens; sizing for
++            # only 1 + k leaves those valid batches to fall through to a
++            # FlashInfer decode wrapper planned for q_len_per_req=1.
++            if spec is not None:
++                multiplier = 2 if spec.parallel_drafting else 1
++                n = 1 + multiplier * spec.num_speculative_tokens
 +        except Exception:
 +            n = 0
 +        n = int(os.environ.get("VLLM_SPEC_DECODE_ATTN_QMAX", n or 0)) or n
@@ -219,7 +227,10 @@ Apply from the repo root:
 +    for t in range(t0, t1):
 +        pos = t * TILE + tl.arange(0, TILE)
 +        k_ok = pos < kv_len
-+        blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0)
++        # Keep block ids in 64-bit before multiplying by byte/element strides.
++        # Large KV pools on 64 GiB SM80 cards can otherwise overflow int32
++        # address arithmetic even though the block table itself is int32.
++        blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0).to(tl.int64)
 +        slot = pos % BLOCK_SIZE
 +        k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
 +        v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]

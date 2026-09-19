@@ -164,8 +164,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     chunk could land on the same kernel — that "longest so far" changed mid-run, the buffers
     were reallocated, and the captured decode graph went on reading the freed ones:
     `CUDA error: an illegal memory access was encountered`, a few hundred tokens into the
-    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` (set by `single-user/start_qwen.sh` from
-    `DFLASH_TOKENS`) fixes the size at startup instead.
+    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` fixes the size at startup instead. For
+    DFlash parallel drafting, `single-user/start_qwen.sh` sets it to `1 + 2 *
+    DFLASH_TOKENS`, matching vLLM's scheduler reorder threshold; `1 + DFLASH_TOKENS`
+    is insufficient for valid uneven paths and for the scheduler-realistic warmup.
 21. **Async scheduling pins the number of speculative tokens.** vLLM only feeds draft token
     ids — and therefore the *count* the worker wants verified — back to the scheduler on the
     synchronous path (`EngineCore.post_step`). With async scheduling on, every decode step is
@@ -599,3 +601,473 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     And when eviction probing, keep the resend prompt BYTE-identical: a
     two-token label difference shifts every block hash and manufactures a
     convincing, fake "per-request hash instability" (ask how we know).
+
+43. **The split-KV segment count is a graph-time tuning parameter, not a live
+    knob.** The verifier's partial-output workspace is captured by FULL CUDA
+    Graph, so `VLLM_SPEC_DECODE_ATTN_SEGMENTS` is read once and must not change
+    until process restart. The generic default stays 16. On CMP 170HX with the
+    896-token static-FP8 target geometry, 32 segments reduced verifier pass time
+    from 62.8 to 50.0 ms at 126K and from 103.3 to 77.5 ms at 250K. 64 segments
+    bought less than 2% more in the isolated long-context kernel scan and hurt
+    short-context latency. The FULL mixed-FP8 service profiles therefore pin 32.
+
+44. **SM80 FP8 verifier decoding belongs in a BF16 LUT, not in per-element
+    arithmetic.** Triton cannot lower native E4M3FN loads on SM80, but every
+    finite E4M3FN value is exactly representable in BF16. A 256-entry BF16 LUT
+    removes masks, `tl.exp2`, and FP32-to-BF16 conversion from the hottest
+    split-KV loop while preserving the previous NaN-to-zero behavior. On the
+    CMP 170HX this raised C1 decode from 68.2 to 81.8 tok/s at 126K and from
+    42.2 to 53.8 tok/s at 250K with unchanged acceptance and zero preemptions.
+
+45. **A 255-register verifier is not automatically fixed by a lower register cap.**
+    The production q=8 static-FP8 partial kernel reported 255 registers/thread,
+    96 bytes of local memory/thread and 12.5% theoretical occupancy.  Compiling it
+    with `maxnreg` 192, 168 or 160 increased local memory to 320, 512 and 632 bytes
+    and slowed it by 37-50%.  The useful fix was to shorten live ranges: keep scores,
+    maxima and normalizers in FP32, round only the per-tile running output to FP16,
+    and scalarize the block ID for the integral 896/32 page/tile geometry.  This cut
+    the local frame to 32 bytes and reduced FULL-graph step time 8-11% at 126K/250K.
+    Treat occupancy as a diagnostic, not a target; forcing occupancy by spilling is
+    worse than the original kernel.
+
+46. **Power-of-two tiles can hide useful masked work even after spills are gone.**
+    DFlash2 q=8 with six GQA heads has 48 valid rows, while the generic verifier uses
+    `BLOCK_M=64`.  Keeping one CTA per request/KV-head/segment but evaluating 32+16
+    rows removes the 16 padded accumulators without rereading K/V.  On CMP 170HX this
+    left occupancy unchanged and improved FULL-graph step time another 3% at 126K and
+    5% at 250K.  Splitting into separate CTAs per query head is not equivalent: that
+    would reread every K/V tile six times and should remain a rejected design.
+
+47. **Page-table metadata should follow page lifetime, not tile lifetime.**  The
+    q8 verifier uses 32-token tiles inside 896-token pages, so one physical block
+    ID is valid for 28 consecutive loop iterations.  Carrying that scalar and
+    reloading it only at a page boundary was bit-identical and saved 0.4-0.5% at
+    the FULL-model step boundary from 4K through 250K.  This is a small but robust
+    win; unlike increasing split count or duplicating query-row kernels, it adds
+    no KV scan, reduction work, or CUDA Graph node.
+
+48. **A tiny immutable LUT can still create enormous global-transaction waste.**
+    The SM80 FP8 verifier's 512-byte BF16 decode table was cache-resident, but
+    data-dependent scalar indices made ordinary Triton global loads account for
+    85,998,528 excessive sectors (64% of the total).  In the exact NVIDIA-only
+    q8/GQA6 path, `ld.global.nc.u16` routes those immutable reads through the
+    read-only cache: NCU reported only 76,288 excessive sectors, kernel duration
+    fell from about 2.13 to 1.82 ms, and FULL-graph decode improved 2.3% at 126K
+    and 3.2% at 250K.  Keep the portable load in generic paths; inline PTX is a
+    measured architecture specialization, not a replacement for Triton's normal
+    lowering on other GPUs.
+
+49. **Match a one-wave split grid to the GPU; more splits are not monotonic.**
+    This verifier launches one CTA per KV head and segment.  With four KV heads,
+    NSEG32 gives 128 CTAs on a 70-SM CMP 170HX.  At two resident CTAs per SM the
+    one-wave capacity is 140 CTAs, so NCU reports 0.91 waves; NSEG35 fills all 140
+    resident slots.  NSEG40/48/64 create a second-wave tail and were slower.
+    NSEG35 reduced FULL-graph pass time 3-5% at 126K/250K without moving 4K.
+    Because Triton `arange` requires a power of two, keep logical NSEG=35 for
+    partials but pad/mask only the final combine reduction.  This is
+    hardware-shape tuning: do not copy 35 to a GPU with a different SM count,
+    resident-CTA limit or KV-head count without redoing the wave calculation and
+    A/B.
+
+50. **The next integer after a wave-aligned split is not a useful compromise.**
+    NSEG36 launches 144 CTAs: four CTAs spill into a second resident wave on the
+    70-SM CMP 170HX.  Against NSEG35 it was 45-54% slower at 70K, 126K, 200K and
+    250K in the isolated q=8 verifier scan.  This is much worse than the four-CTA
+    tail suggests because the non-matching segmentation also changes generated
+    loop and memory geometry.  Keep NSEG35; do not sweep adjacent integers as if
+    segment count were a smooth tuning knob.
+
+51. **Cache hints after `ld.global.nc` did not improve the long-context LUT path.**
+    Four interleaved runs of `ld.global.nc.L2::64B.u16` were statistically neutral
+    at 250K, and three runs of `ld.global.nc.L1::evict_last.u16` were neutral to
+    slower.  Both showed high variance at 126K and retained exact output, but
+    neither passed the requirement to improve 126K and 250K together.  The useful
+    change is the read-only cache route itself; extra prefetch/eviction decoration
+    is rejected unless a future architecture-specific NCU trace establishes a new
+    bottleneck.
+
+52. **Use exact-token, counter-aware A/B requests for speculative tuning.**
+    `bench/context_ab.py` sends token IDs rather than approximate repeated text,
+    changes a salt to defeat accidental prefix-cache reuse, streams the response,
+    and records TTFT, decode tok/s, speculative steps, accepted tokens, tokens per
+    step, milliseconds per step and preemptions.  This separates kernel latency
+    changes from DFlash acceptance drift.  The prompt corpus is tokenized with an
+    explicit limit so a 250K benchmark does not first allocate a multi-million-token
+    host sequence.
+
+53. **Do not transplant the verifier's 140-CTA reasoning into Marlin.**  The
+    verifier can keep two CTAs resident per SM; the profiled Marlin target GEMMs
+    use about 163 KiB dynamic shared memory and launch 70 CTAs, one per SM.  An
+    SM80-only source build that prioritized `(128,64,128)` over the stock
+    `(128,128,256)` tile regressed step latency 12-18%.  Prioritizing
+    `(64,128,128)` regressed it 9-12%.  Both candidates passed load and execution
+    smoke tests, so these are real performance results rather than build
+    failures.  Changing `blocks_per_sm` or grid size would also change Marlin's
+    workspace/lock/reduction protocol and is not a safe follow-up to these
+    negative tile tests.
+
+54. **`inline_asm_elementwise(pack=2)` is not a vectorized random LUT load.**
+    The FP8 decode table uses one data-dependent scalar address per lane.  Merely
+    changing the Triton inline-assembly call from `pack=1` to `pack=2` aborts
+    compilation with `number of input constraints does not match number of
+    parameters`; it does not lower to a useful `ld.v2.u16`.  A genuine packed
+    load would require paired contiguous addresses, which this lookup does not
+    have.  Keep the scalar read-only-cache load rather than trying to force
+    vectorization through the pack metadata.
+
+55. **More Triton pipeline stages are not free latency hiding for the q8
+    verifier.**  Changing only the production q8/GQA6 launch from
+    `num_stages=1` to 2 really generated 22 `cp.async` instructions, but dynamic
+    shared memory rose from 43,008 to 73,728 bytes.  It was 4.2% slower at 4K,
+    only 0.7% faster at 126K, and 2.1% slower at 250K.  Stage 3 generated 32
+    `cp.async` instructions, used 90,112 bytes and regressed long contexts by
+    36-40%, consistent with losing the two-resident-CTA geometry behind NSEG35.
+    Keep stage 1.  Future latency hiding must control shared-memory lifetime and
+    accumulator liveness explicitly rather than relying on a launch hint.
+
+56. **Lower registers/thread can still produce a worse verifier CTA.**  An
+    eight-warp q8/GQA6 build used 167 rather than 250 registers/thread and did
+    not spill, but its 256 threads consume about 42.8K registers per CTA.  That
+    permits only one CTA/SM instead of the baseline's two 4-warp CTAs, leaving
+    both layouts at roughly eight resident warps/SM while removing CTA-level
+    independence.  Pairing it with NSEG17 (68 CTAs for 70 SMs) did not rescue
+    it: isolated latency was 75% slower at 126K and 79% slower at 250K.  NSEG18
+    was worse because two CTAs formed a long second-wave tail.  Keep 4 warps and
+    NSEG35; optimize live ranges without changing this resident-grid geometry.
+
+57. **A smaller partial workspace can trigger a larger verifier kernel.**  The
+    q8 static-FP8 running accumulator is FP16, so changing `part_o` from FP32 to
+    FP16 looked like a free 50% workspace reduction.  On Triton 3.7.1 it changed
+    lowering enough to raise dynamic shared memory from 43,008 to about 57,344
+    bytes and retained 252-255 registers/thread.  Three interleaved scans showed
+    6-15% regression at 126K and 5-8% at 250K.  Keep the FP32 external partial
+    buffer; workspace byte count is not a proxy for generated-kernel cost.
+
+58. **Disabling LICM lowers a register count without fixing verifier liveness.**
+    Replacing the q8 KV loop with `tl.range(..., disable_licm=True)` reduced the
+    compiled count from 250 to 239 registers/thread but raised dynamic shared
+    memory from 43,008 to 57,344 bytes.  Three interleaved scans averaged 4.2%
+    slower at 126K and 1.3% slower at 250K.  The persistent 48x256 accumulator
+    still spans the whole loop; compiler scheduling hints cannot make that state
+    disappear.  Keep normal LICM and move structural experiments to explicit
+    row partitioning or a custom CUDA producer/consumer kernel.
+
+59. **Three smaller source groups are still one long-lived 48-row state.**  A
+    q8/GQA6 rewrite from 32+16 rows to 16+16+16 passed every strengthened
+    correctness case, but Triton kept all three 16x256 accumulators live across
+    the KV loop.  It compiled to 248 registers/thread and 57,344 bytes shared,
+    versus 250 and 43,008 for the qualified kernel, then regressed interleaved
+    126K/250K latency by about 16.9%/14.8%.  Source grouping is not lifetime
+    control; further work needs an explicit storage/synchronization design.
+
+60. **Tensor-core instruction count does not prove tensor-core utilization.**
+    The standalone V7-E2 CUDA verifier lowered both QK and PV to BF16 WMMA and
+    executed exactly the same 6,048,768 tensor-pipe instructions as the
+    qualified Triton kernel at 126K.  It was still about 19.5x slower.  NCU
+    showed why: an unswizzled 256-column BF16 shared layout caused 190.54 M
+    shared-load bank conflicts versus Triton's 2.02 M, long-scoreboard stalls
+    rose from 12.09% to 51.20%, and tensor-pipe active time fell from 17.21%
+    to 0.82%.  Its scalar decode/feed path also executed 1.079 B instructions
+    versus 126.0 M.  Validate shared layout, feed efficiency and stalls with
+    counters; `mma_sync` in source or SASS is not a performance result.
+
+61. **Legal per-CTA shared memory can still cross a residency cliff.**  Padding
+    the V7 WMMA Q/K/V leading dimensions from 256 to 264 reduced shared-load
+    bank conflicts from 190.54 M to 63.51 M and passed full correctness, but
+    grew dynamic shared from 81,920 to 83,200 bytes.  The latter is legal for
+    one CTA yet reduced measured residency from two CTAs/SM to one on GA100.
+    Long-context latency regressed about 55%.  Always query active CTAs after
+    a shared-layout change; fitting below the per-block opt-in limit is not
+    evidence that the intended multi-CTA occupancy survives.
+
+62. **A small serialized tail can be cheaper than losing a resident CTA.**
+    Keeping padded Q/K/V but shrinking the FP32 PV scratch from 16x256 to
+    16x224 restored two CTAs/SM.  A second 16x32 tail phase added barriers and
+    made 4K about 3% slower, yet improved 70K-250K roughly 5% over the
+    unpadded E2 because the bank-conflict reduction finally survived at two
+    CTA residency.  This remains far from production-fast, but it is a useful
+    design rule: explicitly serialize a small tail when doing so preserves a
+    major occupancy tier, and verify the trade with both short and long tiers.
+
+63. **Moving a tiny decode LUT to shared memory does not cure a scalar feed
+    pipeline.** V7-E4a copied the 256-entry BF16 FP8 table into 512 B of shared
+    memory and preserved two-CTA residency. It passed the full correctness
+    gate and improved E2 by 6.1%/5.6% at 126K/250K, but long-scoreboard stalls
+    remained 51.97%, tensor-pipe activity only reached 0.88%, and shared-load
+    conflicts rose to 72.22 M. The dominant cost is still scalar raw-byte
+    loading/addressing and staging, not the LUT's global-memory residence.
+    Vectorize raw loads and hoist address bases before attempting more lookup
+    caching.
+
+64. **A vector global load can remain a scalar decode pipeline.** V7-E4b
+    changed raw K/V reads to aligned 16-byte `uint4` loads and hoisted tile
+    address bases without changing occupancy or correctness. It nevertheless
+    regressed 4K by 13% and was flat from 70K through 250K. NCU still showed
+    about 1.09 B instructions, 52% long-scoreboard stalls and 0.88% tensor
+    activity because every vector still had to be unpacked byte by byte and
+    indexed through the shared LUT before WMMA. Distinguish vector transport
+    from vector conversion; stage compact raw bytes separately if the goal is
+    to break the global-load/decode dependency chain.
+
+65. **Separating transport from decode does not remove decode cost.** V7-E5
+    staged each compact 8-KiB raw K/V matrix in an otherwise idle shared Q/P
+    buffer before decoding it to padded BF16. It passed all gates and improved
+    4K/70K by 1.2%/2.9%, but 126K-250K latency and every important NCU counter
+    were flat. The remaining per-byte random shared-LUT read still dominates
+    the feed path. After validating all encodings, direct E4M3FN bit conversion
+    is a better next test than adding more transport stages.
+
+66. **For E4M3FN on SM80, exact bit synthesis can beat a decode LUT by a wide
+    margin.** V7-E6 exhaustively matched all 256 raw codes against PyTorch and
+    then removed hot-loop shared LUT reads. Long-context latency fell 43-44%,
+    instructions dropped from 1.093 B to 711.7 M, long-scoreboard stalls from
+    51.99% to 28.48%, and tensor activity rose to 1.51%, with no occupancy or
+    correctness regression. A tiny table is not automatically cheap when each
+    divergent byte creates a shared lookup and conflict; prove the finite/
+    subnormal/NaN bit mapping and prefer arithmetic when its ISA cost is lower.
+
+67. **Staging can be worth its barriers when it breaks a global scoreboard
+    chain.** V7-E7 removed E6's compact raw staging and cut barrier stalls from
+    19.23% to 11.19%, yet long-scoreboard stalls jumped from 28.48% to 54.34%
+    and 126K/250K latency regressed about 68%. Direct byte loads serialize the
+    decode feed despite fewer synchronizations. Preserve staged transport and
+    reduce its phase count or overlap it; do not optimize barrier percentage in
+    isolation.
+
+68. **Preserve the application's invalid-code contract when replacing a
+    numeric LUT.** PyTorch converts E4M3FN `0x7f/0xff` to NaN, but this verifier
+    deliberately fail-closes those two encodings to zero. E6's first exhaustive
+    test accidentally validated PyTorch NaNs; cross-review caught it before
+    integration, and E8 corrected the device helper/test. Exhaustive encoding
+    tests must compare against the runtime contract, not merely a library cast.
+
+69. **Fewer source barriers need not reduce measured barrier stalls.** E8
+    staged K and V together and cut four explicit phases to two, reducing
+    instructions about 5%, yet barrier stalls stayed near 19.3%. Long latency
+    improved only 1-2% and 4K regressed 7.7%. Arrival imbalance and the work
+    between barriers matter more than the source-level barrier count.
+
+70. **A public FP8x2 conversion can still be slower than exact integer decode
+    on SM80.** CUDA 13.0 on the qualified host exposes
+    `__nv_cvt_fp8x2_to_halfraw2`, but not a direct FP8x2-to-BF16 intrinsic.
+    E9b therefore required half-to-float-to-BF16 conversion after the paired
+    decode. It was 8.3% faster at 4K, but 2.8-3.0% slower from 126K to 250K and
+    executed 783.4 M rather than E6's 711.7 M instructions. Check the target
+    toolkit's actual header and end type; vector width alone is not a useful
+    optimization if a scalar type bridge is inserted afterward.
+
+71. **Segment-local block metadata can be correct and measurable yet too small
+    to matter.** V7-E10a prefetched up to sixteen K/V physical page bases into
+    256 bytes of already-reserved shared memory and preserved a safe fallback
+    for wider segments. It passed every correctness/high-ID gate and reduced
+    126K instructions from about 711.7 M to 710.9 M, but improved stable
+    126K-250K latency by only 0.7-0.9%. The block-table/address work was not the
+    dominant feed cost; repeated Q preparation and FP8 decode remain much
+    larger. Do not infer a large benefit merely because an independent kernel
+    stages page IDs. Measure the fraction of instructions and stalls removed.
+
+72. **For small-query long-context verify, Q preparation must be outside the
+    KV-tile loop.** V7-E11 assigned one 16-row Q group to each of three warps
+    and retained sixteen BF16 WMMA A fragments per owner warp across the scan.
+    Despite rising from 79 to 166 registers/thread, shared memory remained the
+    occupancy limiter, so the kernel kept two CTAs/SM with zero spill. Stable
+    126K-250K latency improved about 38-39%, instructions fell 37%, and
+    long-scoreboard stalls fell 28.48% -> 9.28%. Register count by itself is
+    not a rejection criterion; calculate the actual occupancy limiter and
+    verify local bytes/spills. The next bottleneck is now barrier/short
+    dependency cost, not Q reload or global scoreboard.
+
+73. **Independent GQA groups should not serialize CTA-wide softmax/PV.**
+    V7-E12 kept E11's three persistent-Q owner warps but gave each a disjoint
+    BF16 P pack and FP32 PV scratch slice. Replacing three group-level CTA
+    phases with warp-local work plus one tile-tail barrier improved stable
+    126K-250K latency by about 19-20%. NCU barrier stalls fell 29.52% -> 15.47%
+    and tensor activity rose 2.41% -> 3.01%. Keep score and compact-P storage
+    disjoint: in-place FP32-to-BF16 compaction creates a cross-lane overwrite
+    race even when every warp owns a separate group.
+
+74. **Fewer WMMA scratch-store bank conflicts need not improve the complete
+    store-to-merge chain.** V7-E13a padded each FP32 `16x16` PV scratch from
+    `ld=16` to `ld=20`. It preserved resources and correctness but slowed the
+    stable 126K-250K tiers by 0.2-0.5%. The padded row phase helps the opaque
+    WMMA store pattern while making the following scalar merge loads less
+    favorable. Measure the whole producer/consumer chain; do not optimize one
+    side's bank map in isolation.
+
+75. **Score-row padding is only measurable under controlled clocks.** V7-E13b
+    padded FP32 score rows from 32 to 36 columns while restoring E12's dense PV
+    scratch. With the CMP170HX locked at 1350MHz, latency improved 3.7-6.8%
+    from 4K through 250K; at 126K shared-load conflicts fell about 61% and
+    short-scoreboard stalls fell 21.01% -> 15.85%. An earlier unlocked run
+    falsely suggested short-tier regressions because Boost state differed. Lock
+    or interleave clocks for kernel A/B; never choose dispatch from sequential
+    auto-Boost samples.
+
+76. **P-row padding can remove shared conflicts without changing KV traffic.**
+    V7-E14 kept score `ld=36` and padded the BF16 P operand from `ld=32` to
+    `ld=40`. At 126K, shared-load conflicts fell 67% and store conflicts 39%,
+    while latency improved a further 3.2% with identical resources and exact
+    outputs. The smaller wall-time gain shows that conflict counters are a
+    bottleneck diagnostic, not a direct speedup forecast.
+
+77. **Accumulator row padding alone does not move the remaining conflict wall.**
+    V7-E15 changed only the persistent FP16 accumulator from physical `ld=256`
+    to `ld=258`, keeping logical D=256 and preserving two-CTA residency after
+    allocator rounding. Correctness/high-block-ID passed, but three locked-clock
+    scans stayed within about ±0.1% of E14. NCU at 126K remained at roughly
+    9.08M shared loads and 14.49M stores with 14.6% barrier and 14.5% short
+    scoreboard stalls. Attribute the specific shared-store instructions before
+    trying another accumulator layout; retain E15 only as a negative control.
+
+78. **Removing a per-tile barrier requires moving every live consumer off the
+    raw staging alias, and still needs one publication barrier.** V7-E17 moved
+    the FP32 score packs from `q_shared` into the tail of `tmp_shared`, then
+    removed the tile-tail CTA barrier. At 1350MHz this produced a stable
+    1.0-1.5% gain over E16 from 20K through 250K, with barrier stalls falling
+    12.86% -> 12.50% and no resource change. Do not remove the final
+    end-of-loop barrier: warp 3 can otherwise publish/read `acc_shared` while
+    an owner warp is still finishing its last PV merge. Verify the entire
+    producer/consumer lifetime before deleting a synchronization point.
+
+79. **A resident shared LUT can beat “zero extra shared loads” when decode
+    arithmetic dominates.** V7-E18 reused the already-copied 256-entry BF16
+    E4M3FN LUT for K/V conversion instead of recomputing exponent/mantissa and
+    `clz` per byte. Shared-bank conflicts and scoreboard stalls increased, but
+    fixed-clock wall latency fell 11.6% at 4K and 17-22% from 20K to 250K with
+    unchanged DRAM traffic, registers and occupancy. Keep exact LUT semantics
+    (including fail-closed NaN codes) and measure end-to-end latency; do not
+    reject a lookup path solely because shared transaction counters rise.
+
+80. **Pairing LUT decode accesses is a separate win from choosing the LUT.**
+    V7-E19 loads two adjacent raw FP8 bytes as `uint16_t`, performs two exact
+    shared-LUT reads and stores two BF16 values as one `uint32_t`. The mapping
+    is even-aligned for the 256-wide tile, so no byte-order or tail special
+    case is needed. At locked 1350MHz it cut E18 latency another 4.4-9.4%
+    (up to 29% versus E17) with unchanged 132 registers, 81,856B shared and
+    two-CTA occupancy. Keep alignment assertions; do not generalize the pair
+    mapping to odd-width or unaligned cache geometries without a new gate.
+
+81. **Random `__ldg` LUT reads are slower than the resident shared table on
+    this SM80 path.** V7-E20 kept E19's paired decode and changed only the
+address space; correctness and occupancy were identical, but locked-clock
+latency regressed 1.7-6.1% (about 6% at long context). The 256-entry table
+is small enough that shared-bank conflicts are cheaper than per-lane
+read-only-cache misses. Retain E19 unless a different broadcast/constant
+access pattern is measured.
+
+82. **An idle warp can hide the next K-tile load when the raw staging alias is
+already free.** V7-E21 uses warp 3 to fetch the next block id and raw K bytes
+while the three owner warps perform QK/softmax/PV for the current tile. The
+next iteration's existing CTA barrier publishes the prefetch before decode;
+V still uses the normal all-thread stage because the alias holds only one raw
+matrix. On locked clocks this reduced query-8 verifier latency 2.2-11.1% over
+E19, with the largest gains at 126K-250K, and NCU long-scoreboard stalls fell
+from 17.70% to about 7.6%. Keep the final publication barrier and verify
+request-local block ids: a persistent next-tile pointer would create stale
+state across requests. The extra register (133 vs 132) did not reduce the
+two-CTA occupancy, but this is still an isolated prototype until multi-request,
+CUDA Graph and vLLM A/B gates pass.
+
+83. **CUDA Graph compatibility is shape- and-address-specific.** V7-E22
+captured the E21 `partial`+`combine` sequence for two requests
+(`lengths=[895,896]`, `q_lens=[5,8]`) and replayed it successfully with
+`max_abs=0.001953`. This proves the kernel's synchronization is capture-safe,
+not that one graph can serve arbitrary scheduler batches. Integration must
+maintain a graph pool keyed by capture shape (and refresh request-local block
+tables before replay), with eager fallback for misses.
+
+84. **Aligning LUT entries is not automatically worth a shared-memory budget
+trade.** V7-E23 repacked the 256 BF16 entries into aligned 32-bit slots and
+reclaimed the reserved temporary tail, preserving 81,856 B and two-CTA
+occupancy. Correctness passed, but fixed-clock scans regressed 4K by about
+3.3% and improved 20K-250K by less than 1%, below the acceptance gate. Keep
+the compact E21 LUT representation unless a new access pattern changes this
+balance.
+
+85. **Overlapping V staging with owner compute is not useful if the copy loses
+parallelism.** V7-E24 used idle warp 3 to stage V while the owner warps ran
+QK/softmax, but that made the copy four times less parallel than the original
+all-thread stage. Correctness remained exact, yet fixed-clock latency regressed
+about 25% at 20K-250K. Keep E21's K-only prefetch and all-thread V stage unless
+a true multi-warp/double-buffer design preserves copy bandwidth without
+losing two-CTA occupancy.
+
+86. **`cp.async` does not guarantee a win for a small warp-prefetch group.**
+V7-E25 kept a synchronous fallback but still added commit/wait-group overhead
+and raised registers from 133 to 134. Fixed-clock scans regressed 1.2-1.3% at
+20K-250K and about 4.6% at 4K. Retain E21's synchronous warp-3 K prefetch
+unless a design can pipeline multiple groups without an immediate wait.
+
+87. **Standalone prototype timing is not a vLLM baseline.** V7-E26 routed
+the real SpecDecodeAttention API to E21 for one exact static-FP8 shape and
+compared identical inputs against the existing Triton q8 specialization.
+E21 was 1.52-1.83x slower at 4K/126K/250K despite max_abs 0.000008-0.000015.
+Do not integrate a standalone kernel without an apples-to-apples API test;
+profile the Triton path and E21 under the same wrapper before changing
+dispatch.
+
+88. **A streaming cache modifier is not automatically better for q8 KV.**
+V7-E27 applied `.cg` only to the q8 global K/V loads. Locked-clock results
+changed by -0.2%/-1.2%/+0.5% at 4K/126K/250K, with identical output. Keep the
+existing cache policy unless a workload-specific trace shows L1 pollution.
+
+89. **More warps can be a severe regression for the q8 specialization.**
+V7-E28 changed only the launch from four to eight warps; locked-clock latency
+was 22-78% worse at 4K/126K/250K with identical output. Keep four warps and
+measure resource/launch effects before increasing parallelism.
+
+90. **Wider KV tiles can hurt the q8 specialization.** V7-E29 changed only
+TILE 32→64; latency regressed 11% at 4K and roughly 63-65% at 126K/250K.
+Keep TILE=32 unless register/live-state and long-context measurements show a
+real benefit.
+
+91. **Replacing a hot 256-entry FP8 LUT with arithmetic can be worse.**
+V7-E30's integer/exp2 decoder regressed 12% at 4K and 73-75% at long
+contexts. On SM80, retain the LUT unless instruction-level profiling proves
+the table lookup is the dominant cost.
+
+92. **Tiny address-conversion wins must be repeated before keeping them.**
+V7-E31's q8 int32 block-ID fast path showed sub-0.5% long-context change and
+unstable 4K deltas across 500-iteration repeats. Do not keep a short-tier
+fast-path on a single noisy scan.
+
+93. **One-tile page-table prefetch is not automatically useful.** V7-E32
+prefetched the next q8 page block ID before the boundary, but locked-clock
+latency moved only -0.8%/-0.7%/+0.6% at 4K/126K/250K with identical output.
+Reject below the measurement gate unless a trace shows address lookup is a
+real bottleneck.
+
+94. **A full register accumulator can be numerically right but resource-wrong.**
+V7-E33 removed the shared accumulator and reached 255 registers/thread with
+124--172B spills. Even with roughly 4% lower isolated latency, spilled
+register state invalidates the candidate; require zero spills before judging
+any registerization result.
+
+95. **Partial registerization may be safe but too small to matter.** V7-E34
+kept four D16 accumulator tiles in registers (168 registers/thread, zero
+spills) but improved locked-clock latency by only 1.8%/1.1%/1.2% at
+4K/126K/250K. Apply the measurement gate before retaining a hybrid path.
+
+96. **Softmax lane pairing must follow the half-warp row layout.** V7-E35
+    correctly maps `local_row = lane & 15` and `half = lane >> 4`, then
+    exchanges peers with XOR-16; adjacent-lane pairing (`lane >> 1`,
+    `lane & 1`) is wrong for this WMMA layout. E35 used 164 registers/thread
+    with zero spills and improved locked-clock verifier latency
+    3.2%/6.6%/6.4% at 4K/126K/250K, so it is an accepted isolated candidate.
+    Its reduction order differs slightly from E21; validate against the
+    reference and still require API/multi-request/graph gates before dispatch.
+
+97. **Legacy Nsight Compute parses application arguments positionally.** On
+    2022.4, putting a standalone `--` before the Python command caused the
+    benchmark's `--segments`/similar flags to be parsed as profiler options
+    and reported a misleading ambiguity. Put the application executable
+    first and pass its arguments directly. Matched E21/E35 NCU samples then
+    worked and showed the E35 gain without an occupancy or cache-policy
+    change.
+
+98. **A standalone two-request pass is not scheduler integration.** E35-Q1
+    kept E35's 6.60%/6.67%/6.75% gain at 4K/126K/250K with private block
+    rows and max reference error 0.000015, while E35-Q2 captured/replayed
+    the fixed two-request shape with zero diff. These results justify keeping
+    E35 as a research baseline, but production dispatch still needs shape-keyed
+    graph handling, request-state refresh and an eager fallback.

@@ -1,0 +1,41 @@
+Carry the production q8 verifier's physical block ID across tiles in a page.
+
+The 896-token target page contains exactly 28 32-token verifier tiles.  The
+specialized q8/GQA6 kernel previously reloaded the same four-byte block-table
+entry for every tile.  Initialize the physical block ID once at the segment
+start and refresh it only when the loop crosses a logical page boundary.
+
+This changes neither KV addressing nor attention arithmetic.  Five isolated
+A/B rounds were bit-identical and consistently reduced the 250K kernel time by
+0.7-1.3%.  Paired FULL-graph model tests with identical prompts improved
+ms/pass from 22.6/37.4/51.8 to 22.5/37.2/51.6 at 4K/126K/250K.
+
+Apply after spec-decode-fp8-q8-g6-sm80.patch.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -234,11 +234,23 @@ def _spec_attn_partial_q8_g6_fp8(
+     l1 = tl.zeros([16], tl.float32)
+     acc1 = tl.zeros([16, D], tl.float16)
+ 
++    # TILE divides the 896-token production page.  Carry the current physical
++    # block through the loop and refresh it only on a page boundary instead of
++    # reloading the same block-table entry for all 28 tiles in that page.
++    page_idx = (t0 * TILE) // BLOCK_SIZE
++    blk = tl.load(
++        bt_ptr + req * stride_bt + page_idx,
++        mask=t0 < t1,
++        other=0,
++    ).to(tl.int64)
+     for t in range(t0, t1):
+         tok0 = t * TILE
+         pos = tok0 + tl.arange(0, TILE)
+         k_ok = pos < kv_len
+-        blk = tl.load(bt_ptr + req * stride_bt + tok0 // BLOCK_SIZE).to(tl.int64)
++        next_page = tok0 // BLOCK_SIZE
++        if next_page != page_idx:
++            page_idx = next_page
++            blk = tl.load(bt_ptr + req * stride_bt + page_idx).to(tl.int64)
+         slot = (tok0 % BLOCK_SIZE) + tl.arange(0, TILE)
+         kptr = k_ptr + blk * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+         vptr = v_ptr + blk * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]

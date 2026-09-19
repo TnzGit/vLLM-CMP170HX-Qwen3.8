@@ -1,0 +1,201 @@
+  effective: CTX=cmp-mixed-fp8 MAX_LEN=262144 DFLASH_MAX_LEN=262144 MAX_SEQS=4 VLLM_FP8_SPEC_VERIFY=1 VLLM_FP8_SPEC_FULL_CG=1 VLLM_SPEC_DECODE_ATTN_SEGMENTS=35 
+=== ctx=4096 round=1 clock=1140 MHz power=44.61 W ===
+{
+  "label": "m7-replay-c4096-r1",
+  "context": 4096,
+  "salt": "m7r1",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.177514416000122,
+  "decode_s": 1.7349874159999672,
+  "decode_tok_s": 146.97512941500483,
+  "spec_steps": 79.0,
+  "accepted_tokens": 179.0,
+  "tokens_per_step": 3.2658227848101267,
+  "ms_per_step": 21.96186602531604,
+  "preemptions": 0.0
+}
+=== ctx=4096 round=2 clock=1470 MHz power=67.77 W ===
+{
+  "label": "m7-replay-c4096-r2",
+  "context": 4096,
+  "salt": "m7r2",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.1355671849996725,
+  "decode_s": 1.9138734580001255,
+  "decode_tok_s": 133.23764898566418,
+  "spec_steps": 86.0,
+  "accepted_tokens": 169.0,
+  "tokens_per_step": 2.9651162790697674,
+  "ms_per_step": 22.25434253488518,
+  "preemptions": 0.0
+}
+=== ctx=4096 round=3 clock=1470 MHz power=68.66 W ===
+{
+  "label": "m7-replay-c4096-r3",
+  "context": 4096,
+  "salt": "m7r3",
+  "prompt_tokens": 4096,
+  "output_tokens": 256,
+  "ttft_s": 2.1406174190005913,
+  "decode_s": 1.8996048419994622,
+  "decode_tok_s": 134.23844494499988,
+  "spec_steps": 85.0,
+  "accepted_tokens": 170.0,
+  "tokens_per_step": 3.0,
+  "ms_per_step": 22.348292258817203,
+  "preemptions": 0.0
+}
+  ctx=4096 xid_delta=0
+  effective: CTX=cmp-mixed-fp8 MAX_LEN=262144 DFLASH_MAX_LEN=262144 MAX_SEQS=4 VLLM_FP8_SPEC_VERIFY=1 VLLM_FP8_SPEC_FULL_CG=1 VLLM_SPEC_DECODE_ATTN_SEGMENTS=35 
+=== ctx=65536 round=1 clock=1140 MHz power=45.36 W ===
+{
+  "label": "m7-replay-c65536-r1",
+  "context": 65536,
+  "salt": "m7r1",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 45.71857089599962,
+  "decode_s": 2.186202582999613,
+  "decode_tok_s": 116.64060868966834,
+  "spec_steps": 77.0,
+  "accepted_tokens": 185.0,
+  "tokens_per_step": 3.4025974025974026,
+  "ms_per_step": 28.39224133765731,
+  "preemptions": 0.0
+}
+=== ctx=65536 round=2 clock=1455 MHz power=75.73 W ===
+{
+  "label": "m7-replay-c65536-r2",
+  "context": 65536,
+  "salt": "m7r2",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 46.44068935999985,
+  "decode_s": 2.244815834000292,
+  "decode_tok_s": 113.59506474327856,
+  "spec_steps": 77.0,
+  "accepted_tokens": 182.0,
+  "tokens_per_step": 3.3636363636363638,
+  "ms_per_step": 29.15345238961418,
+  "preemptions": 0.0
+}
+=== ctx=65536 round=3 clock=1455 MHz power=81.60 W ===
+{
+  "label": "m7-replay-c65536-r3",
+  "context": 65536,
+  "salt": "m7r3",
+  "prompt_tokens": 65536,
+  "output_tokens": 256,
+  "ttft_s": 46.887415525000506,
+  "decode_s": 2.846607825999854,
+  "decode_tok_s": 89.58030595957938,
+  "spec_steps": 97.0,
+  "accepted_tokens": 158.0,
+  "tokens_per_step": 2.6288659793814433,
+  "ms_per_step": 29.346472432988186,
+  "preemptions": 0.0
+}
+  ctx=65536 xid_delta=0
+  effective: CTX=cmp-mixed-fp8 MAX_LEN=262144 DFLASH_MAX_LEN=262144 MAX_SEQS=4 VLLM_FP8_SPEC_VERIFY=1 VLLM_FP8_SPEC_FULL_CG=1 VLLM_SPEC_DECODE_ATTN_SEGMENTS=35 
+=== ctx=126000 round=1 clock=1140 MHz power=49.38 W ===
+{
+  "label": "m7-replay-c126000-r1",
+  "context": 126000,
+  "salt": "m7r1",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 112.19682901700071,
+  "decode_s": 2.7674231239998335,
+  "decode_tok_s": 92.14348098365292,
+  "spec_steps": 79.0,
+  "accepted_tokens": 178.0,
+  "tokens_per_step": 3.2531645569620253,
+  "ms_per_step": 35.030672455694095,
+  "preemptions": 0.0
+}
+=== ctx=126000 round=2 clock=1455 MHz power=86.96 W ===
+{
+  "label": "m7-replay-c126000-r2",
+  "context": 126000,
+  "salt": "m7r2",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 113.31504098699952,
+  "decode_s": 3.000245909000114,
+  "decode_tok_s": 84.99303314940053,
+  "spec_steps": 84.0,
+  "accepted_tokens": 175.0,
+  "tokens_per_step": 3.0833333333333335,
+  "ms_per_step": 35.71721320238231,
+  "preemptions": 0.0
+}
+=== ctx=126000 round=3 clock=1455 MHz power=89.63 W ===
+{
+  "label": "m7-replay-c126000-r3",
+  "context": 126000,
+  "salt": "m7r3",
+  "prompt_tokens": 126000,
+  "output_tokens": 256,
+  "ttft_s": 114.31359929700011,
+  "decode_s": 2.7873401010001544,
+  "decode_tok_s": 91.48506847388333,
+  "spec_steps": 78.0,
+  "accepted_tokens": 179.0,
+  "tokens_per_step": 3.2948717948717947,
+  "ms_per_step": 35.73512950000198,
+  "preemptions": 0.0
+}
+  ctx=126000 xid_delta=0
+  effective: CTX=cmp-mixed-fp8 MAX_LEN=262144 DFLASH_MAX_LEN=262144 MAX_SEQS=4 VLLM_FP8_SPEC_VERIFY=1 VLLM_FP8_SPEC_FULL_CG=1 VLLM_SPEC_DECODE_ATTN_SEGMENTS=35 
+=== ctx=250000 round=1 clock=1140 MHz power=50.54 W ===
+{
+  "label": "m7-replay-c250000-r1",
+  "context": 250000,
+  "salt": "m7r1",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 318.17293518099996,
+  "decode_s": 3.7264636840000094,
+  "decode_tok_s": 68.42948747759736,
+  "spec_steps": 78.0,
+  "accepted_tokens": 177.0,
+  "tokens_per_step": 3.269230769230769,
+  "ms_per_step": 47.77517543589756,
+  "preemptions": 0.0
+}
+=== ctx=250000 round=2 clock=1455 MHz power=92.18 W ===
+{
+  "label": "m7-replay-c250000-r2",
+  "context": 250000,
+  "salt": "m7r2",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 320.03891727500013,
+  "decode_s": 4.018665941999643,
+  "decode_tok_s": 63.45389332687724,
+  "spec_steps": 83.0,
+  "accepted_tokens": 175.0,
+  "tokens_per_step": 3.108433734939759,
+  "ms_per_step": 48.41766195180293,
+  "preemptions": 0.0
+}
+=== ctx=250000 round=3 clock=1440 MHz power=90.87 W ===
+{
+  "label": "m7-replay-c250000-r3",
+  "context": 250000,
+  "salt": "m7r3",
+  "prompt_tokens": 250000,
+  "output_tokens": 256,
+  "ttft_s": 319.83897910999985,
+  "decode_s": 3.8179783469995527,
+  "decode_tok_s": 66.78927349087711,
+  "spec_steps": 79.0,
+  "accepted_tokens": 183.0,
+  "tokens_per_step": 3.3164556962025316,
+  "ms_per_step": 48.32883983543738,
+  "preemptions": 0.0
+}
+  ctx=250000 xid_delta=0
+B1_REPLAY_DONE

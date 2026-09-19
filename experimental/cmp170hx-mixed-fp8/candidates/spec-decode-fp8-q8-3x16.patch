@@ -1,0 +1,214 @@
+Standalone Triton candidate for the production q<=8, GQA-group-6 static-FP8 verifier.
+
+This keeps the existing 4-warp/NSEG35/num_stages=1 launch, page-carry int64
+block-table lookup, read-only FP8 LUT path, one K/V tile load, workspace layout,
+and combine semantics. It replaces the 32+16 row split with explicit 16+16+16
+groups; all other shapes retain the active generic/specialized dispatch.
+
+Apply after the complete qualified mixed-FP8 experimental series.  The patch
+depends on the active page-carry q8/GQA6 kernel and is intentionally excluded
+from ``experimental/cmp170hx-mixed-fp8/series``.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -318,4 +318,189 @@
+     tl.store(part_l_ptr + pi1, l1, mask=ok1)
+ 
+ 
++@triton.jit
++def _spec_attn_partial_q8_g6_fp8_3x16(
++    q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
++    part_o_ptr, part_m_ptr, part_l_ptr,
++    static_k_scale, static_v_scale, fp8_lut_ptr,
++    scale,
++    stride_qt, stride_qh,
++    stride_kb, stride_ks, stride_kh,
++    stride_vb, stride_vs, stride_vh,
++    stride_bt,
++    Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr,
++):
++    """Standalone 16+16+16 row decomposition for q<=8/G=6."""
++    req = tl.program_id(0)
++    kvh = tl.program_id(1)
++    seg = tl.program_id(2)
++
++    q_start = tl.load(cu_q_ptr + req)
++    q_len = tl.load(cu_q_ptr + req + 1) - q_start
++    kv_len = tl.load(seqused_ptr + req)
++    d = tl.arange(0, D)
++
++    # The 48 valid q/GQA rows are split into three independent 16-row groups.
++    r0 = tl.arange(0, 16)
++    ri0 = r0 // 6
++    rg0 = r0 % 6
++    ok0 = ri0 < q_len
++    qp0 = kv_len - q_len + ri0
++    qptr0 = (
++        q_ptr + (q_start + ri0)[:, None] * stride_qt
++        + (kvh * 6 + rg0)[:, None] * stride_qh + d[None, :]
++    )
++    qs0 = (tl.load(qptr0, mask=ok0[:, None], other=0.0) * scale).to(tl.bfloat16)
++
++    r1 = tl.arange(0, 16) + 16
++    ri1 = r1 // 6
++    rg1 = r1 % 6
++    ok1 = ri1 < q_len
++    qp1 = kv_len - q_len + ri1
++    qptr1 = (
++        q_ptr + (q_start + ri1)[:, None] * stride_qt
++        + (kvh * 6 + rg1)[:, None] * stride_qh + d[None, :]
++    )
++    qs1 = (tl.load(qptr1, mask=ok1[:, None], other=0.0) * scale).to(tl.bfloat16)
++
++    r2 = tl.arange(0, 16) + 32
++    ri2 = r2 // 6
++    rg2 = r2 % 6
++    ok2 = ri2 < q_len
++    qp2 = kv_len - q_len + ri2
++    qptr2 = (
++        q_ptr + (q_start + ri2)[:, None] * stride_qt
++        + (kvh * 6 + rg2)[:, None] * stride_qh + d[None, :]
++    )
++    qs2 = (tl.load(qptr2, mask=ok2[:, None], other=0.0) * scale).to(tl.bfloat16)
++
++    tiles_total = (kv_len + TILE - 1) // TILE
++    tiles_per_seg = (tiles_total + NSEG - 1) // NSEG
++    t0 = seg * tiles_per_seg
++    t1 = tl.minimum(t0 + tiles_per_seg, tiles_total)
++
++    m0 = tl.full([16], float("-inf"), tl.float32)
++    l0 = tl.zeros([16], tl.float32)
++    acc0 = tl.zeros([16, D], tl.float16)
++    m1 = tl.full([16], float("-inf"), tl.float32)
++    l1 = tl.zeros([16], tl.float32)
++    acc1 = tl.zeros([16, D], tl.float16)
++    m2 = tl.full([16], float("-inf"), tl.float32)
++    l2 = tl.zeros([16], tl.float32)
++    acc2 = tl.zeros([16, D], tl.float16)
++
++    # Carry the physical block ID across tiles in one logical page.  This is
++    # the same page-carry/int64 block-table path as the active q8 kernel.
++    page_idx = (t0 * TILE) // BLOCK_SIZE
++    blk = tl.load(
++        bt_ptr + req * stride_bt + page_idx,
++        mask=t0 < t1,
++        other=0,
++    ).to(tl.int64)
++
++    for t in range(t0, t1):
++        tok0 = t * TILE
++        pos = tok0 + tl.arange(0, TILE)
++        k_ok = pos < kv_len
++        next_page = tok0 // BLOCK_SIZE
++        if next_page != page_idx:
++            page_idx = next_page
++            blk = tl.load(
++                bt_ptr + req * stride_bt + page_idx,
++                mask=True,
++                other=0,
++            ).to(tl.int64)
++        slot = (tok0 % BLOCK_SIZE) + tl.arange(0, TILE)
++        kptr = (
++            k_ptr + blk * stride_kb + slot[:, None] * stride_ks
++            + kvh * stride_kh + d[None, :]
++        )
++        vptr = (
++            v_ptr + blk * stride_vb + slot[:, None] * stride_vs
++            + kvh * stride_vh + d[None, :]
++        )
++        # One K load and one V load feed all three row groups.
++        k = _e4m3fn_to_bf16_ldg_nc(
++            tl.load(kptr, mask=k_ok[:, None], other=0), fp8_lut_ptr
++        )
++        v = _e4m3fn_to_bf16_ldg_nc(
++            tl.load(vptr, mask=k_ok[:, None], other=0), fp8_lut_ptr
++        )
++
++        # Group 0: rows 0..15; apply causal mask, online softmax, accumulator.
++        s0 = tl.dot(qs0, tl.trans(k)).to(tl.float32) * static_k_scale
++        s0 = tl.where(
++            k_ok[None, :] & (pos[None, :] <= qp0[:, None]) & ok0[:, None],
++            s0,
++            float("-inf"),
++        )
++        mn0 = tl.maximum(m0, tl.max(s0, 1))
++        ms0 = tl.where(mn0 == float("-inf"), 0.0, mn0)
++        p0 = tl.exp(s0 - ms0[:, None])
++        a0 = tl.exp(tl.where(m0 == float("-inf"), float("-inf"), m0 - ms0))
++        l0 = l0 * a0 + tl.sum(p0, 1)
++        acc0 = (
++            acc0.to(tl.float32) * a0[:, None]
++            + tl.dot((p0 * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++        ).to(tl.float16)
++        m0 = mn0
++
++        # Group 1: rows 16..31; same q/causal/softmax/acc path.
++        s1 = tl.dot(qs1, tl.trans(k)).to(tl.float32) * static_k_scale
++        s1 = tl.where(
++            k_ok[None, :] & (pos[None, :] <= qp1[:, None]) & ok1[:, None],
++            s1,
++            float("-inf"),
++        )
++        mn1 = tl.maximum(m1, tl.max(s1, 1))
++        ms1 = tl.where(mn1 == float("-inf"), 0.0, mn1)
++        p1 = tl.exp(s1 - ms1[:, None])
++        a1 = tl.exp(tl.where(m1 == float("-inf"), float("-inf"), m1 - ms1))
++        l1 = l1 * a1 + tl.sum(p1, 1)
++        acc1 = (
++            acc1.to(tl.float32) * a1[:, None]
++            + tl.dot((p1 * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++        ).to(tl.float16)
++        m1 = mn1
++
++        # Group 2: rows 32..47; same q/causal/softmax/acc path.
++        s2 = tl.dot(qs2, tl.trans(k)).to(tl.float32) * static_k_scale
++        s2 = tl.where(
++            k_ok[None, :] & (pos[None, :] <= qp2[:, None]) & ok2[:, None],
++            s2,
++            float("-inf"),
++        )
++        mn2 = tl.maximum(m2, tl.max(s2, 1))
++        ms2 = tl.where(mn2 == float("-inf"), 0.0, mn2)
++        p2 = tl.exp(s2 - ms2[:, None])
++        a2 = tl.exp(tl.where(m2 == float("-inf"), float("-inf"), m2 - ms2))
++        l2 = l2 * a2 + tl.sum(p2, 1)
++        acc2 = (
++            acc2.to(tl.float32) * a2[:, None]
++            + tl.dot((p2 * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++        ).to(tl.float16)
++        m2 = mn2
++
++    # Store all three groups with the unchanged [req, head, query, segment]
++    # workspace indexing used by _spec_attn_combine.
++    h0 = kvh * 6 + rg0
++    pi0 = ((req * Hq + h0) * QMAX + ri0) * NSEG + seg
++    tl.store(part_o_ptr + pi0[:, None] * D + d[None, :], acc0, mask=ok0[:, None])
++    tl.store(part_m_ptr + pi0, m0, mask=ok0)
++    tl.store(part_l_ptr + pi0, l0, mask=ok0)
++
++    h1 = kvh * 6 + rg1
++    pi1 = ((req * Hq + h1) * QMAX + ri1) * NSEG + seg
++    tl.store(part_o_ptr + pi1[:, None] * D + d[None, :], acc1, mask=ok1[:, None])
++    tl.store(part_m_ptr + pi1, m1, mask=ok1)
++    tl.store(part_l_ptr + pi1, l1, mask=ok1)
++
++    h2 = kvh * 6 + rg2
++    pi2 = ((req * Hq + h2) * QMAX + ri2) * NSEG + seg
++    tl.store(part_o_ptr + pi2[:, None] * D + d[None, :], acc2, mask=ok2[:, None])
++    tl.store(part_m_ptr + pi2, m2, mask=ok2)
++    tl.store(part_l_ptr + pi2, l2, mask=ok2)
++
++
+ @triton.jit
+@@ -424,9 +609,9 @@
+         use_q8_special = (
+             static_quant and G == 6 and D == 256 and max_query_len <= 8
+             and key_cache.shape[1] % 32 == 0
+         )
+         if use_q8_special:
+             grid = (num_reqs, Hkv, self.nseg)
+-            _spec_attn_partial_q8_g6_fp8[grid](
++            _spec_attn_partial_q8_g6_fp8_3x16[grid](
+                 q, kernel_key_cache, kernel_value_cache, block_table,
+                 seqused_k, cu_seqlens_q,

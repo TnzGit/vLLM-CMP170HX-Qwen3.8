@@ -1,0 +1,31 @@
+trace: rank0.1789835543390580117.pt.trace.json.gz (37.6 MB)
+annotations: 82 generation passes, 63 prefill chunks
+decode window: 2935.3 ms  (82 passes -> 35.80 ms/pass)
+kernel events in window: 111059 of 251746 total
+kernel time in window: 2890.6 ms total = 35.252 ms/pass
+
+bucket                   total_ms    ms/pass    share  kernels
+marlin_gemm                1410.7     17.203   48.80%    41126
+verifier_partial           1037.6     12.653   35.89%     1312
+gdn                         182.0      2.220    6.30%     7872
+unclassified                112.2      1.368    3.88%    29055
+elementwise                  76.7      0.935    2.65%    24906
+rmsnorm_silu                 30.7      0.374    1.06%     5071
+attention_flash              29.8      0.364    1.03%      405
+verifier_combine             11.0      0.134    0.38%     1312
+
+top kernels in the decode window:
+  void marlin::Marlin<1125899906909960l, 1125899907892224l    16.39 ms/pass  (279 calls/pass)
+  _spec_attn_partial                                          12.65 ms/pass  (16 calls/pass)
+  fused_sigmoid_gating_delta_rule_update_kernel                1.92 ms/pass  (48 calls/pass)
+  void at::native::elementwise_kernel<128, 4, at::native::     0.52 ms/pass  (145 calls/pass)
+  void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_tr     0.36 ms/pass  (5 calls/pass)
+  _causal_conv1d_update_kernel                                 0.30 ms/pass  (48 calls/pass)
+  void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf1     0.27 ms/pass  (48 calls/pass)
+  void cublasLt::splitKreduce_kernel<32, 16, int, float, _     0.21 ms/pass  (59 calls/pass)
+  triton_red_fused__to_copy_add_fused_add_rms_norm_4           0.18 ms/pass  (32 calls/pass)
+  triton_red_fused__to_copy_add_fused_add_rms_norm_marlin_     0.15 ms/pass  (32 calls/pass)
+  ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_     0.14 ms/pass  (10 calls/pass)
+  _spec_attn_combine                                           0.13 ms/pass  (16 calls/pass)
+  memcpy32_post                                                0.13 ms/pass  (55 calls/pass)
+  void at::native::(anonymous namespace)::CatArrayBatchedC     0.11 ms/pass  (48 calls/pass)

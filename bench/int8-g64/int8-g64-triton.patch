@@ -1,0 +1,144 @@
+INT8-G64 attention-backend integration for vLLM 0.27.1 / SM80
+================================================================
+
+This is the second half of the INT8-G64 integration; the cache dtype and the
+KV-cache spec live in ``int8-g64-vllm.patch``, and the bridge module itself is
+``int8_g64.py`` in this directory (installed as
+``vllm/v1/attention/ops/int8_g64.py``).
+
+Diffed from the pristine ``v1/attention/backends/triton_attn.py`` of the
+qualified vLLM 0.27.1 tree to the version that was actually deployed and
+measured.  It contains four separate changes, each of which was needed to get a
+working run, and each of which is recorded with its evidence in handover
+sections 21 and 23:
+
+  1. route INT8-G64 prefill to the dedicated Triton kernel.  The stock
+     ``unified_attention`` treats this mode as per-token-head and computes
+     ``BLOCK_Q = BLOCK_M // num_queries_per_kv`` = ``16 // 0``, i.e. a
+     ZeroDivisionError on every prefill and warmup call, and it cannot express
+     per-group G=64 scales at all;
+  2. allocate the E38 verify workspace for every split_count in ``__init__``
+     instead of lazily keyed on ``(batch, split_count)``.  Warmup captures CUDA
+     graphs for several capture sizes, so the lazy form allocated inside capture
+     regions and replay then followed stale pointers (illegal memory access at
+     ``run_fullgraph -> graphs[desc].replay()``);
+  3. accept ``sliding_window is None`` as well as ``(-1, -1)`` in the E38 verify
+     gate.  Full-attention layers report ``None``, so the strict test silently
+     disabled the E38 path entirely and verify fell back to the prefill-shaped
+     kernel (~2.7 tok/s whole-model at 4k);
+  4. count the G64 prefill route's calls for the diagnostic in handover 21.7.
+
+Apply from the vLLM site-package root:
+
+  patch -p1 < bench/int8-g64/int8-g64-triton.patch
+
+Note that this patch deliberately does NOT touch ``spec_decode_attn.py``: the
+production control arm's split-KV verify kernel is a separate, already-tracked
+patch series.
+
+--- a/v1/attention/backends/triton_attn.py	2026-09-18 08:37:21
++++ b/v1/attention/backends/triton_attn.py	2026-09-18 08:37:21
+@@ -587,6 +587,19 @@
+             and self.num_kv_heads == 4
+             and self.head_size == 256
+         )
++        # Pre-allocated so no workspace allocation ever happens inside a CUDA
++        # graph capture region: batch <= 4 and these are the only split counts
++        # the bridge derives, so one buffer per split_count is enough.
++        self._g64_ws_cache = {}
++        if self._g64_enabled:
++            _dev = torch.device("cuda", torch.cuda.current_device())
++            for _s in (1, 4, 8, 16, 32):
++                self._g64_ws_cache[_s] = (
++                    torch.empty((4, _s, 8, self.num_heads, self.head_size),
++                                dtype=torch.bfloat16, device=_dev),
++                    torch.empty((4, _s, 8, self.num_heads), dtype=torch.float32, device=_dev),
++                    torch.empty((4, _s, 8, self.num_heads), dtype=torch.float32, device=_dev),
++                )
+         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+ 
+         # Enable tensor descriptors for Q/K/V load/store on platforms that
+@@ -729,13 +742,17 @@
+         # before the legacy split-KV route: the E38 extension owns the packed
+         # cache layout and supports one batched fixed-eight-token launch.
+         if (
+-            _spec_attn_enabled()
++            __import__("os").environ.get("VLLM_INT8_G64_NO_E38") != "1"
++            and _spec_attn_enabled()
+             and self._g64_enabled
+             and kv_cache.shape[2] == 64
+             and kv_cache.shape[-1] == 256
+             and max_seqlen_q == 8
+             and attn_metadata.causal
+-            and self.sliding_window == (-1, -1)
++            # Full-attention layers report sliding_window=None, not (-1,-1); the
++            # strict test silently disabled E38 and fell back to the naive G64
++            # prefill kernel for every verify step (~0.1 tok/s at 4k context).
++            and (self.sliding_window is None or self.sliding_window == (-1, -1))
+             and not self.logits_soft_cap
+             and self.alibi_slopes is None
+             and self.sinks is None
+@@ -759,19 +776,8 @@
+                 if not tables.is_contiguous():
+                     tables = tables.contiguous()
+                 split_count = min(32, max(4, (int(max_seqlen_k) + 4095) // 4096))
+-                if (
+-                    self._g64_workspace is None
+-                    or self._g64_workspace[0] != batch
+-                    or self._g64_workspace[1] != split_count
+-                ):
+-                    self._g64_workspace = (
+-                        batch,
+-                        split_count,
+-                        torch.empty((batch, split_count, 8, self.num_heads, self.head_size), dtype=torch.bfloat16, device=q.device),
+-                        torch.empty((batch, split_count, 8, self.num_heads), dtype=torch.float32, device=q.device),
+-                        torch.empty((batch, split_count, 8, self.num_heads), dtype=torch.float32, device=q.device),
+-                    )
+-                _, _, partial_acc, partial_m, partial_l = self._g64_workspace
++                split_count = next(s for s in (1, 4, 8, 16, 32) if s >= split_count)
++                partial_acc, partial_m, partial_l = self._g64_ws_cache[split_count]
+                 run_e38_attention(
+                     q, positions, key_cache, value_cache, k_scale_cache, v_scale_cache,
+                     tables, valid_columns,
+@@ -819,6 +825,41 @@
+             )
+             return output
+ 
++        # E38/E39 INT8-G64 prefill route.  The stock unified_attention kernel
++        # treats this mode as per-token-head (zero queries-per-kv) and cannot
++        # express per-group G=64 scales, so prefill runs on the dedicated Triton
++        # kernel over the page-local views instead.
++        if (
++            getattr(self, "_g64_enabled", False)
++            and k_scale_cache is not None
++            and v_scale_cache is not None
++            and attn_metadata.causal
++            and self.alibi_slopes is None
++            and self.sinks is None
++            and not self.logits_soft_cap
++            and (self.sliding_window is None or self.sliding_window == (-1, -1))
++            and mm_prefix_range_tensor is None
++            and attn_metadata.rswa_prefix_lens is None
++            and output_scale is None
++        ):
++            from vllm.v1.attention.ops.int8_g64 import unified_attention_g64
++
++            unified_attention_g64(
++                q=query[:num_actual_tokens],
++                k_cache=key_cache,
++                v_cache=value_cache,
++                k_scale=k_scale_cache,
++                v_scale=v_scale_cache,
++                out=output[:num_actual_tokens],
++                cu_seqlens_q=cu_seqlens_q,
++                seqused_k=seqused_k,
++                block_table=block_table,
++                softmax_scale=self.scale,
++                max_seqlen_q=max_seqlen_q,
++                causal=attn_metadata.causal,
++            )
++            return output
++
+         unified_attention(
+             q=query[:num_actual_tokens],
+             k=key_cache,
