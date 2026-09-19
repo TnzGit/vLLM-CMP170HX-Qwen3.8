@@ -3,4 +3,11 @@
 
 heterogeneous-attn-pages-sm80.patch
 spec-decode-fp8-kv-sm80.patch
+spec-decode-fp8-lut-sm80.patch
+spec-decode-fp8-fp16-acc-page-sm80.patch
+spec-decode-fp8-q8-g6-sm80.patch
+spec-decode-fp8-page-carry-sm80.patch
+spec-decode-fp8-readonly-lut-sm80.patch
 flashinfer-sm80-fp8-spec-verify.patch
+spec-decode-segments-sm80.patch
+spec-decode-nseg35-sm80.patch

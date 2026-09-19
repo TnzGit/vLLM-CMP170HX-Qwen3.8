@@ -165,8 +165,11 @@ if [ "$SPEC" = "dflash2" ]; then
   SPEC_CFG="$SPEC_CFG}"
   # The split-KV verify attention (patches/spec-decode-attn.patch) sizes its partial
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
-  # their addresses, so they must not be grown later.
-  export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
+  # their addresses, so they must not be grown later. DFlash is parallel drafting, whose
+  # scheduler reorder threshold (and warmup) permits up to 1 + 2*k query tokens. Using
+  # only 1 + k here lets valid k>=9 warmup/query shapes fall through to FlashInfer's
+  # single-token decode wrapper.
+  export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((1 + 2 * DRAFT_TOKENS))}
   # The ADAPTIVE verify length corrupts a prefix-cache hit under KVarN. When the block
   # alternates 8<->16 step to step and the request resumed from a cache hit, turn 2 over
   # the same document tracks the source for ~38 characters and then diverges -- turn 1 is

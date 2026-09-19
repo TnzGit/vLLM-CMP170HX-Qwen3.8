@@ -1,0 +1,62 @@
+Make the split-KV segment count explicit and include the complete verifier geometry
+in the process-local workspace cache key.
+
+The production default remains 16.  CMP 170HX measurements can opt into 32 or 64
+with VLLM_SPEC_DECODE_ATTN_SEGMENTS.  The value is fixed on first use because FULL
+CUDA graphs capture the workspace addresses.
+
+--- a/v1/attention/backends/flash_attn.py
++++ b/v1/attention/backends/flash_attn.py
+@@ -1762,6 +1762,20 @@ def _spec_attn_qmax(group: int) -> int:
+     return _SPEC_ATTN_QMAX
+ 
+ 
++_SPEC_ATTN_NSEG: int | None = None
++
++
++def _spec_attn_nseg() -> int:
++    """Return the immutable split count used by verifier workspaces."""
++    global _SPEC_ATTN_NSEG
++    if _SPEC_ATTN_NSEG is None:
++        import os
++
++        value = int(os.environ.get("VLLM_SPEC_DECODE_ATTN_SEGMENTS", "16"))
++        if value not in (8, 16, 32, 64):
++            raise ValueError("VLLM_SPEC_DECODE_ATTN_SEGMENTS must be 8, 16, 32, or 64")
++        _SPEC_ATTN_NSEG = value
++    return _SPEC_ATTN_NSEG
++
++
+ def _spec_attn_run(
+     impl,
+     q,
+@@ -1782,7 +1796,18 @@ def _spec_attn_run(
+ ):
+     from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
+ 
+-    key = (impl.num_heads, impl.head_size, q.device)
++    qmax = _spec_attn_qmax(impl.num_heads // impl.num_kv_heads)
++    nseg = _spec_attn_nseg()
++    key = (
++        impl.num_heads,
++        impl.num_kv_heads,
++        impl.head_size,
++        q.device,
++        q.dtype,
++        key_cache.dtype,
++        qmax,
++        nseg,
++    )
+     att = _SPEC_ATTN.get(key)
+     if att is None:
+         from vllm.config import get_current_vllm_config
+@@ -1794,7 +1819,8 @@ def _spec_attn_run(
+         max_reqs = max(max_reqs, cu_seqlens_q.shape[0] - 1)
+         att = SpecDecodeAttention(
+             max_reqs, impl.num_heads, impl.head_size, q.device,
+-            qmax=_spec_attn_qmax(impl.num_heads // impl.num_kv_heads),
++            qmax=qmax,
++            num_segments=nseg,
+         )
+         _SPEC_ATTN[key] = att
+     att.run(
