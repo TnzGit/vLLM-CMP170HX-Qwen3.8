@@ -1,0 +1,9 @@
+greedy repeat identical: True
+  greedy len=269 head='\n\n<think>\nThe user wants a short technical note about GPU memory hierarchy and b'
+greedy seeded == greedy unseeded: True
+temp>0 produces output: True
+temp>0 seeded repeat identical: True
+  temp head='\n\n**Technical Note: GPU Memory Hierarchy and Bandwidth**\n\n**1. Overview**\nThe pe'
+temp>0 differs from greedy: True
+xid_delta=0
+SMOKE_DONE

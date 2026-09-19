@@ -1,0 +1,7 @@
+prompt_tokens alone long=9002 short=5
+prompt_tokens mixed long=9002 short=5
+long  greedy identical (alone vs mixed C2): True
+short greedy identical (alone vs mixed C2): True
+wall alone=5.5s mixed=1.5s
+xid_delta=0
+SMOKE_DONE
