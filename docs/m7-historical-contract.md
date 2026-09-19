@@ -334,3 +334,53 @@ The tree chosen for the replay is the repository itself
 (`/…/mixed-fp8-repo`, 9.0 MB, 86 `.py`/`.md` files), because `make_long_corpus.py`'s head
 was this repo's docs and its tail was vLLM source — so the repo tree is the closest
 single-tree stand-in for "docs + source", and it is reproducible and hashable.
+
+## The replay corpus, quantified (and why phase 1's filler was invalid)
+
+The reconstruction is large enough that **no repetition occurs at any test context**:
+
+| quantity | value |
+| --- | --- |
+| `build_corpus(mixed-fp8-repo)` | **1,273,128 chars** |
+| corpus tokens | **389,635** |
+| chars/token | 3.27 |
+| repetition factor @4K / 65K / 126K / 250K | 0.01x / 0.17x / 0.32x / **0.64x** |
+| `corpus_sha256` | `ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91` |
+
+At 250K the prompt consumes only 64% of one corpus pass, so `exact_prompt_ids` never has to
+repeat it. That matters because the harness *does* repeat the corpus to fill the body, and
+repetition is what inflates DFlash acceptance.
+
+**Measured n-gram recurrence**, sampled every 16 tokens:
+
+| workload | 4-gram distinct | 8-gram distinct | 16-gram distinct |
+| --- | --- | --- | --- |
+| reconstructed corpus @4K | 98.8% | 99.6% | 100.0% |
+| reconstructed corpus @65K | 90.9% | 94.3% | 96.3% |
+| reconstructed corpus @126K | 81.8% | 88.2% | 90.3% |
+| reconstructed corpus @250K | 72.4% | 85.3% | 89.5% |
+| **phase-1 repeated filler @65K** | **0.5%** | **0.5%** | **0.5%** |
+
+The phase-1 filler is one repeated sentence, so only **0.5%** of its 4-grams are distinct —
+which is precisely why it pushed acceptance toward the k=7 ceiling and made its output
+tok/s incomparable with any historical baseline. The reconstructed corpus retains 72-99%
+distinct 4-grams, so it is a legitimate speculative-performance workload.
+
+This is the quantitative form of the review's point C, and it is the reason phase 1 is
+relabelled as a capacity/correctness qualification rather than a performance result.
+
+Prompt hashes (salt `m7r1`), for reproducibility:
+
+| ctx | tokens | unique token types | `sha256(prompt_ids)` |
+| --- | --- | --- | --- |
+| 4K | 4096 | 1048 (25.6%) | `b572131da244c97f…` |
+| 65K | 65536 | 5164 (7.9%) | `1a5da2c9afe3b777…` |
+| 126K | 126000 | 6049 (4.8%) | `fcffeb4113c9e312…` |
+| 250K | 250000 | 7072 (2.8%) | `3cff5fe1c95c00f3…` |
+
+(Low *type* counts are normal for natural text and source: function words and identifiers
+recur. What matters for acceptance is *n-gram* recurrence, in the table above.)
+
+Still not reproducible: `~/bench/labd_corpus.txt`, the frozen repo-docs head that
+`make_long_corpus.py` prepended. The replay corpus is therefore a reconstruction, and is
+labelled as such everywhere.
