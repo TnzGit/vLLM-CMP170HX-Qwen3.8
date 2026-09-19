@@ -78,6 +78,26 @@ int32 block id by a byte stride that can exceed 2\*\*31 for a KV pool larger tha
 2 GiB, and Triton wraps the product negative. `v1/worker/mamba_utils.py` already
 widens the same operand for the same reason; this kernel does not.*
 
+### The most precise description of this defect
+
+The mixed-FP8 path in the same repository **already carried** this as an explicit
+correctness gate — `docs/verifier-redesign-log.md` (commit `1231ccf`) lists
+
+> int64 addressing before physical-block stride multiplication
+
+among the invariants every candidate must preserve, and the FP8 verifier's own source
+has `.to(tl.int64)` before `blk * stride_kb` (visible in
+`experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-page-carry-sm80.patch`, where
+even the pre-M7 form already widens). So this is best described as:
+
+> **the int8 speculative verifier failed to carry forward an already-established
+> large-KV address-width invariant from the mixed-FP8 path.**
+
+That framing matters for the report's value: the fix is not a new invention but the
+restoration of a contract the codebase had already learned and written down. It also
+predicts where to look for the same class of bug elsewhere — any kernel that multiplies
+a block or state id by a byte stride without widening, on a pool that can exceed 2 GiB.
+
 ---
 
 ## 1. Summary

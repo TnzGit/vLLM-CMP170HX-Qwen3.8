@@ -6157,3 +6157,51 @@ computation disagree.
 Xid 31 was 81 before the fixed-path benchmark and 81 after: **zero new illegal
 accesses across all 31 cells including 250K**. The one increment to 82 occurred during
 the deliberate pre-fix measurement, which is the fault reproducing as expected.
+
+## 60. Phase 2: M7 replay, same-checkpoint A/B, and the invariant framing
+
+Full write-up in `docs/phase2-path-ab-comparison.md`. Summary:
+
+- **Table A** (M7 reconstructed-protocol replay, 180 W no clock lock, FULL graph,
+  `SEGMENTS=35`, `Uncensored` checkpoint): 4K 22.254 vs frozen 22.315 (**−0.27%**),
+  126K 35.717 vs 35.230 (**+1.38%**), 250K 48.329 vs 46.941 (**+2.96%**); 65K 29.153 with
+  no historical value. Zero Xid delta. The residual is monotone in context and **not yet
+  explained** (corpus content vs clock variance); per the review, 1–3% is not grounds to
+  call the historical numbers wrong.
+- **Table B** (same checkpoint, same prompt token IDs, 1350 MHz/180 W, FULL graph):
+  **M7 mixed-FP8 wins at every context** — +7.9% / +58.7% / +92.9% / **+139.0%** in
+  ms/speculative-iteration at 4K/65K/126K/250K. Acceptance is matched except at 250K
+  (3.30 vs 2.60), so the deficit is **target verifier iteration cost**, scaling
+  monotonically with KV length. Zero Xid delta on all 8 cells.
+- **Table C** (paired ABBA, 4K): int64 widening costs **+0.64% (C1) / +0.27% (C2)**, below
+  the 2% gate and below the run-to-run spread. No material cost; the phase-1 ~4% was an
+  artifact of the retired subtraction method.
+
+**Production-path recommendation: M7 mixed-FP8 remains the long-context performance path.**
+The repaired int8 path is correct and competitive at short context only.
+
+### 60.1 The defect's most precise description (review item 5)
+
+The mixed-FP8 path already carried **int64 addressing before physical-block stride
+multiplication** as an explicit correctness gate (`docs/verifier-redesign-log.md` at
+`1231ccf`), and its verifier source has `.to(tl.int64)` before `blk * stride_kb` — visible
+in `spec-decode-fp8-page-carry-sm80.patch`, where even the pre-M7 form already widens. So:
+
+> **the int8 speculative verifier failed to carry forward an already-established large-KV
+> address-width invariant from the mixed-FP8 path.**
+
+Not a novel bug class — a contract the codebase had already learned and written down. That
+framing also predicts where else to look: any kernel multiplying a block/state id by a byte
+stride on a pool that can exceed 2 GiB.
+
+### 60.2 Harness lessons from this phase (all three cost real time)
+
+| defect | cost | fix |
+| --- | --- | --- |
+| `int64_paired_ab.py` called `/v1/models` without an auth header | 20 engine restarts, zero data | authenticate the lookup; pass `--model` explicitly |
+| `context_ab.py` sends no auth header, so Path B 401'd every request | one full B2 attempt, zero data | start Path B with an empty key to **match** Path A's server contract, keeping the historical harness byte-identical |
+| B1 watched a log file the M7 unit does not write (it logs to the journal) | would have measured against a cold engine | probe `/health` over HTTP |
+
+Each was found by adding **fail-fast**: a cell that produces no measurement now aborts the
+run instead of silently continuing. Two of the three were only caught because the previous
+failure had already taught me to check for empty output.
