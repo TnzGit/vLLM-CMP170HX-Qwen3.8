@@ -293,3 +293,44 @@ candidate?") requires **B**. Question 3 ("how much faster/slower is repaired int
    `tokens_per_step`, TTFT, decode tok/s and Xid delta;
 4. run the repaired int8 path on the same corpus and checkpoint for the A/B;
 5. only then answer the phase-2 questions and pick the next optimisation target.
+
+## Corpus: exactly what is and is not reproducible
+
+There are **two** corpus builders in the M7 era, and they are not the same rule:
+
+**(a) `bench/make_long_corpus.py`** — used to build the long document that the LABD runs
+consumed. It is a *concatenation*, not a tree walk:
+
+```
+head  = ~/bench/labd_corpus.txt          (frozen: this repo's own docs, ~84k tokens)
+tail  = <venv>/vllm/v1/**/*.py sorted by glob, skipping files < 2000 chars,
+        each prefixed "\n\n### {basename}\n\n", accumulated until 900,000 chars
+assert long[:len(base)] == base          # the head must stay byte-identical
+```
+
+**(b) `bench/context_ab.py::build_corpus`** — the harness that produced `ms/step`. It takes
+`--corpus-root <tree>` and walks it:
+`sorted(root.rglob("*"))`, keeping `.py/.md/.txt/.cu/.cuh/.h`, each prefixed
+`\n\nFILE {name}\n`, concatenated until **8,000,000** chars.
+
+**What is reproducible:** the vLLM-source tail of (a) is on the host, so that half can be
+rebuilt byte-identically given the same venv and the same 900,000-char cap. Tree (b) is
+fully deterministic given a named tree.
+
+**What is not:** `~/bench/labd_corpus.txt` (the frozen repo-docs head) **is gone** —
+`~/bench/` is empty on the host. So the exact byte sequence that produced
+22.315 / 35.230 / 46.941 cannot be regenerated, and the 8,000,000-char cap in (b) makes
+the result sensitive to which files sort first.
+
+**Therefore the replay's corpus is a reconstruction, and every number from it must carry:**
+
+- the corpus tree used, named explicitly;
+- `sha256(corpus)` and `sha256(prompt_token_ids)`;
+- the statement that it is **not** token-identical to the historical corpus;
+- the consequence: the replay is **strong evidence about kernel/iteration timing** and
+  **weak evidence about historical output tok/s**, because acceptance depends on the text.
+
+The tree chosen for the replay is the repository itself
+(`/…/mixed-fp8-repo`, 9.0 MB, 86 `.py`/`.md` files), because `make_long_corpus.py`'s head
+was this repo's docs and its tail was vLLM source — so the repo tree is the closest
+single-tree stand-in for "docs + source", and it is reproducible and hashable.
