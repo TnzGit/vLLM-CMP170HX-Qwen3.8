@@ -1,0 +1,31 @@
+trace: rank0.1789834944802888746.pt.trace.json.gz (68.0 MB)
+annotations: 100 generation passes, 124 prefill chunks
+decode window: 4821.2 ms  (100 passes -> 48.21 ms/pass)
+kernel events in window: 135467 of 412746 total
+kernel time in window: 4766.4 ms total = 47.664 ms/pass
+
+bucket                   total_ms    ms/pass    share  kernels
+verifier_partial           2488.8     24.888   52.22%     1600
+marlin_gemm                1733.0     17.330   36.36%    50162
+gdn                         223.8      2.238    4.69%     9600
+unclassified                137.9      1.379    2.89%    35445
+elementwise                  94.5      0.945    1.98%    30378
+rmsnorm_silu                 37.8      0.378    0.79%     6187
+attention_flash              36.7      0.367    0.77%      495
+verifier_combine             13.9      0.139    0.29%     1600
+
+top kernels in the decode window:
+  _spec_attn_partial                                          24.89 ms/pass  (16 calls/pass)
+  void marlin::Marlin<1125899906909960l, 1125899907892224l    16.51 ms/pass  (279 calls/pass)
+  fused_sigmoid_gating_delta_rule_update_kernel                1.93 ms/pass  (48 calls/pass)
+  void at::native::elementwise_kernel<128, 4, at::native::     0.53 ms/pass  (145 calls/pass)
+  void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_tr     0.37 ms/pass  (5 calls/pass)
+  _causal_conv1d_update_kernel                                 0.30 ms/pass  (48 calls/pass)
+  void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf1     0.28 ms/pass  (48 calls/pass)
+  void cublasLt::splitKreduce_kernel<32, 16, int, float, _     0.21 ms/pass  (59 calls/pass)
+  triton_red_fused__to_copy_add_fused_add_rms_norm_4           0.18 ms/pass  (32 calls/pass)
+  triton_red_fused__to_copy_add_fused_add_rms_norm_marlin_     0.15 ms/pass  (32 calls/pass)
+  ampere_s16816gemm_bf16_64x64_sliced1x2_ldg8_stages_64x6_     0.14 ms/pass  (10 calls/pass)
+  _spec_attn_combine                                           0.14 ms/pass  (16 calls/pass)
+  memcpy32_post                                                0.13 ms/pass  (55 calls/pass)
+  void at::native::(anonymous namespace)::CatArrayBatchedC     0.11 ms/pass  (48 calls/pass)
