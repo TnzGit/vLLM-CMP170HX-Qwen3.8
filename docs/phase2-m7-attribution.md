@@ -94,10 +94,9 @@ The ordering is unchanged — **verifier and Marlin remain the two dominant bloc
 the balance has shifted toward Marlin by roughly 5–6 points. The historical figure was
 taken on a different corpus and a different head, so this is a re-measurement rather than a
 regression: the split is now established for the current head, which is what Phase 4 needs.
-The verifier's share also *falls* with context at 250K relative to 126K? No — it rises
-(35.9% → 52.2%), and Marlin's falls (48.8% → 36.4%), because the verifier scans KV and so
-grows with context while the GEMMs do not. That is the single most important structural
-fact for Phase 4.
+The verifier's share **rises** with context (35.9% → 52.2%) while Marlin's **falls**
+(48.8% → 36.4%), because the verifier scans KV and therefore grows with context, whereas
+the GEMMs do not. That is the single most important structural fact for Phase 4.
 
 ## What could NOT be separated, stated rather than guessed
 
