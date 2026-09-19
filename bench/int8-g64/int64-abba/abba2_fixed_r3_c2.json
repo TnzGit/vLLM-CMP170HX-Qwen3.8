@@ -1,0 +1,20 @@
+[
+  {
+    "arm": "fixed",
+    "round": 0,
+    "context": 4096,
+    "concurrency": 2,
+    "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91",
+    "prompt_sha256": "d494c37b044482c869f67b25843fe7e8ef7eb2cd9afff487fa17186d6dedf8f5",
+    "prompt_tokens": 4096,
+    "output_tokens": 512,
+    "ttft_s": 4.923173984999721,
+    "decode_s": 3.725467043000208,
+    "spec_iterations": 349.0,
+    "ms_per_spec_iteration": 10.674690667622372,
+    "accepted_tokens_per_pass": 2.9398280802292263,
+    "accepted_tokens": 677.0,
+    "output_tok_s": 137.43243305882908,
+    "preemptions": 0.0
+  }
+]
