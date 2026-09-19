@@ -34,9 +34,14 @@ import json
 import os
 import re
 import statistics
+import sys
 import time
 import urllib.request
 from collections import defaultdict
+
+# A cell whose per-round ms/output-token varies by more than this factor is rejected:
+# that is a broken engine or a contended GPU, not a measurement.
+MAX_ROUND_SPREAD = 3.0
 
 METRICS = (
     "vllm:spec_decode_num_drafts_total",
@@ -331,6 +336,19 @@ def main() -> None:
         "preemptions_total": sum(r["preemptions"] for r in rows),
         "corpus_sha256": corpus_sha,
     }
+    # SANITY GATE. The Phase-3 k=3 run recorded 2-6 tok/s at 4K -- a 20x anomaly -- because
+    # the engine was dying mid-sweep and the harness dutifully wrote the crash-adjacent
+    # timings as data. A cell whose rounds disagree by more than this factor is not a
+    # measurement, so it is refused rather than reported.
+    mpt = [r["ms_per_output_token"] for r in clean if r["ms_per_output_token"] > 0]
+    summary["round_spread"] = round(max(mpt) / min(mpt), 3) if len(mpt) > 1 and min(mpt) > 0 else None
+    summary["stable"] = (summary["round_spread"] is None
+                         or summary["round_spread"] <= MAX_ROUND_SPREAD)
+    if not summary["stable"]:
+        print(f"UNSTABLE CELL: round spread {summary['round_spread']}x exceeds "
+              f"{MAX_ROUND_SPREAD}x -- refusing to report this as a measurement",
+              flush=True)
+
     out = {"summary": summary, "rows": rows}
     if args.trace_dir:
         out["attribution"] = parse_trace(args.trace_dir,
@@ -342,6 +360,8 @@ def main() -> None:
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
         print(f"wrote {args.out}", flush=True)
+    if not summary["stable"]:
+        sys.exit(4)
 
 
 if __name__ == "__main__":
