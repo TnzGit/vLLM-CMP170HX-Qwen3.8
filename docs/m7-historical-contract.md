@@ -178,26 +178,50 @@ Two things follow:
    resident CTAs", and `2e03605` ("docs: correct CMP170HX resident CTA geometry") is the
    correction. The replay must use **NSEG=35**, not the deployed service's 32.
 
-## Replay feasibility blocker, found before spending GPU time
+## Replay feasibility: my first conclusion was WRONG, corrected here
 
-**The deployed baseline service is not M7.** Checks on the lab host:
+I first concluded "the deployed baseline service is not M7" and was about to write that
+up as a blocker. That conclusion was wrong, and the checks that refute it are recorded
+here so the mistake is not repeated.
 
-| check | result |
-| --- | --- |
-| `cmp170hx-mixed-fp8-full-256k-8002.service` | `inactive`, `disabled` |
-| its launcher: `/…/mixed-fp8-repo/single-user/start_qwen.sh` | present |
-| that tree's `handover.md` header | **"Last updated: 2026-09-15"** |
-| does it contain the freeze table (`22.315`)? | **no** — no `verifier-redesign-log.md` at all |
-| does it carry `spec-decode-nseg35-sm80.patch`? | **no** — only `spec-decode-segments-sm80.patch` |
-| the deployed service's `VLLM_SPEC_DECODE_ATTN_SEGMENTS` | **32**, not 35 |
+**What I checked and what it actually means:**
 
-M7 (`7f15950`) and the freeze doc (`1231ccf`) are both dated **2026-09-16**, i.e. after the
-deployed tree. So replaying M7 requires installing the M7-era code (at minimum:
-`spec-decode-segments-sm80.patch` then `spec-decode-nseg35-sm80.patch`, and
-`VLLM_SPEC_DECODE_ATTN_SEGMENTS=35`), not merely starting the existing service.
+| check | value | what it does *not* prove |
+| --- | --- | --- |
+| `mixed-fp8-repo/handover.md` header | "Last updated: 2026-09-15" | the *launcher* tree's date; the vLLM code lives elsewhere |
+| `mixed-fp8-repo/deploy/cmp170hx-mixed-fp8.env.example` | `VLLM_SPEC_DECODE_ATTN_SEGMENTS=32` | an **example file**, overridden by the unit |
+| `mixed-fp8-repo` patches dir | no `spec-decode-nseg35-sm80.patch` | the patch is applied to the **test-site**, not kept in that tree |
 
-This is worth stating plainly because "start the baseline service and re-measure" would
-have produced numbers labelled M7 that were actually a pre-M7 build with NSEG 32.
+**What is actually true**, from the service unit and the test-site:
+
+```
+cmp170hx-mixed-fp8-full-256k-8002.service
+  CTX=cmp-mixed-fp8  MAX_LEN=262144  MAX_SEQS=4  SPEC_ATTN=1
+  VLLM_FP8_SPEC_VERIFY=1
+  VLLM_FP8_SPEC_FULL_CG=1                 <- FULL CUDA Graph, as M7 requires
+  VLLM_SPEC_DECODE_ATTN_SEGMENTS=35       <- M7's NSEG, set by the UNIT
+  PYTHONPATH=/…/mixed-fp8-test-site       <- the M7 code lives here, shadowing the runtime
+```
+
+and the test-site itself is M7:
+
+- `test-site/vllm/v1/attention/backends/flash_attn.py:1776` —
+  `if value not in (8, 16, 32, 35, 64)` — **35 is allowed**, i.e. the nseg35 patch is applied;
+- `test-site/vllm/v1/attention/ops/spec_decode_attn.py` contains `SEG_TILE` (3 occurrences)
+  — the nseg35 combine padding is applied;
+- dated 2026-09-16, matching M7.
+
+**So M7 is installed and the replay can proceed by starting that service.** The runtime
+this project has been using for the int8 work (`runtime-v0271`) contains **no** FP8
+verifier stack at all — no `VLLM_FP8_SPEC_VERIFY`, no `_SPEC_ATTN_NSEG` — which is why the
+patches did not apply to it: they belong to the test-site, not to that runtime. The two
+paths are separate installs, which is the correct arrangement and also explains why the
+int8 fix and the FP8 baseline never interfered.
+
+The lesson, and it is the same one this project keeps relearning: **I read a configuration
+artifact (an `.env.example`) and a directory date as evidence about the running system.**
+The authoritative source is the unit's effective environment and the code actually on
+`PYTHONPATH`.
 
 ## Checkpoint mismatch to carry into any Path A / Path B A/B
 
