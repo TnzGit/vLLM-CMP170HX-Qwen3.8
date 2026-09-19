@@ -17,7 +17,7 @@ technique **and** the technique addresses a measured bottleneck.
 | query heads / KV heads | Hq = 24, Hkv = 4, **GQA = 6** |
 | query tokens | **q ≤ 8** (qmax = 10 derived; kernel splits rows 32 + 16) |
 | KV | **paged, static FP8 (E4M3FN)**, decoded through an exact BF16 LUT |
-| page geometry | **BLOCK_SIZE = 896** |
+| page geometry | **derived, not fixed** — the kernel comment says 896, but the effective block size observed on these runs is **832 (k=7), 816 (k=3), 800 (probe)**; it comes from page-size arithmetic in `vllm/platforms/interface.py` and varies with k and the mamba page |
 | split-KV | **NSEG = 35** (140 CTAs on 140 SMs) |
 | tile | `TILE = 32`, `num_warps = 4`, `num_stages = 1` |
 | graph | FULL CUDA graph, so all workspace addresses are fixed |
@@ -25,6 +25,15 @@ technique **and** the technique addresses a measured bottleneck.
 Grid: `(num_reqs, Hkv, NSEG)`. Each CTA owns one `(request, kv_head, segment)` and computes
 all 48 useful query rows as **32 + 16**, loading each 32-token K/V tile once and reusing it
 for both row groups.
+
+**Correction, and it matters for the audit.** The kernel's comment claims `TILE divides the
+896-token production page` (896/32 = 28 exactly). The effective block size is **not 896** on
+these runs — it is 832 at k=7, 816 at k=3, 800 in the probes — because it is *derived* from
+page-size arithmetic that depends on k and the mamba page size. With `TILE = 32`, a block of
+816 or 832 does **not** divide evenly (816/32 = 25.5, 832/32 = 26), so the page-boundary
+carry the kernel relies on is operating in a geometry its own comment does not describe.
+That is a real observation from Phase 3, not a Sage-derived idea, and it is recorded here
+because it may matter more than anything Sage suggests.
 
 Measured bottleneck (Phase 2): **verifier partial = 12.653 ms/pass at 126K (35.9%) and
 24.888 ms/pass at 250K (52.2%)**, growing with context. So the thing to attack is KV-scan
