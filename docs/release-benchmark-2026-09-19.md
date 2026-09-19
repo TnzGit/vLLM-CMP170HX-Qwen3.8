@@ -12,6 +12,12 @@ Decode is separated from prefill by bracketing each batch with a
 prefill-only run of the same shape; a raw wall-clock figure would be
 prefill-dominated at long context.
 
+> **This document is a capacity / concurrency / correctness qualification, not a
+> performance comparison.** See the note at the end for why: the workload is exact-token
+> but built from heavily repeated filler, which drives DFlash acceptance to 7.5-8.0
+> against a k=7 ceiling, whereas the historical baselines run at ~3.3-3.6 accepted
+> tokens per step. Output tok/s from the two workloads are not comparable.
+
 ---
 
 ## The table
@@ -43,8 +49,8 @@ prefill-dominated at long context.
 |---|---|---|---|
 | old-same-path | this repo, pre-fix build (measured for this table) | 4K C1/C2 only | it faults at **4K C4** as well as at every >=16K cell -- 16 requests of 4K (65K cumulative tokens) was enough. So the pre-fix build could not serve even short-context concurrency, and the missing cells are missing **by construction**. That absence is the finding |
 | **fixed** | `bench/int8-g64/release_bench.py` | all listed cells | -- |
-| historical mixed-FP8 | `docs/cmp170hx-mixed-fp8-engineering.md` | 4K, 126K, 250K | different route (FP8 target KV, BF16 draft KV, FULL graph) and the two values are NSEG 16/32, **not** concurrency. No record exists at 16K/32K/65K |
-| modeled ceiling | `single-user/README.md` | <=64K | measured on `CTX=fast` (bf16 KV, 64k). Different KV format, so it is a ceiling for a *different* configuration, not for this one |
+| historical mixed-FP8 | `docs/cmp170hx-mixed-fp8-engineering.md` | 4K, 126K, 250K | **NOT the M7 baseline.** The two values are NSEG 16/32 of the *same* FP8 route, `not` concurrency, and they are not best-known. The genuine historical M7 (NSEG 35) is `22.315 / 35.230 / 46.941 ms/step` at 4K/126K/250K -- see `docs/m7-historical-contract.md`. No record exists at 16K/32K/65K |
+| modeled ceiling | -- | -- | **conceptually wrong as populated.** This column holds *measured* `CTX=fast` (bf16 KV, 64k) throughput from `single-user/README.md`, which is a different configuration, not a modelled engineering-effective ceiling. The engineering reference figures are 4K 170-200 tok/s, 126K ~131.2 tok/s, 250K ~100 tok/s, and they are modelling references, not specifications. The column is renamed `CTX=fast measured` below and must not be read as a ceiling for this path. |
 
 ## Gaps, stated rather than hidden
 
@@ -54,5 +60,51 @@ prefill-dominated at long context.
 
 ## Correctness during the run
 
-Xid 31 count was 81 before the benchmark and 81 after: **zero new illegal accesses across all 31 measured cells**, including the 250K cell. The fix holds under benchmark load, not only under the dedicated requalification (handover 57-58).
+Xid 31 count was 81 before the benchmark and 81 after: **zero new illegal accesses across all 16 measured fixed-path cells** (6 contexts x 3 concurrency levels = 18 possible, minus the 2 skipped 250K concurrency cells), covering 31 round-records, including the 250K cell. The fix holds under benchmark load, not only under the dedicated requalification (handover 57-58).
 
+
+---
+
+## Status of this document (corrected)
+
+Per review, this benchmark is **a capacity / concurrency / correctness qualification**, and
+its throughput numbers must not be used to declare a production performance winner.
+
+What it validly establishes:
+
+- the repaired path serves **250K at C1**, and every measured context/concurrency cell
+  runs clean;
+- **zero Xid 31 delta** across the whole run (81 before, 81 after);
+- 16 fixed-path cells measured (18 possible, 250K C2/C4 deliberately skipped).
+
+What it does **not** establish, and must not be quoted as:
+
+1. **It is not comparable with the historical M7 baseline.** The `historical mixed-FP8`
+   column holds NSEG 16/32 values of the FP8 route, not M7. M7 is NSEG 35 with
+   `22.315 / 35.230 / 46.941 ms/step` -- see `docs/m7-historical-contract.md`.
+2. **The graph contract differs.** These cells ran **eager** (`cudagraph_mode=NONE`),
+   whereas M7 is **FULL** CUDA Graph. A graph-contract-matched comparison is required
+   before any A/B.
+3. **The workload is not a speculative-performance workload.** Prompts are built by
+   repeating one filler sentence, which lifts DFlash acceptance to ~7.5-8.0 against a
+   k=7 ceiling; the historical baselines run at ~3.3-3.6 accepted tokens/step. Comparing
+   output tok/s across those two workloads is meaningless.
+4. **250K decode is not a stable number.** Its decode interval is obtained by
+   subtracting two ~1424 s walls, leaving ~1-2 s of signal; the two rounds gave 119.4 and
+   70.0 tok/s. Retired: see below.
+
+### Retired measurement method
+
+`full_request_wall - independent_prefill_wall` is **abandoned for 126K and 250K**. Two
+~1400 s measurements cannot be differenced to estimate a ~1 s decode interval. The
+historical protocol already had the right method and this benchmark should have used it:
+`bench/context_ab.py` streams the response, takes TTFT from the first content chunk, and
+measures decode as `end - first` with `ms/step = decode_s * 1000 /
+vllm:spec_decode_num_drafts_total`. That is a direct decode interval and a true
+per-speculative-step metric. All A/B work from here uses it.
+
+### Still to be done (phase 2)
+
+`docs/m7-historical-contract.md` records the recovered contract. A replay must name and
+hash its corpus (the frozen corpus is **gone** from the host), record acceptance, and
+state whether it used 1350 MHz or the historical 180 W operating point.
