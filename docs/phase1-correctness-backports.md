@@ -8,7 +8,7 @@ Both are minimal, independently revertible, and touch disjoint files.
 | commit | `2edd7e3` | `9d6acf0` |
 | file | `model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py` | `v1/spec_decode/llm_base_proposer.py` |
 | patch | `patches/gdn-51812-gate-index-select.patch` | `patches/draft-noise-independence-54282.patch` |
-| kind | P0 correctness (silently wrong state) | probabilistic correctness + reproducibility |
+| kind | **P0 correctness** — silently updates the wrong GDN recurrent state | **robustness / reproducibility** — NOT distribution-correctness (see §1B semantics) |
 | perf intent | none | none |
 
 ## 1A — GDN gate gather (#51812)
@@ -102,6 +102,38 @@ The test also had a **false positive** of its own: it printed a success message 
 `0.00 > 0.00` comparison. That logic was replaced with a guard that reports
 "NO BIAS DETECTED" and explains why the test cannot demonstrate a distributional bias at
 all. Both the code comment and the test now state what was actually measured.
+
+### Semantics, formally corrected (review item 6)
+
+An earlier framing — inherited from how upstream #54282 is described — was that the v0.27.1
+speculative path suffered a **rejection-distribution bias** because draft and target shared a
+Gumbel stream. **That does not apply to this code path, and the claim is withdrawn.**
+
+What the source actually shows, and what the 200k-trial test confirmed:
+
+| party | randomness source in v0.27.1 | consequence |
+| --- | --- | --- |
+| draft proposal | process-global **unseeded** generator (`q.exponential_()`) | shares one stream process-wide |
+| target rejection + residual resampling | **per-request seeded** generators (`generate_uniform_probs`, `sample_recovered_tokens`) | already independent of the draft |
+
+So the two sides were never drawing from the same stream for the same request, and the
+chi-square test found **no bias before or after** the change. The backport therefore must
+**not** be described as fixing a distributional-correctness P0.
+
+Its actual value, which is real but narrower:
+
+- draft noise comes from a **dedicated stream** rather than a process-global one;
+- **seeded reproducibility** of drafts for an unseeded request;
+- **isolation between concurrent requests** — one request's draw count can no longer perturb
+  another's draft tokens;
+- unrelated global RNG traffic cannot change the proposal.
+
+**This patch is complete and will not be extended.** The Phase 1B performance check already
+showed −0.58% at M7 126K C1 (inside noise), so there is nothing further to tune.
+
+By contrast **#51812 remains a clear P0 correctness fix**, because it feeds the `a`/`b` gate
+of the **wrong token** into the GDN recurrent update — a silent state corruption rather than
+a stream-hygiene issue.
 
 ### Verification
 
