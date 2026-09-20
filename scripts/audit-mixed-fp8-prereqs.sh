@@ -35,6 +35,7 @@ need_file experimental/cmp170hx-mixed-fp8/install.sh
 need_file experimental/cmp170hx-mixed-fp8/patches/heterogeneous-attn-pages-sm80.patch
 need_file experimental/cmp170hx-mixed-fp8/patches/spec-decode-fp8-kv-sm80.patch
 need_file experimental/cmp170hx-mixed-fp8/patches/flashinfer-sm80-fp8-spec-verify.patch
+need_file experimental/cmp170hx-mixed-fp8/patches/spec-decode-segments-sm80.patch
 need_grep 'to\(tl\.int64\)' patches/spec-decode-attn.patch 'split-KV block ids use int64'
 need_grep 'k_scale_cache' patches/spec-decode-int8-kv.patch 'quantized verifier passes scale metadata'
 need_grep 'SPEC_CFG=' single-user/start_qwen.sh 'DFlash speculative config is launcher-owned'

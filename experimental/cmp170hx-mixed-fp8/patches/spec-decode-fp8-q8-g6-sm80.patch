@@ -1,0 +1,188 @@
+Specialize the production q<=8, GQA-group-6 static-FP8 verifier geometry.
+
+The generic BLOCK_M=64 kernel allocates and updates 64 accumulator rows although
+the production DFlash2 verify window uses at most 8 queries x 6 GQA heads = 48
+valid rows.  Split those rows into 32+16 inside one CTA.  K/V are still loaded once
+per tile and shared by all six query heads; cache layout, block table, workspace and
+combine semantics do not change.  All other shapes retain the generic kernel.
+
+Apply after spec-decode-fp8-fp16-acc-page-sm80.patch.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -187,6 +187,107 @@
+ 
+ 
+ @triton.jit
++def _spec_attn_partial_q8_g6_fp8(
++    q_ptr, k_ptr, v_ptr, bt_ptr, seqused_ptr, cu_q_ptr,
++    part_o_ptr, part_m_ptr, part_l_ptr,
++    static_k_scale, static_v_scale, fp8_lut_ptr,
++    scale,
++    stride_qt, stride_qh,
++    stride_kb, stride_ks, stride_kh,
++    stride_vb, stride_vs, stride_vh,
++    stride_bt,
++    Hq: tl.constexpr, QMAX: tl.constexpr, D: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr, TILE: tl.constexpr, NSEG: tl.constexpr,
++):
++    """Production q<=8/G=6 path without the 16 padded BLOCK_M=64 rows."""
++    req = tl.program_id(0)
++    kvh = tl.program_id(1)
++    seg = tl.program_id(2)
++
++    q_start = tl.load(cu_q_ptr + req)
++    q_len = tl.load(cu_q_ptr + req + 1) - q_start
++    kv_len = tl.load(seqused_ptr + req)
++    d = tl.arange(0, D)
++
++    r0 = tl.arange(0, 32)
++    ri0 = r0 // 6
++    rg0 = r0 % 6
++    ok0 = ri0 < q_len
++    qp0 = kv_len - q_len + ri0
++    qptr0 = q_ptr + (q_start + ri0)[:, None] * stride_qt + (kvh * 6 + rg0)[:, None] * stride_qh + d[None, :]
++    qs0 = (tl.load(qptr0, mask=ok0[:, None], other=0.0) * scale).to(tl.bfloat16)
++
++    r1 = tl.arange(0, 16) + 32
++    ri1 = r1 // 6
++    rg1 = r1 % 6
++    ok1 = ri1 < q_len
++    qp1 = kv_len - q_len + ri1
++    qptr1 = q_ptr + (q_start + ri1)[:, None] * stride_qt + (kvh * 6 + rg1)[:, None] * stride_qh + d[None, :]
++    qs1 = (tl.load(qptr1, mask=ok1[:, None], other=0.0) * scale).to(tl.bfloat16)
++
++    tiles_total = (kv_len + TILE - 1) // TILE
++    tiles_per_seg = (tiles_total + NSEG - 1) // NSEG
++    t0 = seg * tiles_per_seg
++    t1 = tl.minimum(t0 + tiles_per_seg, tiles_total)
++
++    m0 = tl.full([32], float("-inf"), tl.float32)
++    l0 = tl.zeros([32], tl.float32)
++    acc0 = tl.zeros([32, D], tl.float16)
++    m1 = tl.full([16], float("-inf"), tl.float32)
++    l1 = tl.zeros([16], tl.float32)
++    acc1 = tl.zeros([16, D], tl.float16)
++
++    for t in range(t0, t1):
++        tok0 = t * TILE
++        pos = tok0 + tl.arange(0, TILE)
++        k_ok = pos < kv_len
++        blk = tl.load(bt_ptr + req * stride_bt + tok0 // BLOCK_SIZE).to(tl.int64)
++        slot = (tok0 % BLOCK_SIZE) + tl.arange(0, TILE)
++        kptr = k_ptr + blk * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
++        vptr = v_ptr + blk * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
++        k = _e4m3fn_to_bf16(tl.load(kptr, mask=k_ok[:, None], other=0), fp8_lut_ptr)
++        v = _e4m3fn_to_bf16(tl.load(vptr, mask=k_ok[:, None], other=0), fp8_lut_ptr)
++
++        s0 = tl.dot(qs0, tl.trans(k)).to(tl.float32) * static_k_scale
++        s0 = tl.where(k_ok[None, :] & (pos[None, :] <= qp0[:, None]) & ok0[:, None], s0, float("-inf"))
++        mn0 = tl.maximum(m0, tl.max(s0, 1))
++        ms0 = tl.where(mn0 == float("-inf"), 0.0, mn0)
++        p0 = tl.exp(s0 - ms0[:, None])
++        a0 = tl.exp(tl.where(m0 == float("-inf"), float("-inf"), m0 - ms0))
++        l0 = l0 * a0 + tl.sum(p0, 1)
++        acc0 = (
++            acc0.to(tl.float32) * a0[:, None]
++            + tl.dot((p0 * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++        ).to(tl.float16)
++        m0 = mn0
++
++        s1 = tl.dot(qs1, tl.trans(k)).to(tl.float32) * static_k_scale
++        s1 = tl.where(k_ok[None, :] & (pos[None, :] <= qp1[:, None]) & ok1[:, None], s1, float("-inf"))
++        mn1 = tl.maximum(m1, tl.max(s1, 1))
++        ms1 = tl.where(mn1 == float("-inf"), 0.0, mn1)
++        p1 = tl.exp(s1 - ms1[:, None])
++        a1 = tl.exp(tl.where(m1 == float("-inf"), float("-inf"), m1 - ms1))
++        l1 = l1 * a1 + tl.sum(p1, 1)
++        acc1 = (
++            acc1.to(tl.float32) * a1[:, None]
++            + tl.dot((p1 * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++        ).to(tl.float16)
++        m1 = mn1
++
++    h0 = kvh * 6 + rg0
++    pi0 = ((req * Hq + h0) * QMAX + ri0) * NSEG + seg
++    tl.store(part_o_ptr + pi0[:, None] * D + d[None, :], acc0, mask=ok0[:, None])
++    tl.store(part_m_ptr + pi0, m0, mask=ok0)
++    tl.store(part_l_ptr + pi0, l0, mask=ok0)
++
++    h1 = kvh * 6 + rg1
++    pi1 = ((req * Hq + h1) * QMAX + ri1) * NSEG + seg
++    tl.store(part_o_ptr + pi1[:, None] * D + d[None, :], acc1, mask=ok1[:, None])
++    tl.store(part_m_ptr + pi1, m1, mask=ok1)
++    tl.store(part_l_ptr + pi1, l1, mask=ok1)
++
++
++@triton.jit
+ def _spec_attn_combine(
+     part_o_ptr, part_m_ptr, part_l_ptr, out_ptr, cu_q_ptr,
+     stride_ot, stride_oh,
+@@ -281,26 +382,48 @@
+         # shared memory on sm86 is 99 KB: q tile + one K and one V tile + scores must fit
+         block_m, qt, ntile, warps = self._plan(max_query_len, G, D)
+         tile = 64 if (block_m <= 32 or D <= 128) else 32
+-        grid = (num_reqs * ntile, Hkv, self.nseg)
+-        _spec_attn_partial[grid](
+-            q, kernel_key_cache, kernel_value_cache, block_table, seqused_k, cu_seqlens_q,
+-            self.part_o, self.part_m, self.part_l,
+-            k_scale_cache, v_scale_cache,
+-            static_k_scale if static_quant else 1.0,
+-            static_v_scale if static_quant else 1.0,
+-            self.fp8_lut,
+-            scale,
+-            q.stride(0), q.stride(1),
+-            kernel_key_cache.stride(0), kernel_key_cache.stride(1), kernel_key_cache.stride(2),
+-            kernel_value_cache.stride(0), kernel_value_cache.stride(1), kernel_value_cache.stride(2),
+-            block_table.stride(0),
+-            *(k_scale_cache.stride() if quant else (0, 0, 0)),
+-            *(v_scale_cache.stride() if quant else (0, 0, 0)),
+-            G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
+-            TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
+-            STATIC_QUANT=static_quant,
+-            num_warps=warps, num_stages=1,
++        use_q8_special = (
++            static_quant and G == 6 and D == 256 and max_query_len <= 8
++            and key_cache.shape[1] % 32 == 0
+         )
++        if use_q8_special:
++            grid = (num_reqs, Hkv, self.nseg)
++            _spec_attn_partial_q8_g6_fp8[grid](
++                q, kernel_key_cache, kernel_value_cache, block_table,
++                seqused_k, cu_seqlens_q,
++                self.part_o, self.part_m, self.part_l,
++                static_k_scale, static_v_scale, self.fp8_lut, scale,
++                q.stride(0), q.stride(1),
++                kernel_key_cache.stride(0), kernel_key_cache.stride(1),
++                kernel_key_cache.stride(2),
++                kernel_value_cache.stride(0), kernel_value_cache.stride(1),
++                kernel_value_cache.stride(2),
++                block_table.stride(0),
++                Hq=Hq, QMAX=self.qmax, D=D,
++                BLOCK_SIZE=key_cache.shape[1], TILE=32, NSEG=self.nseg,
++                num_warps=4, num_stages=1,
++            )
++        else:
++            grid = (num_reqs * ntile, Hkv, self.nseg)
++            _spec_attn_partial[grid](
++                q, kernel_key_cache, kernel_value_cache, block_table, seqused_k, cu_seqlens_q,
++                self.part_o, self.part_m, self.part_l,
++                k_scale_cache, v_scale_cache,
++                static_k_scale if static_quant else 1.0,
++                static_v_scale if static_quant else 1.0,
++                self.fp8_lut,
++                scale,
++                q.stride(0), q.stride(1),
++                kernel_key_cache.stride(0), kernel_key_cache.stride(1), kernel_key_cache.stride(2),
++                kernel_value_cache.stride(0), kernel_value_cache.stride(1), kernel_value_cache.stride(2),
++                block_table.stride(0),
++                *(k_scale_cache.stride() if quant else (0, 0, 0)),
++                *(v_scale_cache.stride() if quant else (0, 0, 0)),
++                G=G, Hq=Hq, QMAX=self.qmax, D=D, BLOCK_SIZE=key_cache.shape[1], BLOCK_M=block_m,
++                TILE=tile, NSEG=self.nseg, QT=qt, NTILE=ntile, QUANT=quant,
++                STATIC_QUANT=static_quant,
++                num_warps=warps, num_stages=1,
++            )
+         _spec_attn_combine[(num_reqs, Hq, max_query_len)](
+             self.part_o, self.part_m, self.part_l, out, cu_seqlens_q,
+             out.stride(0), out.stride(1),

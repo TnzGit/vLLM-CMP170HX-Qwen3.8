@@ -129,6 +129,194 @@ Performance work starts only after correctness gates pass. Record at least:
 
 The current 180 W BF16 baseline in this repository is the first negative-control target: ~133.8 tok/s decode256, ~126.8 tok/s decode900 and ~1,869 tok/s prefill on the recorded host.
 
+### Qualified split-KV tuning (CMP 170HX, 180 W)
+
+The static-FP8 verifier was measured with the production geometry (24 query heads,
+4 KV heads, head size 256 and 896-token target pages).  Increasing the split count
+from 16 to 32 is the best balanced setting.  The 64-split kernel saved less than 2%
+at 126K/250K in the isolated kernel scan and regressed short-context latency, so the
+FULL mixed-FP8 service profiles explicitly select 32 while the generic code default
+remains 16.
+
+The whole-model A/B used the same fixed prompts, DFlash2 `k=7`, 512 generated tokens,
+FULL CUDA Graph, FP8 target KV, BF16 draft KV and no preemptions:
+
+| input | segments | decode tok/s | accepted tok/step | verifier ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 16 | 144.8 | 3.37 | 23.1 |
+| 4K | 32 | 158-161 | 3.66-3.70 | 23.0 |
+| 126K | 16 | 54.2 | 3.42 | 62.8 |
+| 126K | 32 | 68.2 | 3.41 | 50.0 |
+| 250K | 16 | 32.5 | 3.38 | 103.3 |
+| 250K | 32 | 42.2 | 3.28 | 77.5 |
+
+The long-context gain is not an acceptance artifact: acceptance stayed effectively
+flat while verifier latency fell 20-25%.  TTFT was unchanged within noise because
+ordinary target prefill does not use this verifier kernel.  Prefix-cache reuse and
+FULL-graph concurrency were also checked at C1/C2/C4; a 70K C2 run reached 112.6
+aggregate decode tok/s with zero preemptions.
+
+`VLLM_SPEC_DECODE_ATTN_SEGMENTS` is immutable after the first verifier workspace is
+created.  Changing it requires a process restart because CUDA Graphs capture those
+workspace addresses.  `bench/spec_attn_fp8_ctx_scan.py` is the matching isolated
+kernel scan; run it only with the API service stopped so another CUDA context cannot
+pollute timings.
+
+### Exact BF16 E4M3FN decode table
+
+On SM80, Triton cannot lower a native E4M3FN load.  Reconstructing every cache
+byte with masks and `tl.exp2` inside the long-context loop was therefore a major
+hidden cost.  The mixed-FP8 series now builds a 256-entry BF16 table once per
+verifier workspace.  Every finite E4M3FN value is exactly representable in BF16;
+the two NaN encodings retain the old fail-closed mapping to zero.  The 512-byte
+table has a CUDA-Graph-stable address and remains hot in cache.
+
+The controlled whole-model A/B used the same prompt salts and settings as the
+segment scan: C1, DFlash2 `k=7`, 512 output tokens, 32 segments, FULL CUDA Graph,
+180 W, FP8 target KV and BF16 draft KV.  Acceptance and TTFT stayed unchanged:
+
+| input | bitwise decode tok/s | BF16 LUT tok/s | bitwise ms/pass | BF16 LUT ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 158-161 | 164.1 | 23.0 | 22.5 |
+| 126K | 68.2 | 81.8 | 50.0 | 41.7 |
+| 250K | 42.2 | 53.8 | 77.5 | 61.2 |
+
+The standalone kernel/reference suite passed contexts through 65K, mixed request
+lengths and verify lengths through 64 tokens with the same maximum error as the
+old decoder.  `bench/test_spec_decode_fp8_lut.py` exhaustively checks all 256
+codes; `bench/spec_attn_fp8_ctx_scan.py --module ...` supports isolated candidate
+A/B without modifying the installed runtime.
+
+### Reduced verifier spill traffic
+
+CUDA Driver resource queries identified the next bottleneck instead of inferring it
+from throughput: the production q=8 partial kernel used 255 registers/thread and a
+96-byte local frame, which held occupancy to 12.5%.  Artificial register caps raised
+local traffic further and were 37-50% slower, so this is not an occupancy problem that
+can be fixed by spilling more aggressively.
+
+For the static-FP8 path only, scores, running maxima and normalizers remain FP32 while
+the per-tile running output is rounded to FP16.  The production 896-token page is also
+an exact multiple of the 32-token kernel tile, so its block ID is loaded once per tile
+instead of materializing 32 identical IDs.  Other KV modes and page geometries retain
+the original path.  The q=8 kernel's local frame fell from 96 to 32 bytes without
+changing its 12.5% occupancy.
+
+The explicit dequantized-reference suite covered q=5/8/16/64, mixed request lengths,
+895/896/897-token page boundaries and a high physical block ID.  Maximum absolute
+error was 0.00541 against the existing 0.08 budget.  In the same FULL-graph C1 model
+test used above, stable forward-pass latency changed as follows (decode tok/s is also
+shown, but varies with DFlash2 acceptance):
+
+| input | BF16 LUT ms/pass | reduced-spill ms/pass | reduced-spill decode tok/s |
+|---:|---:|---:|---:|
+| 4K | 22.5 | 22.5-22.8 | 163-167 |
+| 126K | 41.7 | 38.2-38.6 | 89-90 |
+| 250K | 61.2 | 54.2 | 61-65 |
+
+The long-context forward step is therefore 8-11% faster with no preemption and no
+acceptance regression.  BF16 accumulation, FP16 partial scratch, hoisted scale loads,
+and `maxnreg` 160/168/192 variants were all slower and remain rejected experiments.
+
+### Production q=8 / GQA=6 row specialization
+
+The production DFlash2 verify window has at most eight query positions and six query
+heads per KV head: 48 useful rows.  The generic power-of-two `BLOCK_M=64` path still
+updated 16 masked accumulator rows for every KV tile.  A shape-gated SM80 kernel keeps
+one CTA per request/KV-head/segment and therefore still loads each K/V tile only once,
+but computes the 48 rows as 32+16.  It is enabled only for static FP8, `G=6`, `D=256`,
+`q<=8`, and page sizes divisible by 32; every other geometry uses the generic kernel.
+
+Driver resource inspection reports 250 registers/thread, zero local memory, 43,008
+bytes shared memory and the same 12.5% theoretical occupancy.  The isolated scan was
+8.7-11.5% faster from 4K through 250K and bit-identical to the reduced-spill candidate.
+Explicit-reference and 895/896/897 page-boundary suites retained the same maximum
+error.  Stable FULL-graph model results were:
+
+| input | reduced-spill ms/pass | q8/G6 ms/pass | q8/G6 decode tok/s |
+|---:|---:|---:|---:|
+| 4K | 22.5-22.8 | 22.5 | 167.6 |
+| 126K | 38.2-38.6 | 37.1-37.3 | 93-95 |
+| 250K | 54.2 | 51.4-51.5 | 64-66 |
+
+Thus the removed padded rows produce another repeatable 3% at 126K and 5% at 250K
+at the whole-model step boundary.  `maxnreg=168/192` variants again regressed and are
+not shipped.
+
+### Page-local block-table carry
+
+The production 896-token page contains exactly 28 verifier tiles of 32 tokens.
+The q8 specialization used to reload the same block-table entry for every tile.
+It now carries the physical block ID through the loop and refreshes it only when
+crossing a page boundary.  This is arithmetic- and layout-neutral: five isolated
+rounds were bit-identical and improved the 250K kernel by 0.7-1.3% every time.
+
+Paired FULL-graph tests used identical prompts and acceptance in both runs:
+
+| input | baseline tok/s | page-carry tok/s | baseline ms/pass | page-carry ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 156.1 | 156.9 | 22.6 | 22.5 |
+| 126K | 87.7 | 88.0 | 37.4 | 37.2 |
+| 250K | 65.0 | 65.2 | 51.8 | 51.6 |
+
+The gain is deliberately small, but it is repeatable, has no new allocation or
+graph node, and removes redundant metadata traffic rather than trading accuracy.
+
+### Read-only cache for the immutable FP8 decode table
+
+Nsight Compute identified the remaining LUT access as the dominant pathological
+memory pattern: ordinary scalar loads generated 85,998,528 excessive global
+sectors, 64% of the kernel's total.  The table contains only 256 immutable BF16
+entries, so the SM80-only q8/GQA6 specialization now loads it with NVIDIA PTX
+`ld.global.nc.u16`.  Portable Triton loads remain in the generic path.
+
+The full explicit-dequantization suite passed 895/896/897-token boundaries,
+mixed request lengths, q=5/8/16/64, 65K context and a high physical block ID;
+maximum absolute error remained 0.00541.  At 250K, NCU measured:
+
+| metric | ordinary LUT load | read-only LUT load |
+|---|---:|---:|
+| excessive global sectors | 85,998,528 (64%) | 76,288 (~0%) |
+| partial-kernel duration | ~2.13 ms | 1.82 ms |
+| no eligible warp cycles | ~63% | 54.75% |
+| memory throughput | ~241 GB/s | 284 GB/s |
+
+Paired FULL-graph model tests used identical prompt salts and acceptance:
+
+| input | page-carry tok/s | read-only tok/s | page-carry ms/pass | read-only ms/pass |
+|---:|---:|---:|---:|---:|
+| 4K | 156.9 | 157.1 | 22.5 | 22.5 |
+| 126K | 88.0 | 90.0 | 37.2 | 36.3 |
+| 250K | 65.2 | 67.3 | 51.6 | 50.0 |
+
+This is a cache-routing improvement rather than an approximation: the LUT bits,
+attention arithmetic and cache addressing are unchanged.
+
+### One-wave segment alignment for 70 SMs / 140 resident CTAs
+
+NCU reported only 0.91 waves for the q8 verifier: `32 segments × 4 KV heads =
+128 CTAs`.  The CMP 170HX has 70 SMs, and this kernel can keep two CTAs resident
+per SM, so one full resident wave is 140 CTAs.  Raising the split count
+indiscriminately is harmful—40, 48 and 64 create a partially occupied second
+wave—but 35 produces exactly 140 CTAs.  The partial kernel keeps the same
+arithmetic; only the small final segment reduction is padded to a legal
+power-of-two with masked loads.
+
+Interleaved isolated A/B against NSEG32 measured:
+
+| input | NSEG32 us/layer | NSEG35 us/layer | speedup |
+|---:|---:|---:|---:|
+| 4K | 49.2 | 51.2 | 0.96× |
+| 70K | 502.2 | 458.7 | 1.095× |
+| 126K | 846.9 | 780.6 | 1.085× |
+| 200K | 1312.7 | 1228.8 | 1.068× |
+| 250K | 1667.8 | 1575.8 | 1.058× |
+
+The short-context micro regression is hidden by fixed whole-model work: FULL-graph
+4K remained 22.4 ms/pass.  Repeated model results were 34.7-35.4 ms/pass at
+126K and 47.5-48.1 at 250K, versus 36.3 and 50.0 for NSEG32.  All tests had zero
+preemptions; the full reference suite, including high block IDs, passed.
+
 ## Long-context policy
 
 Do not jump directly to the advertised 1M capacity profile. Qualify in stages:

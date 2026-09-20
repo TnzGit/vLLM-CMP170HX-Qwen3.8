@@ -1,0 +1,68 @@
+Reduce SM80 static-FP8 verifier register pressure without changing cache layout.
+
+The long-context partial kernel is limited to roughly 12.5% theoretical occupancy:
+its FP32 [BLOCK_M, D] running output pushes the generated q=8 kernel to 255 registers
+per thread and a 96-byte local frame.  Static E4M3 KV is already lossy and the
+partial output is stored for a later cross-segment reduction, so retain FP32 for
+scores, maxima and normalizers while rounding only the per-tile running output to
+FP16.  The explicit dequantized-reference suite stays far below its existing error
+budget, including q=64, mixed requests and a high physical block id.
+
+The production 896-token page is an integral number of 32-token kernel tiles.  In
+that exact static-FP8 case every tile has one block id, so load it once and build a
+scalar page base rather than carrying 32 identical block IDs and two 2-D page-base
+expressions.  Other quantization modes and non-integral page geometries retain the
+original path.
+
+Apply after spec-decode-fp8-lut-sm80.patch.
+
+--- a/v1/attention/ops/spec_decode_attn.py
++++ b/v1/attention/ops/spec_decode_attn.py
+@@ -119,16 +119,26 @@
+ 
+     m_i = tl.full([BLOCK_M], float("-inf"), tl.float32)
+     l_i = tl.zeros([BLOCK_M], tl.float32)
+-    acc = tl.zeros([BLOCK_M, D], tl.float32)
++    if STATIC_QUANT:
++        acc = tl.zeros([BLOCK_M, D], tl.float16)
++    else:
++        acc = tl.zeros([BLOCK_M, D], tl.float32)
+     qs = (q * scale).to(tl.bfloat16)
+ 
+     for t in range(t0, t1):
+-        pos = t * TILE + tl.arange(0, TILE)
++        tok0 = t * TILE
++        pos = tok0 + tl.arange(0, TILE)
+         k_ok = pos < kv_len
+-        blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0).to(tl.int64)
+-        slot = pos % BLOCK_SIZE
+-        k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
+-        v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
++        if STATIC_QUANT and BLOCK_SIZE % TILE == 0:
++            blk = tl.load(bt_ptr + req * stride_bt + tok0 // BLOCK_SIZE).to(tl.int64)
++            slot = (tok0 % BLOCK_SIZE) + tl.arange(0, TILE)
++            k_ptrs = k_ptr + blk * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
++            v_ptrs = v_ptr + blk * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
++        else:
++            blk = tl.load(bt_ptr + req * stride_bt + pos // BLOCK_SIZE, mask=k_ok, other=0).to(tl.int64)
++            slot = pos % BLOCK_SIZE
++            k_ptrs = k_ptr + blk[:, None] * stride_kb + slot[:, None] * stride_ks + kvh * stride_kh + d[None, :]
++            v_ptrs = v_ptr + blk[:, None] * stride_vb + slot[:, None] * stride_vs + kvh * stride_vh + d[None, :]
+         k = tl.load(k_ptrs, mask=k_ok[:, None], other=0.0)
+         v = tl.load(v_ptrs, mask=k_ok[:, None], other=0.0)
+         if QUANT:
+@@ -160,9 +170,10 @@
+         l_i = l_i * alpha + tl.sum(p, 1)
+         if QUANT:
+             acc = acc * alpha[:, None] + tl.dot((p * v_sc[None, :]).to(tl.bfloat16), v).to(tl.float32)
+         elif STATIC_QUANT:
+-            acc = acc * alpha[:, None] + tl.dot(
+-                (p * static_v_scale).to(tl.bfloat16), v
+-            ).to(tl.float32)
++            acc = (
++                acc.to(tl.float32) * alpha[:, None]
++                + tl.dot((p * static_v_scale).to(tl.bfloat16), v).to(tl.float32)
++            ).to(tl.float16)
+         else:
+             acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v).to(tl.float32)
+         m_i = m_new

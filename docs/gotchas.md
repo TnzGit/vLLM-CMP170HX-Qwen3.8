@@ -164,8 +164,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     chunk could land on the same kernel — that "longest so far" changed mid-run, the buffers
     were reallocated, and the captured decode graph went on reading the freed ones:
     `CUDA error: an illegal memory access was encountered`, a few hundred tokens into the
-    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` (set by `single-user/start_qwen.sh` from
-    `DFLASH_TOKENS`) fixes the size at startup instead.
+    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` fixes the size at startup instead. For
+    DFlash parallel drafting, `single-user/start_qwen.sh` sets it to `1 + 2 *
+    DFLASH_TOKENS`, matching vLLM's scheduler reorder threshold; `1 + DFLASH_TOKENS`
+    is insufficient for valid uneven paths and for the scheduler-realistic warmup.
 21. **Async scheduling pins the number of speculative tokens.** vLLM only feeds draft token
     ids — and therefore the *count* the worker wants verified — back to the scheduler on the
     synchronous path (`EngineCore.post_step`). With async scheduling on, every decode step is
@@ -599,3 +601,70 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     And when eviction probing, keep the resend prompt BYTE-identical: a
     two-token label difference shifts every block hash and manufactures a
     convincing, fake "per-request hash instability" (ask how we know).
+
+43. **The split-KV segment count is a graph-time tuning parameter, not a live
+    knob.** The verifier's partial-output workspace is captured by FULL CUDA
+    Graph, so `VLLM_SPEC_DECODE_ATTN_SEGMENTS` is read once and must not change
+    until process restart. The generic default stays 16. On CMP 170HX with the
+    896-token static-FP8 target geometry, 32 segments reduced verifier pass time
+    from 62.8 to 50.0 ms at 126K and from 103.3 to 77.5 ms at 250K. 64 segments
+    bought less than 2% more in the isolated long-context kernel scan and hurt
+    short-context latency. The FULL mixed-FP8 service profiles therefore pin 32.
+
+44. **SM80 FP8 verifier decoding belongs in a BF16 LUT, not in per-element
+    arithmetic.** Triton cannot lower native E4M3FN loads on SM80, but every
+    finite E4M3FN value is exactly representable in BF16. A 256-entry BF16 LUT
+    removes masks, `tl.exp2`, and FP32-to-BF16 conversion from the hottest
+    split-KV loop while preserving the previous NaN-to-zero behavior. On the
+    CMP 170HX this raised C1 decode from 68.2 to 81.8 tok/s at 126K and from
+    42.2 to 53.8 tok/s at 250K with unchanged acceptance and zero preemptions.
+
+45. **A 255-register verifier is not automatically fixed by a lower register cap.**
+    The production q=8 static-FP8 partial kernel reported 255 registers/thread,
+    96 bytes of local memory/thread and 12.5% theoretical occupancy.  Compiling it
+    with `maxnreg` 192, 168 or 160 increased local memory to 320, 512 and 632 bytes
+    and slowed it by 37-50%.  The useful fix was to shorten live ranges: keep scores,
+    maxima and normalizers in FP32, round only the per-tile running output to FP16,
+    and scalarize the block ID for the integral 896/32 page/tile geometry.  This cut
+    the local frame to 32 bytes and reduced FULL-graph step time 8-11% at 126K/250K.
+    Treat occupancy as a diagnostic, not a target; forcing occupancy by spilling is
+    worse than the original kernel.
+
+46. **Power-of-two tiles can hide useful masked work even after spills are gone.**
+    DFlash2 q=8 with six GQA heads has 48 valid rows, while the generic verifier uses
+    `BLOCK_M=64`.  Keeping one CTA per request/KV-head/segment but evaluating 32+16
+    rows removes the 16 padded accumulators without rereading K/V.  On CMP 170HX this
+    left occupancy unchanged and improved FULL-graph step time another 3% at 126K and
+    5% at 250K.  Splitting into separate CTAs per query head is not equivalent: that
+    would reread every K/V tile six times and should remain a rejected design.
+
+47. **Page-table metadata should follow page lifetime, not tile lifetime.**  The
+    q8 verifier uses 32-token tiles inside 896-token pages, so one physical block
+    ID is valid for 28 consecutive loop iterations.  Carrying that scalar and
+    reloading it only at a page boundary was bit-identical and saved 0.4-0.5% at
+    the FULL-model step boundary from 4K through 250K.  This is a small but robust
+    win; unlike increasing split count or duplicating query-row kernels, it adds
+    no KV scan, reduction work, or CUDA Graph node.
+
+48. **A tiny immutable LUT can still create enormous global-transaction waste.**
+    The SM80 FP8 verifier's 512-byte BF16 decode table was cache-resident, but
+    data-dependent scalar indices made ordinary Triton global loads account for
+    85,998,528 excessive sectors (64% of the total).  In the exact NVIDIA-only
+    q8/GQA6 path, `ld.global.nc.u16` routes those immutable reads through the
+    read-only cache: NCU reported only 76,288 excessive sectors, kernel duration
+    fell from about 2.13 to 1.82 ms, and FULL-graph decode improved 2.3% at 126K
+    and 3.2% at 250K.  Keep the portable load in generic paths; inline PTX is a
+    measured architecture specialization, not a replacement for Triton's normal
+    lowering on other GPUs.
+
+49. **Match a one-wave split grid to the GPU; more splits are not monotonic.**
+    This verifier launches one CTA per KV head and segment.  With four KV heads,
+    NSEG32 gives 128 CTAs on a 70-SM CMP 170HX.  At two resident CTAs per SM the
+    one-wave capacity is 140 CTAs, so NCU reports 0.91 waves; NSEG35 fills all 140
+    resident slots.  NSEG40/48/64 create a second-wave tail and were slower.
+    NSEG35 reduced FULL-graph pass time 3-5% at 126K/250K without moving 4K.
+    Because Triton `arange` requires a power of two, keep logical NSEG=35 for
+    partials but pad/mask only the final combine reduction.  This is
+    hardware-shape tuning: do not copy 35 to a GPU with a different SM count,
+    resident-CTA limit or KV-head count without redoing the wave calculation and
+    A/B.
