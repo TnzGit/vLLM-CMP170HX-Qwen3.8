@@ -291,8 +291,16 @@ def analyse_cell(port, model, tok, corpus, ctx, conc, max_tokens, out_len):
         # whole request, including tokens emitted before the window opened, so dividing it by
         # the steady window inflated the rate (4K C2: 224 tok/s instead of 160). The
         # server's own generation-token delta inside the window is the correct numerator.
-        "steady_tok_s": (round(win.get("vllm:generation_tokens_total__delta", 0.0) / steady, 2)
-                         if steady > 0 else None),
+        # Use the SAMPLE SPAN as the denominator, not the full window: the counter delta
+        # spans first-sample..last-sample, which is shorter than the window, so dividing by
+        # `steady` under-reports (measured 91.5 tok/s vs ~119 for the same cell).
+        "steady_sample_span_s": win.get("span_s"),
+        "steady_tok_s": (round(win.get("vllm:generation_tokens_total__delta", 0.0)
+                               / win["span_s"], 2)
+                         if win.get("span_s") else None),
+        "steady_tok_s_window_denom": (round(
+            win.get("vllm:generation_tokens_total__delta", 0.0) / steady, 2)
+            if steady > 0 else None),
         "steady_tok_s_naive_wrong": (round(total_out / steady, 2) if steady > 0 else None),
         "itl_p50_ms": (round(statistics.median(itls) * 1000, 2) if itls else None),
         "itl_p95_ms": (round(sorted(itls)[int(len(itls) * 0.95)] * 1000, 2)
