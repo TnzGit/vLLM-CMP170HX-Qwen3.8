@@ -1,0 +1,72 @@
+{
+  "summary": {
+    "context": 126000,
+    "rounds": 3,
+    "unprofiled_rounds": 2,
+    "ms_per_output_token_median": 11.0176,
+    "ms_per_spec_iteration_median": 34.8999,
+    "accepted_tokens_per_pass_mean": 3.1866,
+    "passes_per_100_output_tokens_mean": 31.569,
+    "output_tok_s_median": 90.771,
+    "ttft_s_median": 102.205,
+    "preemptions_total": 0.0,
+    "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+  },
+  "rows": [
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 101.17654848500024,
+      "decode_s": 2.7851658659965324,
+      "spec_iterations": 80.0,
+      "ms_per_output_token": 10.922219082339343,
+      "ms_per_spec_iteration": 34.814573324956655,
+      "accepted_tokens_per_pass": 3.225,
+      "passes_per_100_output_tokens": 31.372549019607842,
+      "output_tok_s": 91.55648613723082,
+      "preemptions": 0.0,
+      "round": 0,
+      "context": 126000,
+      "profiled": false,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    },
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 103.2333432359992,
+      "decode_s": 2.8338094540013117,
+      "spec_iterations": 81.0,
+      "ms_per_output_token": 11.112978250985536,
+      "ms_per_spec_iteration": 34.985301901250764,
+      "accepted_tokens_per_pass": 3.1481481481481484,
+      "passes_per_100_output_tokens": 31.764705882352942,
+      "output_tok_s": 89.98487870803821,
+      "preemptions": 0.0,
+      "round": 1,
+      "context": 126000,
+      "profiled": false,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    },
+    {
+      "prompt_tokens": 126000,
+      "output_tokens": 256,
+      "ttft_s": 103.61428534700099,
+      "decode_s": 2.868382754000777,
+      "spec_iterations": 81.0,
+      "ms_per_output_token": 11.24855981961089,
+      "ms_per_spec_iteration": 35.41213276544169,
+      "accepted_tokens_per_pass": 3.1604938271604937,
+      "passes_per_100_output_tokens": 31.764705882352942,
+      "output_tok_s": 88.9002695488703,
+      "preemptions": 0.0,
+      "round": 2,
+      "context": 126000,
+      "profiled": true,
+      "corpus_sha256": "ebf41c9d04b01f4dac6372c3626ada16bab85d2de2e884b39f9c4ed19f1cab91"
+    }
+  ],
+  "attribution": {
+    "error": "no trace json under /tmp/ph2_traces",
+    "files": []
+  }
+}
