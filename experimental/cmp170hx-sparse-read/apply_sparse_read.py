@@ -90,7 +90,7 @@ def _cmp_sparse_recent_block_table(
     )
     tl.store(dst_seq_ptr + req, compact_len, mask=chunk == 0)
 # END cmp170hx sparse-read oracle
-'''.strip("\\n")
+'''.strip("\n")
 
 CTOR_INSERT = r'''
         # BEGIN cmp170hx sparse-read oracle
