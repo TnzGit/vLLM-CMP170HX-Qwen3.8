@@ -21,6 +21,20 @@ For this exact stack:
 | **short** | ≤ 32K | **5** | **4** | 816 | short/medium interactive requests where acceptance is high |
 | **long** | ≥ 48K | **3** | **1** | 800 | long-context / 126K / 250K service |
 
+### Peak decode speed at a glance
+
+Representative **C1 decode-only** results on the qualified CMP 170HX stack (greedy, fresh engine per cell, exact-token unique prompts, 1350 MHz / 180 W):
+
+| context | class | peak measured decode | k at peak | production reading |
+|---:|---|---:|---:|---|
+| 4K | short | **134.7 tok/s** | 5 | typical short-context reference |
+| 32K | short | **147.0 tok/s** | 5 | highest measured short-context point |
+| 65K | medium | **100.1 tok/s** | 3 | representative medium/long crossover region |
+| 126K | long | **90.2 tok/s** | 7 | k=3 is 89.6 tok/s; the 0.7% k=7 lead is inside spread, so production stays on k=3 |
+| 250K | ultra-long | **64.9 tok/s** | 3 | qualified long-profile reference |
+
+In round numbers: **~147 tok/s at 32K, ~100 tok/s at 65K, ~90 tok/s at 126K, and ~65 tok/s at 250K**. These are decode rates, not end-to-end request throughput; TTFT/prefill is a separate cost.
+
 The crossover is around **48K**. Do **not** implement an in-engine dynamic-`k` switch: `k` changes the derived cache/page geometry (800/816/832 for k=3/5/7), so it is an engine-level service profile in this fork.
 
 For 126K and 250K, `MAX_SEQS=1` is not merely a latency preference. In measured service A/B it was better than 2 on **every measured axis**, including total makespan.
