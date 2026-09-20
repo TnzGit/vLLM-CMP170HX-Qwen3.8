@@ -81,3 +81,28 @@ the only regime the long-context profile actually runs in.
 ## Artifacts
 
 `bench/int8-g64/maxseqs-ab/` holds the four raw cell JSONs (with per-1s timelines).
+
+
+---
+
+## 250K confirmation
+
+126K was already unambiguous, so per the plan this is a single confirmation (one round per
+arm), not a full A/B. At 250K the unique-prompt C2 workload cannot form a steady decode window,
+so **service quantities only** are compared.
+
+| `MAX_SEQS` | makespan | TTFT₀ | TTFT₁ | completion₀ | completion₁ | useful agg tok/s | per-request tok/s | KV max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **1** | **561.9 s** | 272.4 s | 554.4 s | **278.1 s** | 561.9 s | **1.82** | **90.0 / 68.7** | 0.411 |
+| 2 | 589.8 s | 580.5 s | 277.3 s | 589.8 s | 584.3 s | 1.74 | 55.4 / **1.7** | **0.823** |
+
+`MAX_SEQS=2` versus 1: makespan **+5.0%**, useful aggregate **−4.4%**, first-completion
+**2.1x later**, the slowest request **40x slower** (1.7 vs 68.7 tok/s), and KV occupancy
+**82%** (0.823) against 41% — i.e. it also consumes most of the safety margin.
+
+**The 250K confirmation agrees with 126K and the penalty is larger**, so `MAX_SEQS=1` is the
+long-context policy with no caveat. Note that at 250K the ms=2 arm is *also* the
+capacity-limited regime measured earlier: KV reaches 0.823 and residency caps at 2, which is
+why the second request's decode is starved to 1.7 tok/s.
+
+Both arms: `Xid delta = 0`, `preemptions = 0`.
