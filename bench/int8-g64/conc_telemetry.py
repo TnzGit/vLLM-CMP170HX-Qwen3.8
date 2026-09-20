@@ -234,6 +234,35 @@ def one_request(port: int, model: str, ids: list[int], max_tokens: int) -> dict:
     }
 
 
+
+def _timeline(samples, t0, max_rows: int = 400) -> list[dict]:
+    """Compact per-sample timeline: residency, KV usage, and prompt/gen token rates."""
+    rows = []
+    prev = None
+    for t, s in samples:
+        row = {
+            "t": round(t - t0, 1),
+            "run": s.get("vllm:num_requests_running", 0.0),
+            "wait": s.get("vllm:num_requests_waiting", 0.0),
+            "wait_cap": s.get("vllm:num_requests_waiting_by_reason[capacity]", 0.0),
+            "kv": s.get("vllm:kv_cache_usage_perc", 0.0),
+        }
+        if prev is not None:
+            dt = t - prev[0]
+            if dt > 0:
+                row["prompt_tps"] = round(
+                    (s.get("vllm:prompt_tokens_total", 0.0)
+                     - prev[1].get("vllm:prompt_tokens_total", 0.0)) / dt, 1)
+                row["gen_tps"] = round(
+                    (s.get("vllm:generation_tokens_total", 0.0)
+                     - prev[1].get("vllm:generation_tokens_total", 0.0)) / dt, 1)
+        rows.append(row)
+        prev = (t, s)
+    if len(rows) > max_rows:                      # keep it bounded
+        step = max(1, len(rows) // max_rows)
+        rows = rows[::step]
+    return rows
+
 def analyse_cell(port, model, tok, corpus, ctx, conc, max_tokens, out_len):
     """Run one (ctx, concurrency) cell with 1 Hz telemetry."""
     ids_list = [exact_prompt_ids(tok, corpus, ctx, f"ct-{ctx}-{conc}-{i}")
@@ -272,7 +301,27 @@ def analyse_cell(port, model, tok, corpus, ctx, conc, max_tokens, out_len):
             "output_tokens": [r["output_tokens"] for r in rs],
             "prompt_tokens": [r["prompt_tokens"] for r in rs],
         },
+        # ---- service-policy view (what a MAX_SEQS decision needs) --------------
+        # makespan = min(start)..max(end): the wall time to complete the whole batch.
         "batch_wall_s": round(max(ends) - t0, 2),
+        "makespan_s": round(max(ends) - min(r["start"] for r in rs), 2),
+        "ttft_s": [round(f - t0, 2) for f in firsts],
+        "completion_rel_s": [round(e - t0, 2) for e in ends],
+        "time_to_first_complete_s": round(min(ends) - t0, 2),
+        "time_to_all_complete_s": round(max(ends) - t0, 2),
+        # Per-request throughput over that request's OWN decode interval.
+        "per_request_output_tok_s": [
+            round(max(r["output_tokens"] - 1, 0) / max(r["end"] - (r["first"] or r["end"]), 1e-9), 2)
+            for r in rs],
+        # Useful aggregate: every output token divided by the makespan a user actually waits.
+        # Prefill IS included here on purpose -- this is a service number, not a decode number.
+        "useful_aggregate_tok_s": round(total_out / max(max(ends) - min(r["start"] for r in rs), 1e-9), 2),
+        "residency": {"requested": conc,
+                      "max_running_seen": full.get("vllm:num_requests_running__max"),
+                      "max_waiting_seen": full.get("vllm:num_requests_waiting__max")},
+        # Timeline so prompt/gen throughput and residency can be read over time rather than
+        # only as extremes. Rates are per-1s-sample deltas.
+        "timeline": _timeline(sampler.samples, t0),
         "steady_window_s": round(steady, 2),
         "steady_window_negative": steady <= 0,
         "steady_samples": win.get("samples", 0),
