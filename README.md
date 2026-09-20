@@ -1,5 +1,7 @@
 # Qwen3.8-27B on NVIDIA CMP 170HX (SM80, 64 GiB)
 
+**English** | [简体中文](README.zh-CN.md)
+
 A vLLM 0.27.1 research-and-production fork for running **Qwen3.8-27B + DFlash2 speculative decoding on a single NVIDIA CMP 170HX**.
 
 The current mainline performance path is the **M7 mixed-FP8 verifier**: FP8 target KV, BF16 draft KV, a custom SM80 split-KV speculative verifier, heterogeneous target/draft cache geometry, and FULL CUDA Graph execution.
