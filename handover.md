@@ -6205,3 +6205,106 @@ stride on a pool that can exceed 2 GiB.
 Each was found by adding **fail-fast**: a cell that produces no measurement now aborts the
 run instead of silently continuing. Two of the three were only caught because the previous
 failure had already taught me to check for empty output.
+
+## 61. Phase 2-4 reopened: concurrency root cause, then the verifier ideas (all gated)
+
+The review rejected my first concurrency conclusion and was right to. Full records in
+`docs/concurrency-root-cause-classification.md` and
+`docs/concurrency-prefill-budget-negative.md`.
+
+### 61.1 Two reasoning errors I made and corrected
+
+1. **"The flag is absent, so the interference hypothesis is disproved."** Invalid. C1 has no
+   competing long prefill, so an identical scheduler config can behave completely differently
+   once C2/C4 adds one; and a CLI flag's absence is not a fact about the parsed config. The
+   engine's *parsed* values are `max_num_scheduled_tokens = 2020` (from the default
+   `max_num_batched_tokens = 2048`), `enable_chunked_prefill = True`, `policy = fcfs`.
+2. **"It is only a measurement-definition problem."** Premature — the server's own log reported
+   single-digit generation throughput, which is real wall-clock behaviour.
+
+### 61.2 Classification (telemetry, 1 Hz, not inference)
+
+| ctx | C | running max | waiting (capacity) | steady window | first-token skew |
+| --- | --- | --- | --- | --- | --- |
+| 4K | 2 | 2.0 | 1 | 4.56 s | 0.47 s |
+| 32K | 2 | 2.0 | 1 | 4.17 s | 18.4 s |
+| 126K | 2 | 2.0 | 1 | 5.19 s | 108.8 s |
+| 250K | 2 | 2.0 | 1 | 1.40 s | 302.5 s |
+| 250K | 4 | **2.0** | **3** | **−602.8 s** | 907.2 s |
+
+- **Case A confirmed at 250K C4**: `running_max = 2.0` with C=4 and `waiting_capacity = 3` at
+  82% KV usage. **4-way residency never happened**, so "250K C4" was two sequential 2-way
+  batches and its steady window is negative. Capacity-limited, not a k gate.
+- **Case B confirmed** as what corrupted the metric: skew grows 0.47 s → 907 s with context, so
+  a request that finishes prefill first decodes while the others still prefill, and my old
+  aggregate divided the global iteration counters by that overlap.
+- **Case C ruled out**: inside the steady windows `prompt_tokens_delta = 0`, `running = 2.0`,
+  `waiting = 0`, and aggregate throughput is **159/170/95 tok/s** at 4K/32K/126K — above the
+  same engine's C1 (130/153/90).
+- The **C2 757 ms vs C4 229 ms inversion** is a first-token synchronization artifact, exactly as
+  the review predicted, and at C4 the cell is not even 4-way.
+
+### 61.3 Production findings that outrank a verifier micro-optimisation
+
+1. **Concurrent decode scaling degrades with context**: 2x concurrency buys **1.23x** at 4K,
+   **1.11x** at 32K, **1.06x** at 126K aggregate.
+2. **250K admits at most 2 resident sequences** on this configuration.
+3. **The prefill budget does not control the interference** (negative result): 126K C2 at
+   budgets 996/2020/4068 scheduled tokens, block 832 throughout, gives ITL p50
+   **52.97/53.38/53.27 ms** — 0.4% spread across a 4x range — and skew moves only 116 s → 105 s.
+   Only TTFT responds, and it merely flips which request loses the prefill race. The
+   interference is **structural**, not a tuning knob.
+
+### 61.4 The one defect class that recurred three times
+
+Every instance was a ratio whose numerator and denominator covered different intervals:
+
+| # | ratio | defect |
+| --- | --- | --- |
+| 1 | `max_i(end_i − first_i)` as the decode window | counted another request's **prefill** as decode time (~14x inflation) |
+| 2 | request-total tokens ÷ steady window | numerator included tokens emitted **before** the window |
+| 3 | counter delta ÷ full steady window | delta spans **first-sample..last-sample**, shorter than the window (35% under-report) |
+
+All three are now recorded and the metric is fixed; the wrong values are retained in the output
+as `steady_tok_s_naive_wrong` / `steady_tok_s_window_denom`. **Guard: for every ratio, confirm
+the numerator and denominator span the same interval; if they cannot, report `null`.**
+
+### 61.5 Phase 4B/4C/4E outcomes (all gated, all negative or killed)
+
+- **4B tensor-core denominator: NEGATIVE** — 11–14% *slower*, not 2–3% faster. `tl.dot(p, ones)`
+  is a 32×TILE×16 MMA with N=16 the SM80 minimum (15 of 16 columns discarded) plus an FP32→BF16
+  cast, replacing a 32-wide FP32 row-sum. Refutes the whole "move the softmax reduction to
+  tensor cores" family. The baseline cross-validated Phase 2 to 2.3%.
+- **4C two-level PV: KILLED by resource gate, no kernel written.** `ptxas -v`: **252 regs, 0
+  spill, 57,344 B smem, 2 resident CTAs/SM, only 1,024 regs of headroom.** An FP32 long-term
+  accumulator costs +48 regs (acc0 +32, acc1 +16) → 300 vs SM80's 255 limit → spill. Reproduces
+  E33/E36 by arithmetic. **The kernel sits at 252/255 registers, so it has no headroom for any
+  change that adds per-thread state** — a structural constraint on all future verifier work.
+- **4E fused grouped conv: KILLED without a microbenchmark.** Phase 2 bounds all draft kernels
+  at 0.112 ms/pass (0.32% of decode time), so even eliminating the draft conv entirely cannot
+  reach 1% of the step, let alone the ≥5% kernel gate.
+- **4D (K centering / finer Q quantization)**: left low priority, not implemented.
+
+**So the Sage-inspired verifier line is exhausted on the evidence.** The verifier is still 52.2%
+of the 250K step (Phase 2) and still the right target, but the ideas audited do not reduce it,
+and 252/255 registers explains why cheap additions cannot.
+
+### 61.6 Phase 3 C1 conclusions stand; no dynamic k
+
+4K k=5 (+3.9% vs k=7), 126K k=7 (k=3 only −0.7%, inside spread), 250K k=3 (+8.7%) — fresh
+engine, exact corpus, 1350 MHz/180 W, clean Xid, stable spread. Unchanged.
+
+**Do not implement an in-engine dynamic k policy**: k changes the effective KV/page geometry
+(block **800** at k=3, **816** at k=5, **832** at k=7), so k participates in engine-level cache
+layout. Any future policy must be a **service-profile static k**.
+
+### 61.7 Phase 1B semantics corrected
+
+The rejection-distribution-bias framing (inherited from upstream #54282's description) is
+**withdrawn**: on this path the target/rejection/residual side already used per-request seeded
+generators, so it never shared a stream with the draft, and a 200k-trial chi-square found no
+bias before or after. The backport's real value is a dedicated draft stream, seeded
+reproducibility, concurrent-request draft isolation and immunity to unrelated global RNG
+traffic — **robustness/reproducibility, not distribution-correctness P0**. The patch is
+complete and will not be extended. **#51812 remains a clear P0** (wrong token's `a`/`b` gate
+into the GDN recurrent update).
