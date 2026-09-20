@@ -1,0 +1,93 @@
+Backport upstream vLLM #51812: gather the GDN gate a/b with the same token mapping as q/k/v.
+
+THE INVARIANT
+-------------
+In a Qwen GDN layer, `mixed_qkv` is reordered before the recurrent step:
+
+    mixed_qkv_spec     = mixed_qkv.index_select(0, spec_token_indx)
+    mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
+
+so `query_spec` / `query_non_spec` (and their k/v) are in *permuted* token order. The gate
+tensors `a` and `b` are produced from the same hidden states and must be permuted by the
+**same** mapping. This patch supplies that:
+
+    if pure_spec:
+        a_spec, b_spec = a, b
+    else:
+        a_spec = a.index_select(0, spec_token_indx)
+        b_spec = b.index_select(0, spec_token_indx)
+
+Selecting the wrong rows does not raise: the kernel consumes whatever it is handed, so the
+failure mode is a **silently wrong GDN recurrent state**, not a crash. That is why this is
+a P0 correctness backport even though it changes no performance.
+
+WHAT v0.27.1 IS MISSING
+-----------------------
+The file already gathers for the prefill branch (`a_non_spec =
+a.index_select(0, non_spec_token_indx)`), but two call sites passed the **unpermuted**
+`a`/`b` while their q/k/v were permuted:
+
+  1. the speculative call -- `q=query_spec` (gathered) with `a=a`, `b=b` (not gathered);
+  2. the pure-decode call -- `q=query_non_spec` (gathered) with `a=a`, `b=b` (not gathered).
+
+So the fix is a consistency repair within one function, not a new mechanism. The `pure_spec`
+case (no prefill, no non-spec decode) needs no gather because then the whole batch is
+speculative and `mixed_qkv_spec = mixed_qkv` unchanged.
+
+RELATION TO THE EXISTING PATCHES
+--------------------------------
+This is **not** the same defect as `vllm-pr50021-gdn-spec-bounds.patch`, which bounds
+`spec_state_indices` / `num_accepted_tokens` arithmetic. Both are required; neither
+subsumes the other. Revert independently.
+
+Written against vLLM 0.27.1.
+--- a/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
++++ b/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+@@ -1373,11 +1373,22 @@
+ 
+         # 2.1: Process the multi-query part
+         if spec_sequence_masks is not None:
++            # Gather the gate tensors with the SAME token mapping used for q/k/v above.
++            # `query_spec` came from mixed_qkv.index_select(0, spec_token_indx), so `a`
++            # and `b` must be selected identically; passing them unpermuted silently
++            # updates the wrong GDN recurrent state (upstream #51812). When the batch is
++            # purely speculative, mixed_qkv_spec == mixed_qkv and no gather is needed.
++            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
++                a_spec = a
++                b_spec = b
++            else:
++                a_spec = a.index_select(0, spec_token_indx)
++                b_spec = b.index_select(0, spec_token_indx)
+             core_attn_out_spec, last_recurrent_state = (
+                 fused_sigmoid_gating_delta_rule_update(
+                     A_log=self.A_log,
+-                    a=a,
+-                    b=b,
++                    a=a_spec,
++                    b=b_spec,
+                     dt_bias=self.dt_bias,
+                     q=query_spec,
+                     k=key_spec,
+@@ -1458,11 +1469,20 @@
+                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                 )
+         elif attn_metadata.num_decodes > 0:
++            # Same mapping requirement as the speculative branch: `query_non_spec` was
++            # gathered, so `a`/`b` must be too. `a_non_spec` is already computed above
++            # when spec_sequence_masks is set, and equals `a` otherwise.
++            if spec_sequence_masks is not None:
++                a_non_spec = a.index_select(0, non_spec_token_indx)
++                b_non_spec = b.index_select(0, non_spec_token_indx)
++            else:
++                a_non_spec = a
++                b_non_spec = b
+             core_attn_out_non_spec, last_recurrent_state = (
+                 fused_sigmoid_gating_delta_rule_update(
+                     A_log=self.A_log,
+-                    a=a,
+-                    b=b,
++                    a=a_non_spec,
++                    b=b_non_spec,
+                     dt_bias=self.dt_bias,
+                     q=query_non_spec,
+                     k=key_non_spec,
