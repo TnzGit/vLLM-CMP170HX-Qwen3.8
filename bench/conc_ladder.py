@@ -4,6 +4,7 @@ across streams.
 
   venv/bin/python bench/conc_ladder.py [--max-n 8 | --n 1,2,4,8] [--out 256] [--reps 2]
                                        [--ctx-tokens 4096] [--shared] [--json f.json]
+                                       [--salt fixed-ab-prompt]
 
 Three throughput columns, because they answer different questions and disagree:
 per-stream is each stream's own first-token-to-last-token rate, averaged -- what one
@@ -76,6 +77,7 @@ REPS = _arg("--reps", 2)
 CTXTOK = _arg("--ctx-tokens", 4096)
 JSONOUT = _arg("--json", "", str)
 LABEL = _arg("--label", "", str)
+SALT_BASE = _arg("--salt", "", str)
 SHARED = "--shared" in sys.argv
 
 FILLER = ("The RTX 3090 has 24 GB of GDDR6X and 82 streaming multiprocessors. "
@@ -242,7 +244,12 @@ rows = []
 for n in NLIST:
     best = None
     for rep in range(REPS):
-        r = run_one(n, salt=f"{LABEL}-n{n}-r{rep}-{int(time.time())}")
+        salt = (
+            f"{SALT_BASE}-n{n}-r{rep}"
+            if SALT_BASE
+            else f"{LABEL}-n{n}-r{rep}-{int(time.time())}"
+        )
+        r = run_one(n, salt=salt)
         if r is None:
             print(f"{n:>2}  incomplete"); continue
         # Keep the rep with the best STEADY-STATE aggregate: a collapse that survives
