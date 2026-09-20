@@ -178,11 +178,15 @@ def stream_run(port: int, model: str, ids: list[int], output: int) -> dict:
         "prompt_tokens": int(usage.get("prompt_tokens", len(ids))),
         "output_tokens": gen,
         "ttft_s": ttft,
+        # absolute end relative to this call's own start; the concurrency path uses
+        # wall - max(ttft) to exclude the prefill of slower requests.
+        "batch_wall_s": end - start,
         "decode_s": decode_s,
         "spec_iterations": steps,
         "ms_per_output_token": decode_s * 1000.0 / max(gen - 1, 1),
         "ms_per_spec_iteration": decode_s * 1000.0 / steps,
         "accepted_tokens_per_pass": 1.0 + acc / steps,
+        "tokens_per_iteration": gen / steps,
         "passes_per_100_output_tokens": 100.0 * steps / max(gen - 1, 1),
         "output_tok_s": max(gen - 1, 0) / decode_s,
         "preemptions": d["vllm:num_preemptions_total"],
@@ -281,6 +285,7 @@ def main() -> None:
     ap.add_argument("--context", type=int, required=True)
     ap.add_argument("--output", type=int, default=256)
     ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--concurrency", type=int, default=1)
     ap.add_argument("--trace-dir", default="")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -292,7 +297,9 @@ def main() -> None:
 
     rows = []
     for rnd in range(args.rounds):
-        ids = exact_prompt_ids(tok, corpus, args.context, f"ph2-{args.context}-r{rnd}")
+        ids_list = [exact_prompt_ids(tok, corpus, args.context,
+                                     f"ph2-{args.context}-r{rnd}-c{i}")
+                    for i in range(args.concurrency)]
         # Profile the LAST round only: enabling the profiler perturbs timing, so the
         # unprofiled rounds supply the latency and the profiled round supplies the split.
         profiled = bool(args.trace_dir) and rnd == args.rounds - 1
@@ -303,14 +310,62 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"  round {rnd}: start_profile failed: {exc}", flush=True)
                 profiled = False
-        r = stream_run(args.port, args.model, ids, args.output)
+        if args.concurrency == 1:
+            r = stream_run(args.port, args.model, ids_list[0], args.output)
+        else:
+            # CONCURRENCY MEASUREMENT DEFECT, found and fixed here.
+            #
+            # The obvious aggregate -- max over requests of (end_i - first_i) -- is WRONG
+            # under chunked prefill. Measured at 32K C2: req0 first=20.6s end=40.1s, req1
+            # first=39.0s end=40.4s. So req0's "decode window" of 19.5s is 93% req1's
+            # PREFILL, and ms/spec-iteration inflates ~14x. The steady-state window where
+            # every request is actually decoding is wall - max(first_i) = 1.4s.
+            #
+            # So the batch decode window is taken as wall - max(first_i): the interval
+            # during which all requests are past prefill. That is the only interval in
+            # which the batch is genuinely decoding.
+            with cf.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                rs = list(pool.map(
+                    lambda ids: stream_run(args.port, args.model, ids, args.output),
+                    ids_list))
+            it = sum(x["spec_iterations"] for x in rs)
+            acc = sum(x["accepted_tokens_per_pass"] * x["spec_iterations"] for x in rs)
+            out_tok = sum(x["output_tokens"] for x in rs)
+            # `ms per speculative iteration` is NOT well-defined for C>1 with this design:
+            # the /metrics counters are global across the batch, so `it` accumulates over
+            # the whole batch, while any single decode window covers a different interval.
+            #   divisor = max(end_i - first_i) counts a slower request's PREFILL as decode
+            #     time (measured: 19.5s instead of 1.4s at 32K C2 -> ~14x inflation);
+            #   divisor = wall - max(first_i) excludes the iterations that happened before
+            #     the last request finished prefilling, which inflates the rate instead.
+            # So this field is reported as None for C>1 and the well-defined quantities are
+            # used: accepted/pass (a global ratio) and tokens per iteration.
+            dec = None
+            wall = max(x["batch_wall_s"] for x in rs)
+            r = {
+                "prompt_tokens": len(ids_list[0]),
+                "output_tokens": out_tok,
+                "ttft_s": max(x["ttft_s"] for x in rs),
+                "decode_s": None,           # not well-defined for C>1, see above
+                "batch_wall_s": wall,
+                "spec_iterations": it,
+                "ms_per_output_token": None,
+                "ms_per_spec_iteration": None,
+                "accepted_tokens_per_pass": acc / max(it, 1.0),
+                "tokens_per_iteration": out_tok / max(it, 1.0),
+                "passes_per_100_output_tokens": 100.0 * it / max(out_tok, 1),
+                # user-facing aggregate: total output over total wall, prefill included
+                "output_tok_s": out_tok / max(wall, 1e-9),
+                "preemptions": sum(x["preemptions"] for x in rs),
+            }
         if profiled:
             try:
                 post("/stop_profile", args.port)
                 print(f"  round {rnd}: profiler stopped", flush=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"  round {rnd}: stop_profile failed: {exc}", flush=True)
-        r.update({"round": rnd, "context": args.context, "profiled": profiled,
+        r.update({"round": rnd, "context": args.context,
+                  "concurrency": args.concurrency, "profiled": profiled,
                   "corpus_sha256": corpus_sha})
         rows.append(r)
         print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v)
@@ -318,21 +373,29 @@ def main() -> None:
 
     # Latency summary from the UNPROFILED rounds only.
     clean = [r for r in rows if not r["profiled"]] or rows
+    def med(key):
+        """Median, or None when the quantity is not defined for this concurrency."""
+        vals = [r[key] for r in clean if r.get(key) is not None]
+        return round(statistics.median(vals), 4) if vals else None
+
     summary = {
         "context": args.context,
+        "concurrency": args.concurrency,
         "rounds": len(rows),
         "unprofiled_rounds": len(clean),
-        "ms_per_output_token_median": round(statistics.median(
-            [r["ms_per_output_token"] for r in clean]), 4),
-        "ms_per_spec_iteration_median": round(statistics.median(
-            [r["ms_per_spec_iteration"] for r in clean]), 4),
+        # For C>1 these are None by construction: ms/spec-iteration needs a decode window
+        # that covers exactly the interval the global iteration counters accumulated over,
+        # and no such window exists when requests finish prefill at different times.
+        "ms_per_output_token_median": med("ms_per_output_token"),
+        "ms_per_spec_iteration_median": med("ms_per_spec_iteration"),
         "accepted_tokens_per_pass_mean": round(statistics.mean(
             [r["accepted_tokens_per_pass"] for r in clean]), 4),
+        "tokens_per_iteration_mean": round(statistics.mean(
+            [r["tokens_per_iteration"] for r in clean]), 4),
         "passes_per_100_output_tokens_mean": round(statistics.mean(
             [r["passes_per_100_output_tokens"] for r in clean]), 3),
-        "output_tok_s_median": round(statistics.median(
-            [r["output_tok_s"] for r in clean]), 3),
-        "ttft_s_median": round(statistics.median([r["ttft_s"] for r in clean]), 3),
+        "output_tok_s_median": med("output_tok_s"),
+        "ttft_s_median": med("ttft_s"),
         "preemptions_total": sum(r["preemptions"] for r in rows),
         "corpus_sha256": corpus_sha,
     }
@@ -340,7 +403,12 @@ def main() -> None:
     # the engine was dying mid-sweep and the harness dutifully wrote the crash-adjacent
     # timings as data. A cell whose rounds disagree by more than this factor is not a
     # measurement, so it is refused rather than reported.
-    mpt = [r["ms_per_output_token"] for r in clean if r["ms_per_output_token"] > 0]
+    mpt = [r["ms_per_output_token"] for r in clean
+           if r.get("ms_per_output_token") and r["ms_per_output_token"] > 0]
+    if not mpt:
+        # C>1: use output tok/s, inverted so the ratio keeps the same meaning
+        tps = [r["output_tok_s"] for r in clean if r.get("output_tok_s")]
+        mpt = [1.0 / t for t in tps if t > 0]
     summary["round_spread"] = round(max(mpt) / min(mpt), 3) if len(mpt) > 1 and min(mpt) > 0 else None
     summary["stable"] = (summary["round_spread"] is None
                          or summary["round_spread"] <= MAX_ROUND_SPREAD)
