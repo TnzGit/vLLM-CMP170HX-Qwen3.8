@@ -114,3 +114,21 @@ ceiling), fused DFlash conv (contribution too small), prefill-budget tuning (no 
   and a spread gate must refuse a cell whose rounds disagree by more than ~3x.
 - **Port 8000 is production and is never touched**; research runs on 8002.
 - Distinguish measurer from measured: fix the *tool* and say so when the tool was wrong.
+
+## R8 — Reproducibility is not target-only speculative equivalence
+
+A dedicated RNG stream can make the speculative path reproducible without making its output
+token-exact with a target-only `q_len=1` greedy forward. For Qwen3.8, upstream issue #54928 has
+instrumented examples where the block verifier's target logits choose a different argmax near a
+tie and the emitted token follows that verifier argmax.
+
+For any equivalence claim, compare on the **same checkpoint and runtime**:
+
+- target-only emitted token `A`;
+- verifier target-logit argmax `V`;
+- speculative emitted token `E`;
+- target-only top-1/top-2 margin at the first divergence.
+
+`E == V != A` is evidence of a target numerical/execution-path mismatch, not by itself evidence
+of draft RNG or cache rollback corruption. RNG-repeatability tests and target-equivalence tests
+are separate gates.
