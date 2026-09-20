@@ -138,3 +138,29 @@ structurally fastest at every context, and it forfeits only the short-context ac
   without restructuring the cache layout — out of scope.
 - It does not claim the short-context k=5 choice is workload-independent; acceptance drives it,
   and acceptance is content-dependent (see §1).
+
+## 9. DFlash2 greedy-equivalence caveat
+
+The RNG-isolation patch in PR #6 improves reproducibility; it does **not** prove that a
+block-shaped speculative verifier is token-exact with ordinary target-only `q_len=1` greedy
+decoding.
+
+Upstream vLLM issue #54928 reports Qwen3.8 cases where target-only and DFlash2 remain
+individually deterministic but first diverge at a near-tie because the target's multi-position
+verification forward ranks a different token than the single-token forward. Instrumented reports
+show the emitted speculative token following the verifier argmax (`E == V != A`), including cases
+with `--enforce-eager`; this is distinct from process-global RNG contamination.
+
+This project has **not** established that the current W4A16 + M7 CMP170HX stack exhibits that
+same behavior. Therefore:
+
+- do not describe PR #6 as a token-equivalence fix;
+- byte-identical output across k=3/5/7 proves cross-k consistency inside the speculative path,
+  not target-only equivalence;
+- before any future claim of target-only greedy equivalence, run a dedicated target-only vs
+  DFlash2 gate on the exact production checkpoint/runtime and capture token IDs plus target
+  top-logprobs around the first divergence;
+- if a divergence appears, distinguish verifier numerical-path differences from recurrent/KV
+  state corruption before changing state-management code.
+
+Upstream reference: <https://github.com/vllm-project/vllm/issues/54928>.
