@@ -21,6 +21,20 @@
 | **short** | ≤ 32K | **5** | **4** | 816 | acceptance 较高的短/中上下文交互请求 |
 | **long** | ≥ 48K | **3** | **1** | 800 | 长上下文 / 126K / 250K 服务 |
 
+### 峰值 Decode 速度速览
+
+下面给出几个最常见、方便横向比较的 **C1 decode-only** 数字。统一条件为：greedy、每个 cell fresh engine、exact-token unique prompts、1350 MHz / 180 W。
+
+| 上下文 | 类别 | 实测峰值 decode | 峰值对应 k | production 解读 |
+|---:|---|---:|---:|---|
+| 4K | 短 | **134.7 tok/s** | 5 | 常见短上下文参考值 |
+| 32K | 短 | **147.0 tok/s** | 5 | 当前实测最高的短上下文点 |
+| 65K | 中 | **100.1 tok/s** | 3 | 中长上下文过渡区的代表值 |
+| 126K | 长 | **90.2 tok/s** | 7 | k=3 为 89.6 tok/s；k=7 只领先 0.7%，在 spread 内，所以 production 仍用 k=3 |
+| 250K | 超长 | **64.9 tok/s** | 3 | 已 qualification 的 long-profile 参考值 |
+
+如果只记几个整数：**32K 约 147 tok/s，65K 约 100 tok/s，126K 约 90 tok/s，250K 约 65 tok/s**。这些都是 decode 速度，不是端到端 request throughput；TTFT/prefill 是另一项独立成本。
+
 分界点大约在 **48K**。**不要**在同一个 engine 里实现动态 `k` 切换：在这个 fork 中，`k` 会改变派生出来的 cache/page 几何（k=3/5/7 分别对应 800/816/832），因此它属于 **engine 级 service profile**，而不是 per-request knob。
 
 在 126K 和 250K，`MAX_SEQS=1` 不是单纯的“低延迟偏好”。实测 service A/B 中，它在**所有测量维度上都优于 2**，包括总 makespan。
