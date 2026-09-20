@@ -6308,3 +6308,102 @@ reproducibility, concurrent-request draft isolation and immunity to unrelated gl
 traffic — **robustness/reproducibility, not distribution-correctness P0**. The patch is
 complete and will not be extended. **#51812 remains a clear P0** (wrong token's `a`/`b` gate
 into the GDN recurrent update).
+
+## 62. Production service profile settled (`MAX_SEQS=1`, 2-profile k policy)
+
+Full detail in `docs/production-service-profile.md`; methodology in `docs/benchmark-rules.md`.
+
+### 62.1 Long-context concurrency: `MAX_SEQS=1`
+
+Service-policy A/B, fresh engine per arm, ABBA, block 832 throughout, `Xid delta = 0`.
+
+| arm | makespan | useful agg | first-completion | slowest request | KV max |
+| --- | --- | --- | --- | --- | --- |
+| **MAX_SEQS=1** @126K | **215.8 s** | **4.75 tok/s** | **107.6 s** | **84.2 tok/s** | 0.231 |
+| MAX_SEQS=2 @126K | 219.8 s | 4.66 tok/s | 218.4 s | **4.4 tok/s** | 0.459 |
+| **MAX_SEQS=1** @250K | **561.9 s** | **1.82 tok/s** | **278.1 s** | **68.7 tok/s** | 0.411 |
+| MAX_SEQS=2 @250K | 589.8 s | 1.74 tok/s | 589.8 s | **1.7 tok/s** | **0.823** |
+
+`MAX_SEQS=2` is worse **on every axis at both contexts**, including the total makespan it was
+meant to improve (+1.8% / +5.0%). A single long-context request already saturates the GPU, so a
+second adds interference without throughput and only redistributes latency (one request starved
+to 1.7–4.4 tok/s) while consuming the KV margin.
+
+**Also settled: the prefill budget is not a lever.** 126K C2 at 996/2020/4068 scheduled tokens
+(block 832 throughout) gives ITL p50 **52.97 / 53.38 / 53.27 ms** — a 0.4% spread over a 4x
+range — with skew moving only 116 s → 105 s. Only TTFT responds, and it merely flips *which*
+request loses the prefill race. The interference is structural.
+
+### 62.2 k crossover at 48K; k=7 dropped
+
+| ctx | k=3 | k=5 | k=7 | winner | 2nd-best gap |
+| --- | --- | --- | --- | --- | --- |
+| 4K | 123.49 | **134.68** | 129.67 | **k=5** | −3.7% |
+| 32K | 134.64 | **147.02** | 137.62 | **k=5** | −6.4% |
+| **48K** | **91.68** | 91.57 | 88.58 | **k=3** | **−0.1%** (crossover) |
+| 65K | **100.05** | 90.64 | 94.56 | **k=3** | −5.5% |
+| 126K | 89.55 | 88.18 | **90.21** | k=7 | −0.7% (inside spread) |
+| 250K | **64.90** | 58.68 | 59.69 | **k=3** | −8.0% |
+
+**k=7 is dropped** — its only lead is 0.7% at 126K, inside the measured round spread.
+
+**Honest caveat:** by `ms/spec-iteration` (acceptance-insensitive) **k=3 wins at every**
+context; the k=5 short-context wins come entirely from higher acceptance (3.76 vs 3.08 at 32K).
+So the short-context choice is workload-dependent, and a `k=3` + `MAX_SEQS=1` single profile is
+the safe fallback, forfeiting only 8.3% at 4K.
+
+### 62.3 The profile table
+
+| profile | context range | k | MAX_SEQS | block | rationale |
+| --- | --- | --- | --- | --- | --- |
+| **short** | ≤ 32K | **5** | 4 (default) | 816 | measured winner at 4K (+3.7%) and 32K (+6.4%) |
+| **long** | ≥ 48K | **3** | **1** | 800 | ties at 48K, wins at 65K (+5.5%) and 250K (+8.0%); `MAX_SEQS=1` dominates |
+
+Two profiles suffice; a third is not justified.
+
+### 62.4 Capacity constraints
+
+| constraint | value |
+| --- | --- |
+| KV pool | ~1,149,000 tokens |
+| max **resident** sequences at 250K | **2** (`running_max = 2.0` with C=4, `waiting_capacity = 3`, KV 82%) |
+| 250K C4 as a 4-way batch | **not achievable** (steady window −602.8 s) |
+| 250K C2 steady decode window | **window-limited** (1.40 s) on unique prompts |
+
+### 62.5 Phase 4G register audit: FAIL (no kernel work opened)
+
+Compile-only `ptxas` measurement of structural variants:
+
+| rows | registers | spill |
+| --- | --- | --- |
+| 48 (production) | **252** | 0 |
+| 32 | 168 | 0 |
+| 16 | 128 | 16/8 B |
+
+Marginal cost is **superlinear** (2.5 regs/row from 16→32, 5.25/row from 32→48) — the signature
+of a kernel already at the register ceiling, and even the 16-row variant spills.
+
+**All levers are closed**: the 48 rows are all useful (`qmax` 8 × GQA 6, no padding); splitting
+rows across CTAs duplicates K/V traffic; re-loading Q per tile from global adds a memory pass;
+staging Q in 24 KB of shared memory is sound but lands at 162 KB of 164 KB and needs a
+hand-written CUDA kernel. This **explains** E33/E36 rather than repeating them.
+
+**Gate FAILS → no kernel code experiment opened.** Future verifier work needs a structural
+rewrite, and the whole-step ceiling for a 3% verifier win is only ~1.5% (verifier = 52.2% of the
+250K step).
+
+### 62.6 The defect class that recurred three times → permanent rules
+
+All three were ratios whose numerator and denominator covered different intervals:
+
+1. `max_i(end_i − first_i)` as the decode window → counted another request's **prefill** as
+   decode (~14x inflation);
+2. request-total tokens ÷ steady window → included tokens emitted **before** the window;
+3. counter delta ÷ full window → the delta spans only first-sample..last-sample, under-reporting
+   by 35% — which itself looked like "throughput collapsed" and started this investigation.
+
+`docs/benchmark-rules.md` now makes it binding: **state the numerator and denominator intervals,
+emit the ratio only when they match, otherwise report `null` or an explicit bounded range.**
+Plus the steady-state window conditions, the three kinds of waiting (scheduler budget vs KV
+residency vs true preemption, and the rule not to read the generic `capacity` label as KV OOM),
+the parsed-config rule, and the fail-fast/spread-gate requirement for drivers.
