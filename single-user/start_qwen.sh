@@ -405,10 +405,11 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
   [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
   # The CMP mixed-FP8 page-alignment patch promotes target attention and its
-  # aligned Mamba checkpoints to 896 tokens while the draft uses 448-token
-  # pages. Hash at their common boundary so all three groups can resume the
-  # same cached prefix.
-  [ "$CTX" = "cmp-mixed-fp8" ] && EXTRA_ARGS="--prefix-match-unit 448 ${EXTRA_ARGS}"
+  # aligned Mamba checkpoints to a common block while the draft keeps half of it
+  # (896/448 here; 832/416 with VISION=1 or another draft count -- the pages are
+  # derived, not fixed). With patches/mamba-align-block-size-prefix-cache.patch,
+  # vLLM hashes at the groups' GCD on its own, which is that common boundary, so
+  # no --prefix-match-unit is set: a fixed 448 refuses to start on an 832/416 layout.
   # DFlash2 only: prefix caching and a CAPTURED (FULL) verify step do not mix on
   # that path. It is the capture, not the drafter: eager is clean, and so is
   # PIECEWISE, which keeps the compiled graphs and leaves only the multi-query

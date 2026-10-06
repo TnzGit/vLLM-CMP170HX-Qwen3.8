@@ -7,7 +7,7 @@ CUDA graphs capture the workspace addresses.
 
 --- a/v1/attention/backends/flash_attn.py
 +++ b/v1/attention/backends/flash_attn.py
-@@ -1762,6 +1762,20 @@ def _spec_attn_qmax(group: int) -> int:
+@@ -1762,6 +1762,22 @@ def _spec_attn_qmax(group: int) -> int:
      return _SPEC_ATTN_QMAX
  
  
