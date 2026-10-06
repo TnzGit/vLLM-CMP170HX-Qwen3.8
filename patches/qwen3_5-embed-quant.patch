@@ -19,7 +19,7 @@ Written against vLLM 0.27.1. Reapply after upgrades.
 +            quant_config=self.quant_config,
 +            prefix=maybe_prefix(prefix, "embed_tokens"),
          )
-
+ 
          def get_layer(prefix: str):
 --- a/model_executor/models/qwen3_5_mtp.py
 +++ b/model_executor/models/qwen3_5_mtp.py
@@ -30,5 +30,5 @@ Written against vLLM 0.27.1. Reapply after upgrades.
 +            quant_config=vllm_config.quant_config,
 +            prefix=maybe_prefix(prefix, "embed_tokens"),
          )
-
+ 
          # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is

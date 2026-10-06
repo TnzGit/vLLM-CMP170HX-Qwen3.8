@@ -25,8 +25,8 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +++ b/v1/attention/backends/flash_attn.py
 @@ -1757,7 +1757,21 @@
      return _SPEC_ATTN_QMAX
-
-
+ 
+ 
 -def _spec_attn_run(impl, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, max_seqlen_q, k_scale_cache=None, v_scale_cache=None):
 +def _spec_attn_run(
 +    impl,
@@ -44,7 +44,7 @@ Written against the repository's vLLM 0.27.1 patch stack.
 +    static_v_scale=None,
 +):
      from vllm.v1.attention.ops.spec_decode_attn import SpecDecodeAttention
-
+ 
      key = (impl.num_heads, impl.head_size, q.device)
 @@ -1775,6 +1789,19 @@
              qmax=_spec_attn_qmax(impl.num_heads // impl.num_kv_heads),
@@ -72,8 +72,8 @@ Written against the repository's vLLM 0.27.1 patch stack.
 --- a/v1/attention/ops/spec_decode_attn.py
 +++ b/v1/attention/ops/spec_decode_attn.py
 @@ -53,10 +53,29 @@
-
-
+ 
+ 
  @triton.jit
 +def _e4m3fn_to_fp32(raw):
 +    """Decode NVIDIA E4M3FN bytes on SM80, where Triton cannot load fp8e4nv."""
@@ -138,7 +138,7 @@ Written against the repository's vLLM 0.27.1 patch stack.
          m_i = m_new
 @@ -204,13 +235,29 @@
          return block_m, qt, triton.cdiv(q_len, qt), 8 if block_m >= 128 else 4
-
+ 
      def run(self, q, key_cache, value_cache, out, cu_seqlens_q, seqused_k, block_table, scale,
 -            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None):
 +            num_reqs, max_query_len, k_scale_cache=None, v_scale_cache=None,

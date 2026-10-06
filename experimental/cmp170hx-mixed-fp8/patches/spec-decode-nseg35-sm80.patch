@@ -61,10 +61,9 @@ Apply after spec-decode-segments-sm80.patch.
 +            SEG_TILE=triton.next_power_of_2(self.nseg), num_warps=4,
          )
          return out
-
 --- a/v1/attention/backends/flash_attn.py
 +++ b/v1/attention/backends/flash_attn.py
-@@ -1773,8 +1773,8 @@ def _spec_attn_nseg() -> int:
+@@ -1773,7 +1773,7 @@ def _spec_attn_nseg() -> int:
          import os
  
          value = int(os.environ.get("VLLM_SPEC_DECODE_ATTN_SEGMENTS", "16"))

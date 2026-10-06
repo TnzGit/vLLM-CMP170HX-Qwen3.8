@@ -1,0 +1,25 @@
+# Apply order for patches/*.patch (one name per line). Alphabetical order is not enough:
+# draft-noise-independence-54282.patch builds on sampler-small-topk-fast-softmax.patch, and
+# mamba-align-block-size-prefix-cache.patch is written against the full stack.
+dflash2-backport.patch
+dflash2-lookup-drafting.patch
+dflash2-ngram-chains.patch
+gdn-51812-gate-index-select.patch
+hybrid-kv-groups-v2-cudagraph.patch
+hybrid-sw-block-promote.patch
+int4-kv-per-token-head.patch
+marlin-int8-layer-select.patch
+marlin-int8-negative-scales.patch
+marlin-repack-staged-sm80.patch
+offload-dflash-eagle-groups.patch
+qwen3_5-embed-quant.patch
+qwen3_5-mtp-draft-vocab.patch
+sampler-small-topk-fast-softmax.patch
+draft-noise-independence-54282.patch
+spec-decode-attn.patch
+spec-decode-int8-kv.patch
+speed-knobs-envs.patch
+vision-tower-cpu-offload.patch
+vllm-pr50021-gdn-spec-bounds.patch
+xgrammar-spec-terminated.patch
+mamba-align-block-size-prefix-cache.patch

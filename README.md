@@ -151,9 +151,9 @@ print(pathlib.Path(inspect.getfile(vllm)).resolve().parent)
 PY
 )
 
-for p in patches/*.patch; do
+for p in $(grep -v '^#' patches/series); do
     echo "== $p"
-    patch -p1 -d "$SP" < "$p"
+    patch -p1 -d "$SP" < "patches/$p" || break
 done
 ```
 

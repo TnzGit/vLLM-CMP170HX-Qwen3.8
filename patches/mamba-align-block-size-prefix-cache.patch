@@ -1,0 +1,52 @@
+Hybrid Mamba prefix caching with a smaller drafter page (backport of vLLM PR #55601, plus the matching scheduler check).
+
+After the KV cache layout is built, EngineCore lowers cache_config.block_size to the smallest prefix-cacheable
+group. With heterogeneous pages (patches/../heterogeneous-attn-pages-sm80.patch) a DFlash drafter's attention
+group can be smaller than the target/Mamba block -- on a CMP 170HX with vision enabled, 416 against 832. Two
+places then use the lowered value where they mean the Mamba checkpoint interval:
+
+1. GPUModelState.add_request seeds the align-mode Mamba state index as
+   (num_computed_tokens - 1) // cache_config.block_size, which on a prefix-cache hit indexes the Mamba block
+   table in the wrong units: CUDA "illegal memory access" in prepare_attn, or a corrupted resume that loops.
+   This is vLLM issue #55600 / PR #55601; the change here is the same.
+2. resolve_kv_cache_block_sizes compares each Mamba group with cache_config.block_size, sees 832 != 416 and
+   falls back to hashing at the scheduler block (832), which the 416 drafter group cannot divide:
+   "Each KV cache group's real block_size must be divisible by hash_block_size". In align mode the Mamba
+   group is compared with cache_config.mamba_block_size instead, so the hash unit is the groups' GCD (416).
+
+Written against the repository's vLLM 0.27.1 patch stack; apply after the normal patches.
+
+diff --git a/v1/core/kv_cache_utils.py b/v1/core/kv_cache_utils.py
+--- a/v1/core/kv_cache_utils.py
++++ b/v1/core/kv_cache_utils.py
+@@ -668,9 +668,13 @@
+     # Mamba groups with block_size != cache_config.block_size
+     # (mamba_cache_mode != "align") break divisibility; back off to the
+     # scheduler block size.
++    # In align mode Mamba checkpoints every mamba_block_size tokens; cache_config.block_size is the
++    # smallest KV group's block (it can be a drafter's smaller page), so compare against the former.
++    mamba_bs = (cache_config.mamba_block_size if cache_config.mamba_cache_mode == "align"
++                and cache_config.mamba_block_size else cache_config.block_size)
+     if any(
+         isinstance(g.kv_cache_spec, MambaSpec)
+-        and g.kv_cache_spec.block_size != cache_config.block_size
++        and g.kv_cache_spec.block_size != mamba_bs
+         for g in groups
+     ):
+         return scheduler_block_size, scheduler_block_size
+diff --git a/v1/worker/gpu/model_states/mamba_hybrid.py b/v1/worker/gpu/model_states/mamba_hybrid.py
+--- a/v1/worker/gpu/model_states/mamba_hybrid.py
++++ b/v1/worker/gpu/model_states/mamba_hybrid.py
+@@ -101,7 +101,11 @@
+         if self._align_mode:
+             # Seed the running state block from the resumed/prefilled position.
+             self._mamba_state_idx_gpu[req_index].fill_(
+-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
++                # Mamba states are checkpointed every mamba_block_size tokens. cache_config.block_size is
++                # lowered to the smallest KV group after the cache layout is built (a DFlash drafter's
++                # 416-token pages against Mamba's 832), so it must not index the state here.
++                (new_req_data.num_computed_tokens - 1)
++                // (self.cache_config.mamba_block_size or self.cache_config.block_size)
+             )
+ 
+     def _get_mamba_group_info(
